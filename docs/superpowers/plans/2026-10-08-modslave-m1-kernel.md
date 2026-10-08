@@ -87,6 +87,7 @@ QModMaster 连上能读到浮点值、写到只读点收到异常码 2。
 | Q | `_SINGLE = {BOOL, INT16, UINT16, REG16}` 手抄类型清单 | 由 `model.word_orders_allowed` 派生（“只允许 ABCD 的类型”），validate 里不维护第二份真相（同裁决 M）。`string` 显式排除：它也只允许 `ABCD`，但填别的是 error 不是 warning——单寄存器类型填字序只是没意义，string 填字序是语义分歧 | Task 5 |
 | R | 同 `(host, port)` 的两个通道留到启动第二阶段炸 bind（Windows 只回 10048，不带通道名，现场看不出是点表配置错） | 启动前一次报全：`code="port_duplicated"`，`where` 是后加入那个通道名，message 写明 `port 502 on host 0.0.0.0 already used by channel tcp-502`。不同 host 同 port 各自监听，**不算**冲突；非整数/越界 port 已被 `port` 那条拦下，不重复报；非字符串 host 不参与判定 | Task 5（本轮） |
 | S | 计划正文 Task 5 Step 1 用 `_p(), _p(name="q", address=1)` 断言 `overlap` | 笔误：紧邻不是重叠（`register_span("uint16") == 1`，事实 5「点表不需要把地址铺满」）。已改成双向钉住——0 与 0 判重叠、0 与 1 判合法 | Task 5 |
+| T | `validate` 对 `host` 零校验：空串/`None`/`[]` 都进不了任何判定，一路放到启动才炸 | `host` 必须是**非空 `str`**，否则一条 `code="host"` 的 error（`where` 是通道名，消息 `host must be a non-empty string, got ''`，脏值同样用 `brief()` 渲染）。**不做 IP 字面量语法校验**：`999.1.1.1` 这类留给 bind 阶段的 `OSError`——字符串 IP 合法性判断容易误杀主机名/IPv6 写法，而绑不上端口时错误已经足够明确，不在这里造第二套判定。脏 host 与脏 port 一样**不参与** `port_duplicated` 判定 | Task 5（本轮） |
 
 ---
 
@@ -117,6 +118,7 @@ modslave-sim/
 │       ├── raw_writer.py        # 直接读写寄存器列表（绕开 readonly）
 │       └── modbus_tcp.py        # pymodbus TCP server 封装 + 日志降噪
 └── tests/
+    ├── __init__.py              # Task 1 Step 5 建的包标记（空文件）
     ├── conftest.py              # 起停后端的事件循环线程夹具
     ├── test_model.py
     ├── test_codec_single.py
@@ -390,6 +392,8 @@ Expected: FAIL — `ModuleNotFoundError: modslave.project.model`
 
 类型用**字符串常量**而不是 Enum：它们要直接进出 CSV 和 project.json，字符串省掉一层转换，
 也避开"扩展枚举后旧 asset 字段丢值"那类坑。
+
+> **注意：本节代码是裁决前的快照，与仓库实际实现有差异（见上方「执行期已裁决的偏离」表）；以 `modslave/project/model.py` 为准，不要照抄本节。**
 
 ```python
 """点表数据模型。本文件不得 import pymodbus 或 PySide6。"""
@@ -710,6 +714,8 @@ Expected: FAIL — module missing
 置换只写一份 `_permute_words`，编码和解码共用它。四种字序都是对合（做两次回原值），
 所以共用即互逆；`test_roundtrip_*` 就是钉这一点的。
 
+> **注意：本节代码是裁决前的快照，与仓库实际实现有差异（见上方「执行期已裁决的偏离」表）；以 `modslave/codec/point_codec.py` 为准，不要照抄本节。**
+
 ```python
 """点位值 <-> 原始 reg16 数组。字序置换在这一层，pymodbus 只见到 reg16。"""
 
@@ -903,6 +909,8 @@ Expected: FAIL — string 分支抛 `string datatype is added in a later step`�
 64 位不需要新代码——`_permute_words` 对 4 个 chunk 同样成立（`DCBA` 反转 4 个 chunk 再各自
 反转字节，等价于 8 字节整体反转；`CDAB`/`BADC` 由 `word_orders_allowed` 挡掉）。
 
+> **注意：本节代码是裁决前的快照，与仓库实际实现有差异（见上方「执行期已裁决的偏离」表）；以 `modslave/codec/point_codec.py` 为准，不要照抄本节。**
+
 ```python
 def _encode_string(value) -> list[int]:
     text = value if isinstance(value, str) else str(value)
@@ -1082,6 +1090,8 @@ Run: `.venv/Scripts/python.exe -m pytest tests/test_validate.py`
 Expected: FAIL — module missing
 
 - [ ] **Step 3: Write validate.py**
+
+> **注意：本节代码是裁决前的快照，与仓库实际实现有差异（见上方「执行期已裁决的偏离」表）；以 `modslave/project/validate.py` 为准，不要照抄本节。**
 
 ```python
 """启动前校验：一次报全，不撞第一个就崩。本文件不得 import pymodbus。"""
@@ -1269,7 +1279,8 @@ def _wave_ranges(pt, loc, issues) -> None:
 - [ ] **Step 4: Run it, verify pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_validate.py`
-Expected: 36 passed
+Expected: 40 passed（计划原写 36，裁决 T 的 host 非空字符串规则补了 4 条：三个脏 host、
+正常 host、不判 IP 语法、脏 host 不进冲突判定）
 
 - [ ] **Step 5: Commit**
 
