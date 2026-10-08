@@ -64,6 +64,20 @@ QModMaster 连上能读到浮点值、写到只读点收到异常码 2。
 | 3 | 重叠检测统一按寄存器 | 位区按位、寄存器区按寄存器 | 事实 6 |
 | 4 | 地址重叠交给校验 | 校验照做，且**不建 id=0 兜底设备** | 事实 4 |
 
+## 执行期已裁决的偏离（评审后确定，评审者按此核对，不要再当跑偏报）
+
+| # | 偏离 | 定死的口径 | 出处 |
+|---|---|---|---|
+| A | `parse_value` 对 bool 的宽松白名单会静默返回 False | 未识别 token（含空串、`TURE`、`01`、`-1`）一律 `ValueError`；`bool` 只接受 `str` 或 Python `bool` | Task 2 |
+| B | `parse_value` 接受 int/float 并截断 | 数值类型只接受 `str`；收到 `int`/`float`/`None` 抛 `ValueError`，禁止静默截断（`project.json` 里手改成 `100.5` 要报错而不是变成 100） | Task 2 |
+| C | 浮点越界消息 | NaN 报 `rejects nan`；超上限报 `out of range, \|value\| must be <= {limit}`；整数分支照旧带 `[{lo}, {hi}]` | Task 2 |
+| D | `register_span`/`_encode_string` 的 string 分支 | `value` 必须是 `str`，非 ASCII 与内嵌 `\x00` 都抛领域 `ValueError`（不许裸抛 `UnicodeEncodeError`，否则 `validate` 的"一次报全"会变成 traceback） | Task 2/4 |
+| E | codec 自己那份 `_as_bool` | 删掉。bool 的编解码一律复用 `model.parse_value(BOOL, ...)`，不许有第二份白名单 | Task 3 |
+| F | 64 位 `DCBA` 的期望值 | `[0x0807, 0x0605, 0x0403, 0x0201]`（8 字节整体反转）。原计划测试写的 `[0x0708, ...]` 是字序反转、等同 CDAB，是笔误 | Task 4 |
+| G | `decode([], "bool")` 抛 IndexError | bool 分支也走寄存器数校验，抛 `ValueError`，消息与数值分支同句式 | Task 4 |
+| H | `WAVEFORMS` 与 `WAVE_SPEC` 两份真相 | `validate.py` 导入期检查两者键集合一致，漂移即 `RuntimeError` | Task 5 |
+| I | `_overlap` 的 string 分支 | 统一走带 `try` 的 `register_span`，算不出跨度就跳过（`initial` 已经报过错） | Task 5 |
+
 ---
 
 ## 文件结构
@@ -807,7 +821,9 @@ def test_uint64_abcd_is_plain_big_endian():
     assert encode(V64, "uint64", "ABCD") == [0x0102, 0x0304, 0x0506, 0x0708]
 
 def test_uint64_dcba_is_full_byte_reverse():
-    assert encode(V64, "uint64", "DCBA") == [0x0708, 0x0506, 0x0304, 0x0102]
+    """DCBA = 8 字节整体反转后切 reg，不是字序反转（那等同 CDAB）。
+    实现只走 _permute_words，64 位没有特殊分支。"""
+    assert encode(V64, "uint64", "DCBA") == [0x0807, 0x0605, 0x0403, 0x0201]
 
 @pytest.mark.parametrize("order", ["ABCD", "DCBA"])
 def test_uint64_roundtrip(order):
