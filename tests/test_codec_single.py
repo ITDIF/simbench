@@ -2,6 +2,7 @@
 import pytest
 from modslave.codec import point_codec
 from modslave.codec.point_codec import decode, encode
+from modslave.project import model
 from modslave.project.model import BOOL, DATATYPES, STRING
 
 @pytest.mark.parametrize("dt,value,regs", [
@@ -142,3 +143,9 @@ def test_short_user_values_are_kept_whole(call, expected):
     with pytest.raises(ValueError) as ok:
         call()
     assert str(ok.value) == expected
+
+
+def test_codec_borrows_the_model_brief_instead_of_keeping_a_copy():
+    """裁决 N 只搬位置：codec 里再留一份 _brief 就是第二份真相，两边口径会漂移。"""
+    assert not hasattr(point_codec, "_brief")
+    assert point_codec.brief is model.brief

@@ -6,7 +6,7 @@ import struct
 
 from ..project.model import (
     BOOL, DATATYPES, FLOAT32, FLOAT64, STRING, WORD_ABCD, WORD_ORDERS,
-    parse_value, register_span, struct_format, word_orders_allowed,
+    brief, parse_value, register_span, struct_format, word_orders_allowed,
 )
 
 # 类型清单的唯一真相在 model.DATATYPES：手抄一份漂移过一次就会变成 codec 反过来报
@@ -15,20 +15,9 @@ from ..project.model import (
 _NUMERIC = tuple(d for d in DATATYPES if d not in (BOOL, STRING))
 _FLOATS = (FLOAT32, FLOAT64)
 
-# 用户原值进错误消息要限长：Task 5 一次报全，一个 401 位的脏值能把整屏刷掉。
-_BRIEF_LIMIT = 80
-
-
-def _brief(value) -> str:
-    """原值 repr 的截断形式，只砍尾巴：超过 _BRIEF_LIMIT 个字符就取前段并补 `...`。
-
-    判定口径不受影响——异常类型与消息前缀由调用方保持不变，短的（≤80）原样输出，
-    现场排查主站写来的脏值靠的就是这些原值。
-    """
-    text = repr(value)
-    if len(text) <= _BRIEF_LIMIT:
-        return text
-    return text[:_BRIEF_LIMIT] + "..."
+# 用户原值进错误消息要限长（Task 5 一次报全，一个 401 位的脏值能把整屏刷掉）。
+# 截断函数住在 model.brief：codec 与 model 抛的消息混在同一份校验清单里打印，
+# 两边必须同一个口径，否则改了一处另一处又会开始刷屏。
 
 
 def encode(value, datatype: str, word_order: str = WORD_ABCD) -> list[int]:
@@ -80,7 +69,7 @@ def _check_registers(registers, datatype: str) -> None:
             not isinstance(r, int) or isinstance(r, bool) or not 0 <= r <= 0xFFFF
             for r in registers):
         raise ValueError(
-            f"{datatype} registers must be ints in 0..65535, got {_brief(registers)}")
+            f"{datatype} registers must be ints in 0..65535, got {brief(registers)}")
 
 
 def _check_register_count(datatype: str, registers: list[int]) -> None:
@@ -95,7 +84,7 @@ def _coerce(value, datatype: str):
     if isinstance(value, bool):
         # bool 是 int 的子类：不挡掉，float 分支会把 True 静默编成 1.0（凭空造数），
         # 而 int 分支报的是 got 'True' 这种二次加工过的值——两条路径口径必须先统一成拒
-        raise ValueError(f"{datatype} needs a number, got bool: {_brief(value)}")
+        raise ValueError(f"{datatype} needs a number, got bool: {brief(value)}")
     if datatype in _FLOATS:
         try:
             text = value if isinstance(value, str) else repr(float(value))
@@ -104,7 +93,7 @@ def _coerce(value, datatype: str):
             # 同一个脏值两条路径口径必须一致，否则 validate 的“一次报全”会被打成崩
             raise ValueError(
                 f"{datatype} needs a real number, "
-                f"got {type(value).__name__}: {_brief(value)}") from exc
+                f"got {type(value).__name__}: {brief(value)}") from exc
         return parse_value(datatype, text)
     text = value if isinstance(value, str) else str(value)
     return parse_value(datatype, text)
@@ -113,14 +102,14 @@ def _coerce(value, datatype: str):
 def _encode_string(value) -> list[int]:
     if not isinstance(value, str):
         raise ValueError(
-            f"string needs a str value, got {type(value).__name__}: {_brief(value)}")
+            f"string needs a str value, got {type(value).__name__}: {brief(value)}")
     text = value
     if "\x00" in text:
         raise ValueError("string must not contain nul: it would be truncated on read")
     try:
         raw = text.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise ValueError(f"string must be ascii: {_brief(text)}") from exc
+        raise ValueError(f"string must be ascii: {brief(text)}") from exc
     if len(raw) % 2:
         raw += b"\x00"
     if not raw:                       # 空串也占一个寄存器，与 register_span 一致
@@ -142,7 +131,7 @@ def _decode_string(registers: list[int]) -> str:
     except UnicodeDecodeError as exc:
         # 主站写 GBK/UTF-8 中文是真路径：errors="replace" 会把脏数据读成看着合法的
         # 乱码串，裸 UnicodeDecodeError 又不带 datatype，只能报领域 ValueError
-        raise ValueError(f"string is not ascii, got bytes {_brief(raw)}") from exc
+        raise ValueError(f"string is not ascii, got bytes {brief(raw)}") from exc
 
 
 def _permute_words(chunks: list[bytes], word_order: str) -> list[bytes]:

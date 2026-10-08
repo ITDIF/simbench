@@ -4,8 +4,8 @@ import struct
 import pytest
 from modslave.project.model import (
     BOOL, DATATYPES, FLOAT32, FLOAT64, INT16, INT64, REG16, STRING, UINT16,
-    UINT64, Device, Point, Project, TcpChannel, area_is_bit, parse_value,
-    register_span, struct_format, word_orders_allowed,
+    UINT64, Device, Point, Project, TcpChannel, area_is_bit, brief,
+    parse_value, register_span, struct_format, word_orders_allowed,
 )
 
 def test_areas_and_bit_areas():
@@ -180,3 +180,59 @@ def test_project_helpers():
 
 def test_datatypes_are_plain_strings():
     assert isinstance(DATATYPES, tuple) and "bool" in DATATYPES
+
+
+# ---- 错误消息里的用户原值要限长（裁决 N：Task 5 一次报全不许被一个脏值刷屏）----
+
+_LIMIT = 80
+
+
+def test_brief_keeps_short_values_whole():
+    """现场排查靠的就是原值：短值一个字不许改，也不许挂省略号。"""
+    assert brief("Fan1") == "'Fan1'"
+    assert brief(42) == "42"
+    assert brief(True) == "True"
+    # 上限比的是 repr 的长度（str 的引号也算），repr 恰好 80 字符时不裁
+    assert brief("x" * 78) == "'" + "x" * 78 + "'"
+    assert "..." not in brief("x" * 78)
+
+
+def test_brief_truncates_only_the_tail():
+    got = brief("x" * 300)
+    assert got.startswith("'xxx") and got.endswith("...")
+    assert len(got) == _LIMIT + len("...")
+    assert brief("x" * 79).endswith("...")                      # repr 81 字符起裁
+    assert brief(123456789, limit=3) == "123..."                # 上限可调，判定口径不变
+
+
+@pytest.mark.parametrize("call,prefix", [
+    (lambda: parse_value(INT16, "1" + "0" * 200), "int16 out of range [-32768, 32767]: "),
+    (lambda: parse_value(INT16, "x" * 300), "int16 needs an integer, got "),
+    (lambda: parse_value(BOOL, "y" * 300),
+     "bool needs one of 1/0/true/false/yes/no/on/off, got "),
+    (lambda: parse_value(FLOAT64, 10 ** 400), "float64 needs a string value, got int: "),
+    (lambda: parse_value(FLOAT32, "1" + "9" * 200),
+     "float32 out of range, |value| must be <= 3.4028234663852886e+38: "),
+    (lambda: parse_value(FLOAT32, "nan" * 60), "float32 needs a number, got "),
+    (lambda: register_span(STRING, "卫" * 300), "string must be ascii: "),
+    (lambda: register_span(STRING, 10 ** 400), "string needs a str value, got int: "),
+])
+def test_model_error_messages_bound_the_user_value(call, prefix):
+    """model 自己抛的那几条与 codec 同一个截断口径，异常类型与消息前缀都不许变。"""
+    with pytest.raises(ValueError) as ok:
+        call()
+    assert not isinstance(ok.value, UnicodeEncodeError)
+    msg = str(ok.value)
+    assert msg.startswith(prefix)
+    assert msg.endswith("...")
+    assert len(msg) <= len(prefix) + _LIMIT + len("...")
+
+
+def test_fifty_digit_value_is_still_printed_whole():
+    """只砍超过 80 字符的尾巴：51 位的脏值本来就放得下，不能被省略号吃掉。"""
+    with pytest.raises(ValueError) as ok:
+        parse_value(INT16, "1" + "0" * 50)
+    msg = str(ok.value)
+    assert msg.startswith("int16 out of range [-32768, 32767]: ")
+    assert len(msg) <= len("int16 out of range [-32768, 32767]: ") + _LIMIT
+    assert "..." not in msg

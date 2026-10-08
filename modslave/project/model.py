@@ -39,6 +39,23 @@ _FLOAT_LIMIT = {FLOAT32: 3.4028234663852886e38, FLOAT64: 1.7976931348623157e308}
 _BOOL_TRUE: set[str] = {"1", "true", "yes", "y", "on"}
 _BOOL_FALSE: set[str] = {"0", "false", "no", "n", "off"}
 
+# 用户原值进错误消息要限长：401 位的脏值原样打出来能把整屏刷掉。
+_BRIEF_LIMIT = 80
+
+
+def brief(value, limit: int = _BRIEF_LIMIT) -> str:
+    """原值 repr 的截断形式，只砍尾巴：超过 `limit` 个字符取前段并补 `...`。
+
+    放在 model 层是因为截断口径只有一个：codec 与 model 自己抛的消息都会被
+    validate.py 一次收集起来打印（Task 5），任何一条不带限长的原值都能把真正的
+    错误挤出屏幕。判定口径不受影响——异常类型与消息前缀由调用方保持不变；
+    短的（≤limit）原样输出，现场排查主站写来的脏值靠的就是这些原值。
+    """
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
 
 def area_is_bit(area: str) -> bool:
     """co/di 是位区：一个点位 = 一个线圈/离散输入。"""
@@ -54,7 +71,7 @@ def _ascii_bytes(value: str) -> bytes:
     try:
         return value.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise ValueError(f"string must be ascii: {value!r}") from exc
+        raise ValueError(f"string must be ascii: {brief(value)}") from exc
 
 
 def register_span(datatype: str, value: str = "0") -> int:
@@ -63,7 +80,7 @@ def register_span(datatype: str, value: str = "0") -> int:
     if datatype == STRING:
         if not isinstance(value, str):
             raise ValueError(
-                f"string needs a str value, got {type(value).__name__}: {value!r}")
+                f"string needs a str value, got {type(value).__name__}: {brief(value)}")
         return max(1, -(-len(_ascii_bytes(value)) // 2))
     if datatype not in _REG_COUNT:
         raise ValueError(f"unknown datatype {datatype!r}")
@@ -96,7 +113,7 @@ def parse_value(datatype: str, text: str):
         return text
     if not isinstance(text, str):
         raise ValueError(
-            f"{datatype} needs a string value, got {type(text).__name__}: {text!r}")
+            f"{datatype} needs a string value, got {type(text).__name__}: {brief(text)}")
     if datatype == BOOL:
         key = text.strip().lower()
         if key in _BOOL_TRUE:
@@ -104,7 +121,7 @@ def parse_value(datatype: str, text: str):
         if key in _BOOL_FALSE:
             return False
         raise ValueError(
-            f"bool needs one of 1/0/true/false/yes/no/on/off, got {text!r}")
+            f"bool needs one of 1/0/true/false/yes/no/on/off, got {brief(text)}")
     if datatype == STRING:
         _ascii_bytes(text)                        # 只为校验，口径与 register_span 一致
         return text
@@ -113,21 +130,21 @@ def parse_value(datatype: str, text: str):
         try:
             num = float(text)
         except ValueError:
-            raise ValueError(f"{datatype} needs a number, got {text!r}") from None
+            raise ValueError(f"{datatype} needs a number, got {brief(text)}") from None
         if num != num:
-            raise ValueError(f"{datatype} rejects nan: {text!r}")
+            raise ValueError(f"{datatype} rejects nan: {brief(text)}")
         limit = _FLOAT_LIMIT[datatype]
         if abs(num) > limit:                      # inf 溢出后自然落到这条
             raise ValueError(
-                f"{datatype} out of range, |value| must be <= {limit}: {text!r}")
+                f"{datatype} out of range, |value| must be <= {limit}: {brief(text)}")
         return num
     try:
         num = int(text)
     except ValueError:
-        raise ValueError(f"{datatype} needs an integer, got {text!r}") from None
+        raise ValueError(f"{datatype} needs an integer, got {brief(text)}") from None
     lo, hi = _INT_BOUNDS[datatype]
     if not lo <= num <= hi:
-        raise ValueError(f"{datatype} out of range [{lo}, {hi}]: {text!r}")
+        raise ValueError(f"{datatype} out of range [{lo}, {hi}]: {brief(text)}")
     return num
 
 
