@@ -63,10 +63,11 @@ def area_is_bit(area: str) -> bool:
 
 
 def _ascii_bytes(value: str) -> bytes:
-    """string 初值的编码口径：非 ascii 抛 ValueError，别让 UnicodeEncodeError 逃出去。
+    """string 初值的编码口径：非 ascii 抛领域 ValueError，不外泄 UnicodeEncodeError。
 
-    validate.py 算重叠那段没有 try，中文初值必须是一个能被收集成校验错误的
-    ValueError，而不是一路 traceback 到启动命令。
+    codec 与 validate 都按 ValueError 收集（validate 算跨度那段有 try，裁决 I），消息会被
+    原样列进“一次报全”的清单：换成领域错误才带得上 `string must be ascii` 这个能读懂的
+    前缀（裁决 D），底层那句 'ascii' codec can't encode characters 会被当成模拟器的 bug。
     """
     try:
         return value.encode("ascii")
