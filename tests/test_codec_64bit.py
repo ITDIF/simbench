@@ -42,6 +42,15 @@ def test_64bit_needs_four_registers():
     with pytest.raises(ValueError, match="needs 4 registers"):
         decode([1, 2], "uint64", "ABCD")
 
+def test_word_order_error_is_reported_before_register_count():
+    """入口先查字序更贴近用户填错的顺序；长度检查仍在字序之后、句式不变。"""
+    with pytest.raises(ValueError, match="int64 only supports"):
+        decode([1], "int64", "CDAB")
+    with pytest.raises(ValueError, match="uint64 only supports"):
+        decode([1, 2], "uint64", "BADC")
+    with pytest.raises(ValueError, match="needs 4 registers"):
+        decode([1], "int64", "ABCD")
+
 
 # ---- string ----
 
@@ -69,10 +78,35 @@ def test_string_rejects_embedded_nul():
     with pytest.raises(ValueError, match="nul"):
         encode("a\x00b", "string")
 
+
+def test_decode_empty_registers_for_string_is_error():
+    """空寄存器是没读到数据，不是空串：静默返回 '' 会伪装成一个合法的铭牌。"""
+    with pytest.raises(ValueError, match=r"string needs at least 1 registers, got 0"):
+        decode([], "string")
+
+
+@pytest.mark.parametrize("regs", [[0x4142], [0x4142, 0x0000], [0x4142, 0x0000, 0x0000]])
+def test_string_trailing_zero_padding_is_eaten(regs):
+    """定长区补零是行业惯例：尾部 \x00 被吃掉，切片长度由调用方负责（不是 bug）。"""
+    assert decode(regs, "string") == "AB"
+
 def test_string_encode_rejects_non_string_value():
     """与 register_span/parse_value 同一口径：非 str 不许 str() 成 "123" 静默编码。"""
     with pytest.raises(ValueError, match=r"string needs a str value, got int: 123"):
         encode(123, "string")
+
+
+def test_decode_string_wraps_unicode_error_in_datatype_message():
+    """平台上来的真路径：主站 FC16 往“铭牌”寄存器写 GBK/UTF-8 中文，读回必须报领域错。
+
+    裸 UnicodeDecodeError 消息里既没有 datatype 也没有点位，Task 5 的“一次报全”会
+    变成 traceback；errors="replace" 则是静默给错值，两条都不许。
+    """
+    for regs in ([0xE465], [0x4E2D, 0x6587], [0xD6D0]):
+        with pytest.raises(ValueError, match="string is not ascii, got bytes") as ok:
+            decode(regs, "string")
+        assert isinstance(ok.value.__cause__, UnicodeDecodeError)
+        assert "string" in str(ok.value)
 
 
 # ---- bool ----

@@ -51,3 +51,36 @@ def test_decode_checks_register_count():
 def test_unknown_datatype():
     with pytest.raises(ValueError, match="wchar"):
         encode(1, "wchar", "ABCD")
+
+
+# ---- 浮点分支不许漏底层异常（Task 5 的“一次报全”只收 ValueError）----
+
+@pytest.mark.parametrize("bad", [None, [], object(), {}])
+def test_float_encode_wraps_type_error(bad):
+    """encode(None,'int16') 早就抛 ValueError，同一个 None 走浮点路径不许变 traceback。"""
+    with pytest.raises(ValueError, match=r"float32 needs a real number, got"):
+        encode(bad, "float32", "ABCD")
+
+
+def test_float_encode_wraps_overflow_error():
+    with pytest.raises(ValueError, match=r"float32 needs a real number, got int"):
+        encode(10 ** 400, "float32", "ABCD")
+
+
+def test_float_encode_keeps_the_underlying_exception_as_cause():
+    """包成领域错但不能把现场信息丢了：__cause__ 必须还是那个底层异常。"""
+    with pytest.raises(ValueError) as ok:
+        encode(None, "float32", "ABCD")
+    assert isinstance(ok.value.__cause__, TypeError)
+    with pytest.raises(ValueError) as ok:
+        encode(10 ** 400, "float64", "ABCD")
+    assert isinstance(ok.value.__cause__, OverflowError)
+
+
+def test_bool_is_not_silently_encoded_as_one_point_zero():
+    """True 走 float32 曾经是 [0x3F80, 0x0000]（1.0）：静默造数，必须和 int16 一样拒。"""
+    for dt in ("int16", "float32", "float64"):
+        with pytest.raises(ValueError, match=f"{dt} needs a number, got bool: True"):
+            encode(True, dt, "ABCD")
+    with pytest.raises(ValueError, match="float32 needs a number, got bool"):
+        encode(True, "float32", "CDAB")
