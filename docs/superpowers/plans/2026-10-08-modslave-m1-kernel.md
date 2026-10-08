@@ -182,10 +182,13 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "chore: 建 ve
 
 ```python
 # tests/test_model.py
+import struct
+
 import pytest
 from modslave.project.model import (
-    DATATYPES, FLOAT32, INT16, STRING, UINT64, Device, Point, Project, TcpChannel,
-    area_is_bit, register_span, word_orders_allowed,
+    BOOL, DATATYPES, FLOAT32, FLOAT64, INT16, INT64, REG16, STRING, UINT16,
+    UINT64, Device, Point, Project, TcpChannel, area_is_bit, parse_value,
+    register_span, struct_format, word_orders_allowed,
 )
 
 def test_areas_and_bit_areas():
@@ -198,28 +201,146 @@ def test_register_span():
     assert register_span(UINT64) == 4
 
 def test_string_span_counts_pairs_rounded_up():
-    assert register_span(STRING, "abc") == 2      # 3 字节补到 4
-    assert register_span(STRING, "ab") == 1
     assert register_span(STRING, "") == 1         # 空串也至少占一个寄存器
+    assert register_span(STRING, "a") == 1
+    assert register_span(STRING, "ab") == 1
+    assert register_span(STRING, "abc") == 2      # 3 字节补到 4
+    assert register_span(STRING, "aaaaa") == 3    # 5 字节补到 6
 
 def test_word_orders_allowed_by_width():
     assert word_orders_allowed(FLOAT32) == ("ABCD", "CDAB", "BADC", "DCBA")
     assert word_orders_allowed(UINT64) == ("ABCD", "DCBA")
+    assert word_orders_allowed(INT64) == ("ABCD", "DCBA")
+    assert word_orders_allowed(FLOAT64) == ("ABCD", "DCBA")
     assert word_orders_allowed(INT16) == ("ABCD",)
     assert word_orders_allowed(STRING) == ("ABCD",)
+
+def test_struct_format_is_big_endian():
+    assert struct_format(INT16) == ">h"
+    assert struct_format(UINT16) == ">H"
+    assert struct_format(REG16) == ">H"
+    assert struct_format(FLOAT32) == ">f"
+    assert struct_format(FLOAT64) == ">d"
+    with pytest.raises(ValueError):               # bool 没有 struct 码
+        struct_format(BOOL)
 
 def test_unknown_datatype_rejected():
     with pytest.raises(ValueError):
         register_span("wchar")
+    with pytest.raises(ValueError):
+        struct_format("wchar")
+
+def test_bool_parses_explicit_whitelists():
+    for text in ("1", "true", "yes", "y", "on"):
+        assert parse_value(BOOL, text) is True
+    for text in ("0", "false", "no", "n", "off"):
+        assert parse_value(BOOL, text) is False
+    assert parse_value(BOOL, "TRUE") is True      # 大小写与空格吃掉
+    assert parse_value(BOOL, " No ") is False
+
+def test_bool_rejects_anything_outside_whitelists():
+    # 拼错/多字符/空值一律报错，不许当成 False（静默错值会被当成平台 bug）
+    for text in ("TURE", "01", "-1", "maybe", "", "   ", "2", "oneline"):
+        with pytest.raises(ValueError):
+            parse_value(BOOL, text)
+
+def test_bool_accepts_python_bool_but_not_int():
+    assert parse_value(BOOL, True) is True
+    assert parse_value(BOOL, False) is False
+    for value in (0, 1, None):
+        with pytest.raises(ValueError):
+            parse_value(BOOL, value)
+
+def test_numeric_types_reject_non_string_input():
+    # 以前 parse_value('int16', 42.9) 截断成 42、parse_value('string', 123) 变成 '123'
+    for datatype, value in ((INT16, 42.9), (INT16, 42), (UINT64, 1),
+                            (FLOAT32, 1.5), (STRING, 123), (REG16, None)):
+        with pytest.raises(ValueError):
+            parse_value(datatype, value)
+    with pytest.raises(ValueError, match="needs a string value"):
+        parse_value(INT16, 42.9)
+    assert parse_value(INT16, "42") == 42         # 字符串照常工作
+
+def test_float_parses_normal_values():
+    assert parse_value(FLOAT32, "12.5") == 12.5
+    assert parse_value(FLOAT64, "-2.25") == -2.25
+
+def test_float_rejects_nan_with_nan_message():
+    for datatype in (FLOAT32, FLOAT64):
+        with pytest.raises(ValueError) as exc:
+            parse_value(datatype, "nan")
+        # 填的是 nan 才能说 nan；不能把溢出的 inf 也混进这条消息
+        assert str(exc.value) == f"{datatype} rejects nan: 'nan'"
+
+def test_float_out_of_range_message_shows_the_limit():
+    # 1e309 不是 nan/inf 的拼写问题，是 float64 溢出，消息必须说越界并给上限
+    with pytest.raises(ValueError) as exc:
+        parse_value(FLOAT64, "1e309")
+    assert str(exc.value).startswith(
+        "float64 out of range, |value| must be <= 1.7976931348623157e+308:")
+    with pytest.raises(ValueError) as exc:
+        parse_value(FLOAT32, "3.5e38")
+    assert str(exc.value).startswith(
+        "float32 out of range, |value| must be <= 3.4028234663852886e+38:")
+    with pytest.raises(ValueError, match="out of range"):
+        parse_value(FLOAT32, "inf")               # inf 自然落在越界这条
+
+def test_float32_exact_max_still_packable():
+    value = parse_value(FLOAT32, "3.4028234663852886e38")
+    assert struct.pack(struct_format(FLOAT32), value) != b""
+
+def test_int_out_of_range_message_shows_bounds():
+    with pytest.raises(ValueError, match=r"\[-32768, 32767\]"):
+        parse_value(INT16, "32768")
+
+def test_string_requires_ascii():
+    assert parse_value(STRING, "Fan1") == "Fan1"
+    with pytest.raises(ValueError) as exc:
+        parse_value(STRING, "风机")
+    assert str(exc.value) == "string must be ascii: '风机'"
+    # span 在算重叠前先编码长度，中文初值不许抛裸 UnicodeEncodeError
+    # （UnicodeEncodeError 是 ValueError 的子类，所以必须显式排除它）
+    with pytest.raises(ValueError) as exc:
+        register_span(STRING, "风机")
+    assert not isinstance(exc.value, UnicodeEncodeError)
+    assert str(exc.value) == "string must be ascii: '风机'"
 
 def test_point_defaults():
     p = Point(name="x", area="hr", address=0, datatype=INT16)
     assert p.initial == "0" and p.word_order == "ABCD"
     assert p.waveform == "const" and p.readonly is False and p.row is None
+    assert p.wave_param == {}
+    # default_factory 唯一真正在防的坑：两个实例不能共享同一个 dict
+    q = Point(name="y", area="hr", address=1, datatype=INT16)
+    p.wave_param["amplitude"] = "10"
+    assert q.wave_param == {}
 
 def test_point_span_follows_datatype_and_area():
-    assert Point("a", "hr", 0, FLOAT32).span == 2
+    # 位区固定 1：co 上放 FLOAT32（寄存器区是 2）才能证明走的是 area 分支
     assert Point("a", "co", 0, "bool").span == 1
+    assert Point("a", "di", 0, FLOAT32).span == 1
+    # 寄存器区按类型
+    assert Point("a", "hr", 0, "bool").span == 1
+    assert Point("a", "hr", 0, FLOAT32).span == 2
+    assert Point("a", "hr", 0, UINT64).span == 4
+
+def test_typed_initial_returns_native_values():
+    assert Point("a", "hr", 0, INT16, "42").typed_initial() == 42
+    assert Point("a", "hr", 0, FLOAT32, "12.5").typed_initial() == 12.5
+    assert Point("a", "hr", 0, STRING, "Fan1").typed_initial() == "Fan1"
+    assert Point("a", "co", 0, "bool", "on").typed_initial() is True
+    assert Point("a", "co", 0, "bool").typed_initial() is False   # 默认 initial="0"
+
+def test_typed_initial_raises_instead_of_guessing():
+    with pytest.raises(ValueError):
+        Point("a", "co", 0, "bool", "TURE").typed_initial()
+    with pytest.raises(ValueError):
+        Point("a", "hr", 0, FLOAT32, "3.5e38").typed_initial()
+    with pytest.raises(ValueError):
+        Point("a", "hr", 0, INT16, "42.9").typed_initial()
+    with pytest.raises(ValueError) as exc:
+        Point("a", "hr", 0, STRING, "风机").span
+    assert not isinstance(exc.value, UnicodeEncodeError)
 
 def test_project_helpers():
     pt = Point("a", "hr", 0, INT16)
@@ -282,6 +403,10 @@ _INT_BOUNDS: dict[str, tuple[int, int]] = {
     INT64: (-2**63, 2**63 - 1), UINT64: (0, 2**64 - 1),
 }
 _FLOAT_LIMIT = {FLOAT32: 3.4028234663852886e38, FLOAT64: 1.7976931348623157e308}
+# bool 初值只认白名单里的写法，其余（含空串）一律 ValueError：默默当 False 的错值
+# 会被当成平台 bug 去调，宁可启动时报错也不许猜
+_BOOL_TRUE: set[str] = {"1", "true", "yes", "y", "on"}
+_BOOL_FALSE: set[str] = {"0", "false", "no", "n", "off"}
 
 
 def area_is_bit(area: str) -> bool:
@@ -289,12 +414,24 @@ def area_is_bit(area: str) -> bool:
     return area in BIT_AREAS
 
 
+def _ascii_bytes(value: str) -> bytes:
+    """string 初值的编码口径：非 ascii 抛 ValueError，别让 UnicodeEncodeError 逃出去。
+
+    validate.py 算重叠那段没有 try，中文初值必须是一个能被收集成校验错误的
+    ValueError，而不是一路 traceback 到启动命令。
+    """
+    try:
+        return value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"string must be ascii: {value!r}") from exc
+
+
 def register_span(datatype: str, value: str = "0") -> int:
     if datatype == BOOL:
         return 1
     if datatype == STRING:
-        return max(1, -(-len(value.encode("ascii", errors="strict")) // 2))
-    if datatype not in _STRUCT:
+        return max(1, -(-len(_ascii_bytes(value)) // 2))
+    if datatype not in _REG_COUNT:
         raise ValueError(f"unknown datatype {datatype!r}")
     return _REG_COUNT[datatype]
 
@@ -315,31 +452,44 @@ def word_orders_allowed(datatype: str) -> tuple[str, ...]:
 
 
 def parse_value(datatype: str, text: str):
-    """字符串 -> 原生 Python 值；类型不对或越界抛 ValueError，消息里带类型名。"""
+    """字符串 -> 原生 Python 值；类型不对或越界抛 ValueError，消息里带类型名。
+
+    只收字符串（BOOL 额外允许直接传 Python bool）：CSV 和 project.json 里的初值一律是
+    字符串，收到 int/float/None 说明调用方传错了类型；截断或 str() 出来的值看着合法，
+    静默错值会被当成平台 bug 去调。未知与越界同样报错，不替用户猜。
+    """
+    if datatype == BOOL and isinstance(text, bool):
+        return text
+    if not isinstance(text, str):
+        raise ValueError(
+            f"{datatype} needs a string value, got {type(text).__name__}: {text!r}")
     if datatype == BOOL:
-        if isinstance(text, bool):
-            return text
-        return str(text).strip().lower() in {"1", "true", "yes", "on"}
+        key = text.strip().lower()
+        if key in _BOOL_TRUE:
+            return True
+        if key in _BOOL_FALSE:
+            return False
+        raise ValueError(
+            f"bool needs one of 1/0/true/false/yes/no/on/off, got {text!r}")
     if datatype == STRING:
-        try:
-            str(text).encode("ascii")
-        except UnicodeEncodeError as exc:
-            raise ValueError(f"string must be ascii: {text!r}") from exc
-        return str(text)
+        _ascii_bytes(text)                        # 只为校验，口径与 register_span 一致
+        return text
     fmt = struct_format(datatype)
     if fmt.endswith(("f", "d")):
         try:
             num = float(text)
-        except (TypeError, ValueError):
+        except ValueError:
             raise ValueError(f"{datatype} needs a number, got {text!r}") from None
-        if num != num or num in (float("inf"), float("-inf")):
-            raise ValueError(f"{datatype} rejects nan/inf: {text!r}")
-        if abs(num) > _FLOAT_LIMIT[datatype]:
-            raise ValueError(f"{datatype} out of range: {text!r}")
+        if num != num:
+            raise ValueError(f"{datatype} rejects nan: {text!r}")
+        limit = _FLOAT_LIMIT[datatype]
+        if abs(num) > limit:                      # inf 溢出后自然落到这条
+            raise ValueError(
+                f"{datatype} out of range, |value| must be <= {limit}: {text!r}")
         return num
     try:
         num = int(text)
-    except (TypeError, ValueError):
+    except ValueError:
         raise ValueError(f"{datatype} needs an integer, got {text!r}") from None
     lo, hi = _INT_BOUNDS[datatype]
     if not lo <= num <= hi:
