@@ -555,7 +555,7 @@ class Project:
 - [ ] **Step 4: Run it, verify it passes**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_model.py`
-Expected: 9 passed
+Expected: 22 passed
 
 - [ ] **Step 5: Commit**
 
@@ -705,7 +705,7 @@ _FLOATS = (FLOAT32, FLOAT64)
 def encode(value, datatype: str, word_order: str = WORD_ABCD) -> list[int]:
     """原生值 -> reg16 列表。位区（bool）走独立路径，不参与字序。"""
     if datatype == BOOL:
-        return [1 if _as_bool(value) else 0]
+        return [1 if parse_value(BOOL, value) else 0]
     if datatype == STRING:
         raise ValueError("string datatype is added in a later step")
     if datatype not in _NUMERIC:
@@ -728,12 +728,6 @@ def decode(registers: list[int], datatype: str, word_order: str = WORD_ABCD):
     raw = _regs_to_bytes(list(registers), datatype, word_order)
     value = struct.unpack(struct_format(datatype), raw)[0]
     return float(value) if datatype in _FLOATS else value
-
-
-def _as_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _coerce(value, datatype: str):
@@ -907,7 +901,7 @@ def _decode_string(registers: list[int]) -> str:
 
 ```python
     if datatype == BOOL:
-        return [1 if _as_bool(value) else 0]
+        return [1 if parse_value(BOOL, value) else 0]
     if datatype == STRING:
         _check_word_order(datatype, word_order)
         return _encode_string(value)
@@ -1069,8 +1063,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .model import (
-    AREAS, BOOL, DATATYPES, INT16, REG16, STRING, UINT16, WORD_ORDERS, area_is_bit,
-    register_span, word_orders_allowed,
+    AREAS, BOOL, DATATYPES, INT16, REG16, UINT16, WAVEFORMS, WORD_ORDERS,
+    area_is_bit, register_span, word_orders_allowed,
 )
 
 # 波形参数表（spec §5）。M4 实现波形时必须复用这张表，不要再抄一份。
@@ -1081,6 +1075,9 @@ WAVE_SPEC: dict[str, tuple[set[str], set[str]]] = {
     "random": ({"min", "max"}, {"interval", "seed"}),
     "step": ({"values", "interval"}, set()),
 }
+if set(WAVE_SPEC) != set(WAVEFORMS):
+    # 波形合法取值有两个来源就会漂移，宁可导入即失败也不要留到运行时
+    raise RuntimeError("WAVE_SPEC keys drifted from model.WAVEFORMS")
 _POSITIVE = {"period", "speed", "interval", "hold"}
 _SINGLE = {BOOL, INT16, UINT16, REG16}
 
@@ -1180,11 +1177,9 @@ def _shape(channel_name, dev, pt, loc, used, issues) -> None:
 
 
 def _overlap(pt, loc, used, issues) -> None:
-    """位区按位判，寄存器区按寄存器判。"""
+    """位区按位判，寄存器区按寄存器判。跨度算不出来就跳过——initial 已经报过错。"""
     short = loc.split("/")[-1].split(" (")[0]
-    if pt.datatype == STRING:
-        keys = [(pt.area, pt.address + i) for i in range(pt.span)]
-    elif area_is_bit(pt.area):
+    if area_is_bit(pt.area):
         keys = [(pt.area, pt.address)]
     else:
         try:
