@@ -19,7 +19,8 @@ def encode(value, datatype: str, word_order: str = WORD_ABCD) -> list[int]:
     if datatype == BOOL:
         return [1 if parse_value(BOOL, value) else 0]
     if datatype == STRING:
-        raise ValueError("string datatype is added in a later step")
+        _check_word_order(datatype, word_order)
+        return _encode_string(value)
     if datatype not in _NUMERIC:
         raise ValueError(f"unknown datatype {datatype!r}")
     raw = struct.pack(struct_format(datatype), _coerce(value, datatype))
@@ -29,17 +30,24 @@ def encode(value, datatype: str, word_order: str = WORD_ABCD) -> list[int]:
 def decode(registers: list[int], datatype: str, word_order: str = WORD_ABCD):
     """reg16 列表 -> 原生值。"""
     if datatype == BOOL:
+        _check_register_count(datatype, registers)
         return bool(registers[0])
     if datatype == STRING:
-        raise ValueError("string datatype is added in a later step")
+        _check_word_order(datatype, word_order)
+        return _decode_string(registers)
     if datatype not in _NUMERIC:
         raise ValueError(f"unknown datatype {datatype!r}")
-    need = register_span(datatype)
-    if len(registers) != need:
-        raise ValueError(f"{datatype} needs {need} registers, got {len(registers)}")
+    _check_register_count(datatype, registers)
     raw = _regs_to_bytes(list(registers), datatype, word_order)
     value = struct.unpack(struct_format(datatype), raw)[0]
     return float(value) if datatype in _FLOATS else value
+
+
+def _check_register_count(datatype: str, registers: list[int]) -> None:
+    """bool 与数值分支共用同一句长度错误，别让空寄存器数组抛裸 IndexError。"""
+    need = register_span(datatype)
+    if len(registers) != need:
+        raise ValueError(f"{datatype} needs {need} registers, got {len(registers)}")
 
 
 def _coerce(value, datatype: str):
@@ -49,6 +57,29 @@ def _coerce(value, datatype: str):
         return parse_value(datatype, text)
     text = value if isinstance(value, str) else str(value)
     return parse_value(datatype, text)
+
+
+def _encode_string(value) -> list[int]:
+    if not isinstance(value, str):
+        raise ValueError(
+            f"string needs a str value, got {type(value).__name__}: {value!r}")
+    text = value
+    if "\x00" in text:
+        raise ValueError("string must not contain nul: it would be truncated on read")
+    try:
+        raw = text.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"string must be ascii: {text!r}") from exc
+    if len(raw) % 2:
+        raw += b"\x00"
+    if not raw:                       # 空串也占一个寄存器，与 register_span 一致
+        raw = b"\x00\x00"
+    return [int.from_bytes(raw[i:i + 2], "big") for i in range(0, len(raw), 2)]
+
+
+def _decode_string(registers: list[int]) -> str:
+    raw = b"".join((int(r) & 0xFFFF).to_bytes(2, "big") for r in registers)
+    return raw.split(b"\x00", 1)[0].decode("ascii")
 
 
 def _permute_words(chunks: list[bytes], word_order: str) -> list[bytes]:
