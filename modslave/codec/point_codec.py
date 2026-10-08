@@ -15,22 +15,37 @@ from ..project.model import (
 _NUMERIC = tuple(d for d in DATATYPES if d not in (BOOL, STRING))
 _FLOATS = (FLOAT32, FLOAT64)
 
+# 用户原值进错误消息要限长：Task 5 一次报全，一个 401 位的脏值能把整屏刷掉。
+_BRIEF_LIMIT = 80
+
+
+def _brief(value) -> str:
+    """原值 repr 的截断形式，只砍尾巴：超过 _BRIEF_LIMIT 个字符就取前段并补 `...`。
+
+    判定口径不受影响——异常类型与消息前缀由调用方保持不变，短的（≤80）原样输出，
+    现场排查主站写来的脏值靠的就是这些原值。
+    """
+    text = repr(value)
+    if len(text) <= _BRIEF_LIMIT:
+        return text
+    return text[:_BRIEF_LIMIT] + "..."
+
 
 def encode(value, datatype: str, word_order: str = WORD_ABCD) -> list[int]:
     """原生值 -> reg16 列表。位区（bool）走独立路径，不参与字序。"""
+    _check_datatype(datatype)
     _check_word_order(datatype, word_order)
     if datatype == BOOL:
         return [1 if parse_value(BOOL, value) else 0]
     if datatype == STRING:
         return _encode_string(value)
-    if datatype not in _NUMERIC:
-        raise ValueError(f"unknown datatype {datatype!r}")
     raw = struct.pack(struct_format(datatype), _coerce(value, datatype))
     return _bytes_to_regs(raw, datatype, word_order)
 
 
 def decode(registers: list[int], datatype: str, word_order: str = WORD_ABCD):
     """reg16 列表 -> 原生值。"""
+    _check_datatype(datatype)
     _check_word_order(datatype, word_order)
     _check_registers(registers, datatype)
     if datatype == BOOL:
@@ -38,12 +53,21 @@ def decode(registers: list[int], datatype: str, word_order: str = WORD_ABCD):
         return bool(registers[0])
     if datatype == STRING:
         return _decode_string(registers)
-    if datatype not in _NUMERIC:
-        raise ValueError(f"unknown datatype {datatype!r}")
     _check_register_count(datatype, registers)
     raw = _regs_to_bytes(list(registers), datatype, word_order)
     value = struct.unpack(struct_format(datatype), raw)[0]
     return float(value) if datatype in _FLOATS else value
+
+
+def _check_datatype(datatype: str) -> None:
+    """类型判定先于字序判定：类型名填错时报 “wchar only supports ('ABCD',)” 是误导，
+    用户真正错的是 datatype——模拟器的毛病不许伪装成别的问题。
+
+    谓词与原 if-chain 尾部的 `datatype not in _NUMERIC` 等价：走到那句时 bool/string
+    已经 return，剩下的类型全集就是 DATATYPES。
+    """
+    if datatype not in DATATYPES:
+        raise ValueError(f"unknown datatype {datatype!r}")
 
 
 def _check_registers(registers, datatype: str) -> None:
@@ -56,7 +80,7 @@ def _check_registers(registers, datatype: str) -> None:
             not isinstance(r, int) or isinstance(r, bool) or not 0 <= r <= 0xFFFF
             for r in registers):
         raise ValueError(
-            f"{datatype} registers must be ints in 0..65535, got {registers!r}")
+            f"{datatype} registers must be ints in 0..65535, got {_brief(registers)}")
 
 
 def _check_register_count(datatype: str, registers: list[int]) -> None:
@@ -71,7 +95,7 @@ def _coerce(value, datatype: str):
     if isinstance(value, bool):
         # bool 是 int 的子类：不挡掉，float 分支会把 True 静默编成 1.0（凭空造数），
         # 而 int 分支报的是 got 'True' 这种二次加工过的值——两条路径口径必须先统一成拒
-        raise ValueError(f"{datatype} needs a number, got bool: {value!r}")
+        raise ValueError(f"{datatype} needs a number, got bool: {_brief(value)}")
     if datatype in _FLOATS:
         try:
             text = value if isinstance(value, str) else repr(float(value))
@@ -80,7 +104,7 @@ def _coerce(value, datatype: str):
             # 同一个脏值两条路径口径必须一致，否则 validate 的“一次报全”会被打成崩
             raise ValueError(
                 f"{datatype} needs a real number, "
-                f"got {type(value).__name__}: {value!r}") from exc
+                f"got {type(value).__name__}: {_brief(value)}") from exc
         return parse_value(datatype, text)
     text = value if isinstance(value, str) else str(value)
     return parse_value(datatype, text)
@@ -89,14 +113,14 @@ def _coerce(value, datatype: str):
 def _encode_string(value) -> list[int]:
     if not isinstance(value, str):
         raise ValueError(
-            f"string needs a str value, got {type(value).__name__}: {value!r}")
+            f"string needs a str value, got {type(value).__name__}: {_brief(value)}")
     text = value
     if "\x00" in text:
         raise ValueError("string must not contain nul: it would be truncated on read")
     try:
         raw = text.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise ValueError(f"string must be ascii: {text!r}") from exc
+        raise ValueError(f"string must be ascii: {_brief(text)}") from exc
     if len(raw) % 2:
         raw += b"\x00"
     if not raw:                       # 空串也占一个寄存器，与 register_span 一致
@@ -118,7 +142,7 @@ def _decode_string(registers: list[int]) -> str:
     except UnicodeDecodeError as exc:
         # 主站写 GBK/UTF-8 中文是真路径：errors="replace" 会把脏数据读成看着合法的
         # 乱码串，裸 UnicodeDecodeError 又不带 datatype，只能报领域 ValueError
-        raise ValueError(f"string is not ascii, got bytes {raw!r}") from exc
+        raise ValueError(f"string is not ascii, got bytes {_brief(raw)}") from exc
 
 
 def _permute_words(chunks: list[bytes], word_order: str) -> list[bytes]:

@@ -103,3 +103,42 @@ def test_bool_rejects_word_order_it_does_not_use(bad_order):
         encode(True, "bool", bad_order)
     with pytest.raises(ValueError, match="bool only supports"):
         decode([1], "bool", bad_order)
+
+
+# ---- 错误消息里的用户原值要限长（Task 5 一次报全不许被一个脏值刷屏）----
+
+_LIMIT = 80
+
+
+@pytest.mark.parametrize("call,prefix", [
+    (lambda: encode(10 ** 400, "float32"), "float32 needs a real number, got int: "),
+    (lambda: encode(["x" * 300], "string"), "string needs a str value, got list: "),
+    (lambda: encode("卫" * 300, "string"), "string must be ascii: "),
+    (lambda: decode([1.5] * 300, "int16"), "int16 registers must be ints in 0..65535, got "),
+    (lambda: decode([0xE465] * 300, "string"), "string is not ascii, got bytes "),
+])
+def test_long_user_values_are_truncated_in_error_messages(call, prefix):
+    """四类消息统一截断：401 位脏值原样打出来能把整屏刷掉，前缀与异常类型不许变。
+
+    bool 分支（`needs a number, got bool:`）的原值永远是 True/False，裁不到它，
+    所以它在下面那条短值测试里断言口径，而不是硬凑一个超长 bool。
+    """
+    with pytest.raises(ValueError) as ok:
+        call()
+    msg = str(ok.value)
+    assert msg.startswith(prefix)
+    assert msg.endswith("...")
+    assert len(msg) <= len(prefix) + _LIMIT + len("...")
+
+
+@pytest.mark.parametrize("call,expected", [
+    (lambda: decode([0x12345], "int16"),
+     "int16 registers must be ints in 0..65535, got [74565]"),
+    (lambda: encode(True, "float32"), "float32 needs a number, got bool: True"),
+    (lambda: encode(None, "float32"), "float32 needs a real number, got NoneType: None"),
+])
+def test_short_user_values_are_kept_whole(call, expected):
+    """截断只砍超过 80 的尾巴：现场排查靠的就是原值，短值一个字不许改。"""
+    with pytest.raises(ValueError) as ok:
+        call()
+    assert str(ok.value) == expected

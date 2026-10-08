@@ -53,6 +53,28 @@ def test_unknown_datatype():
         encode(1, "wchar", "ABCD")
 
 
+@pytest.mark.parametrize("bad_order", ["CDAB", "BADC", "DCBA", "XYZ"])
+def test_datatype_is_judged_before_word_order(bad_order):
+    """类型名填错时错误必须指向类型：`wchar only supports ('ABCD',)` 把人往字序上引，
+    而真正的错是 datatype。模拟器的毛病不许伪装成别的问题。"""
+    with pytest.raises(ValueError, match=r"unknown datatype 'wchar'"):
+        encode(1, "wchar", bad_order)
+    with pytest.raises(ValueError, match=r"unknown datatype 'wchar'"):
+        decode([0, 0], "wchar", bad_order)
+
+
+def test_known_datatype_still_reports_word_order():
+    """类型没错时字序洞照旧堵着，两条判定不能互相顶掉。"""
+    with pytest.raises(ValueError, match=r"unknown word_order 'XYZ'"):
+        encode(1, "int16", "XYZ")
+    with pytest.raises(ValueError, match=r"unknown word_order 'XYZ'"):
+        decode([0, 0], "int16", "XYZ")
+    with pytest.raises(ValueError, match=r"int16 only supports \('ABCD',\)"):
+        encode(1, "int16", "CDAB")
+    with pytest.raises(ValueError, match=r"float64 only supports"):
+        decode([0, 0], "float64", "CDAB")
+
+
 # ---- 浮点分支不许漏底层异常（Task 5 的“一次报全”只收 ValueError）----
 
 @pytest.mark.parametrize("bad", [None, [], object(), {}])
