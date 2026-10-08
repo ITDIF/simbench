@@ -46,6 +46,7 @@ def error_lines(issues: list[Issue]) -> list[str]:
 def validate_project(project) -> list[Issue]:
     issues: list[Issue] = []
     seen: set[str] = set()
+    bound: dict[tuple[str, int], str] = {}      # (host, port) -> 最先占用的通道名
     for ch in project.channels:
         if ch.name in seen:
             issues.append(Issue("error", "channel_duplicated", ch.name,
@@ -54,12 +55,24 @@ def validate_project(project) -> list[Issue]:
         if ch.type != "tcp":
             issues.append(Issue("error", "channel_type", ch.name,
                                 f"channel type {brief(ch.type)} is not supported in M1"))
-        if not _is_int(ch.port) or not 1 <= ch.port <= 65535:
+        port_ok = _is_int(ch.port) and 1 <= ch.port <= 65535
+        if not port_ok:
             # port=0（“让系统随便给一个”）在 M1 也是 error：要从 pymodbus 内部摸
             # transport 对象才能读回实际端口，版本一变就碎
             issues.append(Issue("error", "port", ch.name,
                                 f"port {brief(ch.port)} must be in 1..65535"))
         _devices(ch, issues)
+        # 同 host+port 的两个通道要等启动第二阶段才炸 bind，Windows 只回一句 10048、
+        # 不带通道名，现场看不出是点表配置错：静态查得出的冲突就静态报完（裁决 R）。
+        # 脏 port 上面那条已经说完，脏 host 连键都构造不了，一起跳过（裁决 O）。
+        if port_ok and isinstance(ch.host, str):
+            key = (ch.host, ch.port)
+            if key in bound:
+                issues.append(Issue("error", "port_duplicated", ch.name,
+                                    f"port {ch.port} on host {ch.host} already used by "
+                                    f"channel {bound[key]}"))
+            else:
+                bound[key] = ch.name
     if not _is_int(project.tick_ms) or not 10 <= project.tick_ms <= 60000:
         issues.append(Issue("error", "tick_ms", "project",
                             f"tick_ms {brief(project.tick_ms)} must be in 10..60000"))

@@ -122,6 +122,55 @@ def test_duplicate_channel_names():
     assert "channel_duplicated" in got
 
 
+def test_two_channels_bound_to_the_same_host_and_port_are_reported_up_front():
+    """同 host+port 在启动第二阶段才炸 bind，Windows 只给一句 10048 不带通道名：
+    现场看不出是点表配置错。静态就能查出的冲突必须静态报（裁决 R）。
+    """
+    chs = [TcpChannel(name="tcp-502", host="0.0.0.0", port=502, devices=[]),
+           TcpChannel(name="tcp-502-again", host="0.0.0.0", port=502, devices=[])]
+    issues = [i for i in validate_project(Project(channels=chs))
+              if i.code == "port_duplicated"]
+    assert len(issues) == 1
+    assert issues[0].level == "error"
+    assert issues[0].where == "tcp-502-again"        # 后加入那个是占用别人的一方
+    assert issues[0].message == "port 502 on host 0.0.0.0 already used by channel tcp-502"
+
+
+def test_same_port_on_different_hosts_is_not_a_conflict():
+    """0.0.0.0:502 与 127.0.0.1:502 各自监听，不算撞；只有同 host 同 port 才算。"""
+    chs = [TcpChannel(name="wildcard", host="0.0.0.0", port=502, devices=[]),
+           TcpChannel(name="loopback", host="127.0.0.1", port=502, devices=[])]
+    assert codes(Project(channels=chs)) == set()
+    # 第三个通道挤回 0.0.0.0:502：只有它一条，指向最先占位的 wildcard，loopback 不被牵连
+    chs.append(TcpChannel(name="third", host="0.0.0.0", port=502, devices=[]))
+    conflicts = [i for i in validate_project(Project(channels=chs))
+                 if i.code == "port_duplicated"]
+    assert [(i.where, i.message) for i in conflicts] == [
+        ("third", "port 502 on host 0.0.0.0 already used by channel wildcard")]
+
+
+def test_dirty_port_does_not_stack_a_second_port_duplicated():
+    """port 已被 "port" error 拦下（不是整数/越界），不再重复报冲突。"""
+    chs = [TcpChannel(name="a", host="0.0.0.0", port="COM3", devices=[]),
+           TcpChannel(name="b", host="0.0.0.0", port="COM3", devices=[]),
+           TcpChannel(name="c", host="0.0.0.0", port=70000, devices=[]),
+           TcpChannel(name="d", host="0.0.0.0", port=70000, devices=[])]
+    got = [i.code for i in validate_project(Project(channels=chs)) if i.level == "error"]
+    assert got == ["port", "port", "port", "port"]
+
+
+def test_non_string_host_does_not_crash_the_conflict_check():
+    """host 手改成 [] 时 (host, port) 连键都做不了：脏 host 不参与冲突判定，也不误判。"""
+    chs = [TcpChannel(name="l1", host=[], port=502, devices=[]),
+           TcpChannel(name="l2", host=[], port=502, devices=[]),
+           TcpChannel(name="n", host=None, port=502, devices=[]),
+           TcpChannel(name="ok", host="0.0.0.0", port=502, devices=[]),
+           TcpChannel(name="dup", host="0.0.0.0", port=502, devices=[])]
+    got = [(i.code, i.where) for i in validate_project(Project(channels=chs))
+           if i.level == "error"]
+    assert got == [("port_duplicated", "dup")]
+
+
 def test_wave_param_missing_extra_and_bad_range():
     a = _p(waveform="sine", wave_param={"base": "0", "amp": "1"})
     b = _p(name="b", address=5, waveform="sine",
