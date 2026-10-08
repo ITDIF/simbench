@@ -326,7 +326,8 @@ M5 内确认：
 
 ## 13. 风险
 
-- **pymodbus 版本节奏快**（3.12→3.15 每月一版，v4 将删掉 deprecated datastore）。
+- **pymodbus 版本节奏快**（3.12.0 2026-02-08 → 3.15.0 2026-08-13，半年 6 个版本，
+  且 v4 将删掉 deprecated datastore）。
   缓解：`requirements.txt` 锁 `pymodbus==3.15.0`，backend 层是唯一 import 点，升版只改一处。
 - **模拟器自身 bug 会被当成平台 bug 调试**。缓解：M1 的第三方主站互测是硬门禁，
   不通过不进 M2。
