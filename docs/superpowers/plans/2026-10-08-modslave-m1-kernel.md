@@ -82,6 +82,11 @@ QModMaster 连上能读到浮点值、写到只读点收到异常码 2。
 | L | 入口先判字序再判类型，`encode(1,'wchar','CDAB')` 报 `wchar only supports ('ABCD',)` | 类型判定优先于字序判定：`unknown datatype` 先于 `only supports`，错误消息必须指向真正的错。脏寄存器与长度校验仍排在字序之后，`bool`/`int64` 的字序洞不回退 | Task 3/4 整改（第二轮） |
 | M | codec 自己抄一份数值类型清单；全 dtype × 全字序没有回归测试 | `_NUMERIC` 由 `DATATYPES` 派生，不许有第二份真相；新增 `tests/test_codec_roundtrip_all.py`：全 dtype × 全允许字序互逆 + 产出个数与 `register_span` 一致 + 各字序必须是互异置换（最后这条是变异测试逼出来的） | Task 3/4 整改（第一/二轮） |
 | N | 错误消息把用户原值整段打出来（`encode(10**400,'float32')` 是 401 位十进制） | `{value!r}` 超过 80 字符截断成前 80 字符加 `...`；数值、string、bool、寄存器列表四类消息统一走 `_brief`，异常类型与消息前缀都不许变——Task 5 一次报全不能被一个脏值刷屏 | Task 3/4 整改（第二轮） |
+| O | `validate` 里范围比较与 `in dict` 判定拿到手改 project.json 的脏值（`port="COM3"`、`unit_id=[]`、`address=None`）先抛 `TypeError` | 所有范围比较与字典成员判定前先 `_is_int()` gate（`bool` 是 int 子类，同样挡掉）：一个脏值只落一条 error（`port`/`unit_range`/`address`/`tick_ms`），清单里不许有 traceback 逃逸。非整数 `unit_id` 不进 `units` 字典，重复判定一起 gate——`True` 与 `1` 哈希相同，进了表就把合法设备误判成 `unit_duplicated` | Task 5（本轮补齐 `unit_id`） |
+| P | `_shape` 判完 `area_type` 就 `return` | 不早退：类型/区不匹配的点位照样占寄存器位。否则它吞掉别的点位的重叠错误，用户要跑两轮启动才报全（`test_area_type_mismatch_still_reserves_its_address` 钉住） | Task 5 |
+| Q | `_SINGLE = {BOOL, INT16, UINT16, REG16}` 手抄类型清单 | 由 `model.word_orders_allowed` 派生（“只允许 ABCD 的类型”），validate 里不维护第二份真相（同裁决 M）。`string` 显式排除：它也只允许 `ABCD`，但填别的是 error 不是 warning——单寄存器类型填字序只是没意义，string 填字序是语义分歧 | Task 5 |
+| R | 同 `(host, port)` 的两个通道留到启动第二阶段炸 bind（Windows 只回 10048，不带通道名，现场看不出是点表配置错） | 启动前一次报全：`code="port_duplicated"`，`where` 是后加入那个通道名，message 写明 `port 502 on host 0.0.0.0 already used by channel tcp-502`。不同 host 同 port 各自监听，**不算**冲突；非整数/越界 port 已被 `port` 那条拦下，不重复报；非字符串 host 不参与判定 | Task 5（本轮） |
+| S | 计划正文 Task 5 Step 1 用 `_p(), _p(name="q", address=1)` 断言 `overlap` | 笔误：紧邻不是重叠（`register_span("uint16") == 1`，事实 5「点表不需要把地址铺满」）。已改成双向钉住——0 与 0 判重叠、0 与 1 判合法 | Task 5 |
 
 ---
 
@@ -986,7 +991,8 @@ def test_clean_project_has_no_issues():
     assert validate_project(_proj(_p(address=0), _p(name="q", address=5))) == []
 
 def test_overlap_in_same_area():
-    assert ("overlap", "c1/D1/q") in codes(_proj(_p(), _p(name="q", address=1)))
+    assert ("overlap", "c1/D1/q") in codes(_proj(_p(), _p(name="q", address=0)))
+    assert codes(_proj(_p(), _p(name="q", address=1))) == set()
 
 def test_same_address_in_different_area_is_ok():
     assert codes(_proj(_p(area="hr"), _p(name="q", area="ir"))) == set()
@@ -1263,7 +1269,7 @@ def _wave_ranges(pt, loc, issues) -> None:
 - [ ] **Step 4: Run it, verify pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_validate.py`
-Expected: 17 passed
+Expected: 36 passed
 
 - [ ] **Step 5: Commit**
 
