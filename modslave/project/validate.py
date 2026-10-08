@@ -56,6 +56,12 @@ def validate_project(project) -> list[Issue]:
             issues.append(Issue("error", "channel_type", ch.name,
                                 f"channel type {brief(ch.type)} is not supported in M1"))
         port_ok = _is_int(ch.port) and 1 <= ch.port <= 65535
+        host_ok = isinstance(ch.host, str) and bool(ch.host)
+        if not host_ok:
+            issues.append(Issue("error", "host", ch.name,
+                                f"host must be a non-empty string, got {brief(ch.host)}"))
+        # 只判“非空字符串”，不判 IP 字面量语法（裁决 T）：主机名/IPv6/前导零都合法，
+        # 这里造第二套判定容易误杀，真绑不上时 bind 的 OSError 已经足够明确。
         if not port_ok:
             # port=0（“让系统随便给一个”）在 M1 也是 error：要从 pymodbus 内部摸
             # transport 对象才能读回实际端口，版本一变就碎
@@ -64,8 +70,10 @@ def validate_project(project) -> list[Issue]:
         _devices(ch, issues)
         # 同 host+port 的两个通道要等启动第二阶段才炸 bind，Windows 只回一句 10048、
         # 不带通道名，现场看不出是点表配置错：静态查得出的冲突就静态报完（裁决 R）。
-        # 脏 port 上面那条已经说完，脏 host 连键都构造不了，一起跳过（裁决 O）。
-        if port_ok and isinstance(ch.host, str):
+        # 脏 port 与脏 host 上面两条已各自说完，键也构造不出来，一起跳过（裁决 O/T）。
+        # 不按 ch.type == "tcp" 抑制：两个 rtu 通道配成同一监听参数本身就是错的，
+        # 多报一条不算噪音，M5 落地串口后这条判定照样成立。
+        if port_ok and host_ok:
             key = (ch.host, ch.port)
             if key in bound:
                 issues.append(Issue("error", "port_duplicated", ch.name,

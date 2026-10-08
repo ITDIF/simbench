@@ -168,7 +168,47 @@ def test_non_string_host_does_not_crash_the_conflict_check():
            TcpChannel(name="dup", host="0.0.0.0", port=502, devices=[])]
     got = [(i.code, i.where) for i in validate_project(Project(channels=chs))
            if i.level == "error"]
-    assert got == [("port_duplicated", "dup")]
+    assert got == [("host", "l1"), ("host", "l2"), ("host", "n"),
+                   ("port_duplicated", "dup")]
+
+
+def test_dirty_host_is_one_error_and_never_a_traceback():
+    """裁决 T：host 空串/None/列表各落一条 host error，校验器自己不许先崩。"""
+    for dirty, rendered in (("", "''"), (None, "None"), ([], "[]")):
+        ch = TcpChannel(name="c1", host=dirty, port=502, devices=[])
+        issues = validate_project(Project(channels=[ch]))
+        assert [(i.code, i.where, i.level) for i in issues] == [("host", "c1", "error")], dirty
+        assert issues[0].message == f"host must be a non-empty string, got {rendered}"
+
+
+def test_normal_hosts_are_accepted():
+    for host in ("127.0.0.1", "0.0.0.0"):
+        ch = TcpChannel(name="c1", host=host, port=502, devices=[])
+        assert validate_project(Project(channels=[ch])) == [], host
+
+
+def test_host_literal_syntax_is_not_validated_here():
+    """裁决 T：`999.1.1.1` 不在这里判——绑不上端口时 OSError 已经够明确，
+    而且字符串 IP 合法性判断容易误杀（主机名、IPv6 带 %zone、前导零写法都合法），
+    我们不在校验层造第二套判定。它照样参与同 host+port 的冲突判定。
+    """
+    ch = TcpChannel(name="c1", host="999.1.1.1", port=502, devices=[])
+    assert validate_project(Project(channels=[ch])) == []
+    chs = [TcpChannel(name="a", host="999.1.1.1", port=502, devices=[]),
+           TcpChannel(name="b", host="999.1.1.1", port=502, devices=[])]
+    assert [(i.code, i.where) for i in validate_project(Project(channels=chs))] == \
+        [("port_duplicated", "b")]
+
+
+def test_dirty_hosts_stay_out_of_the_conflict_check():
+    """两个 host="" 的通道各说自己的 host error，不再叠一条指向空 host 的 port_duplicated：
+    同 `port_ok` 的裁决 O 口径，脏值一条说完。
+    """
+    chs = [TcpChannel(name="a", host="", port=502, devices=[]),
+           TcpChannel(name="b", host="", port=502, devices=[])]
+    got = [(i.code, i.where) for i in validate_project(Project(channels=chs))
+           if i.level == "error"]
+    assert got == [("host", "a"), ("host", "b")]
 
 
 def test_wave_param_missing_extra_and_bad_range():
