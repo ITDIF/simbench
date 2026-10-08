@@ -122,6 +122,15 @@ def test_string_requires_ascii():
     assert not isinstance(exc.value, UnicodeEncodeError)
     assert str(exc.value) == "string must be ascii: '风机'"
 
+def test_register_span_string_requires_str_value():
+    # 非 str 的初值是调用方传错了类型：以前直接抛 'int' object has no attribute 'encode'，
+    # 现在与 parse_value 同口径，给一条能读懂的 ValueError
+    for value in (123, 1.5, None, True):
+        with pytest.raises(ValueError, match="string needs a str value") as exc:
+            register_span(STRING, value)
+        assert not isinstance(exc.value, AttributeError)
+    assert register_span(STRING, "abc") == 2      # str 照常
+
 def test_point_defaults():
     p = Point(name="x", area="hr", address=0, datatype=INT16)
     assert p.initial == "0" and p.word_order == "ABCD"

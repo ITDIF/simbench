@@ -61,6 +61,9 @@ def register_span(datatype: str, value: str = "0") -> int:
     if datatype == BOOL:
         return 1
     if datatype == STRING:
+        if not isinstance(value, str):
+            raise ValueError(
+                f"string needs a str value, got {type(value).__name__}: {value!r}")
         return max(1, -(-len(_ascii_bytes(value)) // 2))
     if datatype not in _REG_COUNT:
         raise ValueError(f"unknown datatype {datatype!r}")
