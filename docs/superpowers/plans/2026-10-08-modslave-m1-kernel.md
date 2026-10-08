@@ -77,6 +77,11 @@ QModMaster 连上能读到浮点值、写到只读点收到异常码 2。
 | G | `decode([], "bool")` 抛 IndexError | bool 分支也走寄存器数校验，抛 `ValueError`，消息与数值分支同句式 | Task 4 |
 | H | `WAVEFORMS` 与 `WAVE_SPEC` 两份真相 | `validate.py` 导入期检查两者键集合一致，漂移即 `RuntimeError` | Task 5 |
 | I | `_overlap` 的 string 分支 | 统一走带 `try` 的 `register_span`，算不出跨度就跳过（`initial` 已经报过错） | Task 5 |
+| J | `decode` 用 `& 0xFFFF` 静默吞脏寄存器 | 超出 `0..65535`、非 `int`、`bool`、非 `list`/`tuple` 容器一律 `ValueError`；掩码只许用在产出侧，入口截断等于静默给错值（`0x12345` 读成 9029 会被当平台 bug 调） | Task 3/4 整改（第一轮） |
+| K | 底层 `TypeError`/`OverflowError`/`UnicodeDecodeError` 从 codec 逃出去 | 全部包成领域 `ValueError`：`encode(None,'float32')`、`encode(10**400,'float32')`、`decode([0xE465],'string')`。`UnicodeDecodeError` 本就是 `ValueError` 子类，包它是为了让消息带上 `string` 与原始字节，不是为了能 catch | Task 3/4 整改（第一轮） |
+| L | 入口先判字序再判类型，`encode(1,'wchar','CDAB')` 报 `wchar only supports ('ABCD',)` | 类型判定优先于字序判定：`unknown datatype` 先于 `only supports`，错误消息必须指向真正的错。脏寄存器与长度校验仍排在字序之后，`bool`/`int64` 的字序洞不回退 | Task 3/4 整改（第二轮） |
+| M | codec 自己抄一份数值类型清单；全 dtype × 全字序没有回归测试 | `_NUMERIC` 由 `DATATYPES` 派生，不许有第二份真相；新增 `tests/test_codec_roundtrip_all.py`：全 dtype × 全允许字序互逆 + 产出个数与 `register_span` 一致 + 各字序必须是互异置换（最后这条是变异测试逼出来的） | Task 3/4 整改（第一/二轮） |
+| N | 错误消息把用户原值整段打出来（`encode(10**400,'float32')` 是 401 位十进制） | `{value!r}` 超过 80 字符截断成前 80 字符加 `...`；数值、string、bool、寄存器列表四类消息统一走 `_brief`，异常类型与消息前缀都不许变——Task 5 一次报全不能被一个脏值刷屏 | Task 3/4 整改（第二轮） |
 
 ---
 
@@ -112,6 +117,7 @@ modslave-sim/
     ├── test_codec_single.py
     ├── test_codec_32bit.py
     ├── test_codec_64bit.py
+    ├── test_codec_roundtrip_all.py
     ├── test_validate.py
     ├── test_json_io.py
     ├── test_csv_io.py
