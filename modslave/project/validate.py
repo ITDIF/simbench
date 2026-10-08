@@ -73,12 +73,15 @@ def _devices(ch, issues: list[Issue]) -> None:
         if not _is_int(dev.unit_id) or not 1 <= dev.unit_id <= 247:
             issues.append(Issue("error", "unit_range", where,
                                 f"unit_id {brief(dev.unit_id)} outside 1..247"))
-        if dev.unit_id in units:
-            issues.append(Issue("error", "unit_duplicated", where,
-                                f"unit_id {brief(dev.unit_id)} already used by "
-                                f"{units[dev.unit_id]}"))
-        # 跨通道重复 unit_id 不在这里判：那是 Task 8 build_sim_devices 的 ValueError
-        units[dev.unit_id] = dev.name
+        if _is_int(dev.unit_id):
+            # 非整数不进 units：[] 连哈希都没有（`in` 直接 TypeError），
+            # True 与 1 哈希相同会把合法设备误判成重复。脏值上一条 unit_range 说完
+            if dev.unit_id in units:
+                issues.append(Issue("error", "unit_duplicated", where,
+                                    f"unit_id {brief(dev.unit_id)} already used by "
+                                    f"{units[dev.unit_id]}"))
+            # 跨通道重复 unit_id 不在这里判：那是 Task 8 build_sim_devices 的 ValueError
+            units[dev.unit_id] = dev.name
         _points(ch.name, dev, issues)
 
 
@@ -204,7 +207,8 @@ def _wave_ranges(pt, loc, issues) -> None:
 
 
 def _is_int(value) -> bool:
-    """范围比较前先确认是整数：bool 是 int 的子类，字符串端口（手改 project.json 的
-    rtu 残留）比较会直接 TypeError。校验自己在“一次报全”的路上崩掉，比漏一条错误更糟。
+    """范围比较与字典成员判定前先确认是整数：bool 是 int 的子类，字符串端口（手改
+    project.json 的 rtu 残留）比较会直接 TypeError，`[]` 连哈希都没有。校验自己在
+    “一次报全”的路上崩掉，比漏一条错误更糟（裁决 O：脏值一条说完，不许 traceback 逃逸）。
     """
     return isinstance(value, int) and not isinstance(value, bool)

@@ -244,6 +244,29 @@ def test_non_integer_numbers_are_errors_not_tracebacks():
     assert all(i.level in ("error", "warning") for i in issues)
 
 
+def test_dirty_unit_id_is_one_error_and_never_a_traceback():
+    """unit_id=[] 时 `dev.unit_id in units` 自己就 TypeError：校验器成了那个被当平台 bug 的源头。
+
+    非整数只落一条 unit_range，重复判定同样 gate 在 _is_int 上（同 port/address 的裁决 O）。
+    """
+    for dirty in ([], ["1"], "11", True, None, 1.5):
+        ch = TcpChannel(name="c1", host="127.0.0.1", port=502,
+                        devices=[Device(name="D1", unit_id=dirty, points=[])])
+        issues = validate_project(Project(channels=[ch]))
+        assert [i.code for i in issues] == ["unit_range"], dirty
+        assert issues[0].level == "error"
+
+
+def test_non_integer_unit_id_stays_out_of_the_duplicate_table():
+    """True 与 1 哈希相同：脏值进的了 units 就会把合法设备误判成 unit_duplicated。"""
+    ch = TcpChannel(name="c1", host="127.0.0.1", port=502, devices=[
+        Device(name="T", unit_id=True, points=[]),
+        Device(name="S", unit_id="1", points=[]),
+        Device(name="N", unit_id=1, points=[])])
+    got = [i.code for i in validate_project(Project(channels=[ch])) if i.level == "error"]
+    assert got == ["unit_range", "unit_range"]
+
+
 def test_tick_ms_out_of_range_is_a_project_level_error():
     assert ("tick_ms", "project") in codes(
         Project(channels=[TcpChannel(name="c1", devices=[])], tick_ms=5))
