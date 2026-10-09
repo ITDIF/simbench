@@ -1,6 +1,6 @@
 """Session：GUI 唯一能对话的对象——点表读写、通道启停、拉模型刷新都在这里收口。
 
-钉住的四件事：
+钉住的五件事：
 
 1. **拉模型**：`rows()` 在通道运行时回读寄存器、未运行时用 CSV 初值；主站写进去的值
    下一次 pull 就该看见。M1 的 backend 只有 `packet_sink` / `on_connection` 两个钩子
@@ -11,6 +11,8 @@
    `WriteResult(False, ...)`，并且**寄存器一个字节都不变**——每条都真去读回来证明。
 4. **readonly 是挡主站的墙**：引擎侧 `set_point` 改得动只读点（M1 口径），真主站写同一
    地址回异常码 2；`di`/`ir` 界面可改，而协议上主站根本没有写它们的功能码。
+5. **`stale` 把"没读到"和"设备报了 0"分开**：通道在跑且回读失败才置位，没启动不算异常；
+   `registers` 一律是 **tuple**（A–I 表 G），两种容器并存会让上层的"这行变了没有"时好时坏。
 
 用例一律走真端口 + 真 `ModbusTcpClient`（不是 mock）：这一层值钱的地方就是"界面点一下、
 平台那边真读得到"，mock 只能证明代码自洽，证明不了它能跟真网关说话。
@@ -85,15 +87,6 @@ def test_rows_are_indexed_in_the_point_table_order(session):
     assert first.key == ("tcp-5020", 11, "hr", 0)
 
 
-def test_row_field_order_is_the_positional_contract_task_5_builds_on():
-    """Task 5 的 `FakeEngine` 按**位置**构造 Row，字段顺序就是契约，改动要先过这里。"""
-    assert tuple(Row.__dataclass_fields__) == (
-        "channel", "device", "unit_id", "name", "area", "address", "datatype",
-        "word_order", "value_text", "registers", "readonly", "waveform")
-    # stale 是 Task 5 的活（那一步会同时补内核测试），这里不许提前加半个
-    assert "stale" not in Row.__dataclass_fields__
-
-
 def test_rows_for_unknown_channel_is_empty(session):
     session.load(loaded())
     assert session.rows("nope") == []
@@ -105,9 +98,24 @@ def test_rows_are_unreadable_before_start_so_the_csv_initial_shows(session):
     session.load(loaded(free_port()))
     assert value_of(session, "CO浓度") == "12.5"
     assert value_of(session, "启动命令") == "false"
-    # 没起时不回读，寄存器列是空的——Task 5 会把它和"起了但读不到"用 stale 分开
+    # 没起时不回读，寄存器列是空的；空的是 tuple（A–I 表 G：registers 定死一种容器）
     assert next(r.registers for r in session.rows("tcp-5020")
-                if r.name == "CO浓度") == []
+                if r.name == "CO浓度") == ()
+
+
+def test_row_field_order_is_the_positional_contract_task_5_builds_on():
+    """`FakeEngine` 按**位置**构造 Row，字段顺序就是契约，改动要先过这里。
+
+    `stale` 必须留在末尾并带默认值：前面 12 个位置参数的顺序一旦变，
+    `point_source.FakeEngine` 构造出来的行会**静默串列**（把 waveform 当 readonly 之类），
+    界面上是一格看着合法的错值——比崩掉难查得多。
+    """
+    assert tuple(Row.__dataclass_fields__) == (
+        "channel", "device", "unit_id", "name", "area", "address", "datatype",
+        "word_order", "value_text", "registers", "readonly", "waveform", "stale")
+    default = Row("tcp-5020", "COVI-1", 11, "CO浓度", "hr", 0, "float32", "CDAB",
+                  "12.5", (0x0000, 0x4148), True, "const")
+    assert default.stale is False, "stale 要有默认值，否则现有构造点全得跟着改"
 
 
 # ---------- 启动门槛 ----------
@@ -262,7 +270,7 @@ def test_master_read_seeds_the_row_snapshot(session):
     session.start_channel("tcp-5020")
     row = next(r for r in session.rows("tcp-5020") if r.name == "CO浓度")
     assert row.value_text == "12.5"          # 初值来自 CSV，字序 CDAB
-    assert row.registers == [0x0000, 0x4148]
+    assert row.registers == (0x0000, 0x4148)
 
 
 def test_a_real_master_reads_exactly_what_the_codec_encodes(session):
@@ -281,18 +289,20 @@ def test_a_real_master_reads_exactly_what_the_codec_encodes(session):
     finally:
         client.close()
     assert next(r.registers for r in session.rows("tcp-5020")
-                if r.name == "CO浓度") == list(expected)
+                if r.name == "CO浓度") == tuple(expected)
 
 
 def test_every_row_reads_back_from_a_running_channel(session):
     """回读失败会回落 CSV 初值——所以"通道在跑但某行拿不到寄存器"必须当场被抓住，
-    否则一格静默的错值会被当成平台读错。Task 5 用 stale 显式表达，本任务先钉住"不该发生"。"""
+    否则一格静默的错值会被当成平台读错。`stale` 就是这件事的显式表达（Task 5 补的），
+    健康通道跑起来后**一行都不许灰**：灰显一旦成为常态，它就再也区分不出"读不到"了。"""
     port = free_port()
     session.load(loaded(port))
     session.start_channel("tcp-5020")
     rows = session.rows("tcp-5020")
     silent = [r.name for r in rows if not r.registers]
     assert silent == [], f"这些行回读失败却仍显示初值：{silent}"
+    assert [r.name for r in rows if r.stale] == [], "健康通道上的行被标成了 stale"
 
 
 def test_rows_reflect_a_master_write_on_the_next_pull(session):
@@ -311,6 +321,99 @@ def test_rows_reflect_a_master_write_on_the_next_pull(session):
             return
         time.sleep(0.02)
     pytest.fail(f"rows() 没能在 2s 内反映主站写入，读到 {value_of(session, '风机状态')!r}")
+
+
+# ---------- 回读失败与 stale ----------
+
+def test_rows_are_marked_stale_when_the_running_backend_cannot_answer(session, monkeypatch):
+    """通道在跑但后端读不到：值仍显示初值，但必须标 stale。
+
+    `stale` 是**唯一**能把"没读到"和"设备报了这个值"分开的东西：`_render` 在回读失败时
+    照样回落 CSV 初值，界面上那一格看着完全正常。不置 stale 就等于让模拟器自己的毛病
+    被平台当成"值没变"，这条就是那层区分本身。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    runtime = session.channel("tcp-5020")
+
+    def blow_up(*_args, **_kwargs):
+        raise OSError("backend gone")
+
+    monkeypatch.setattr(runtime.backend, "read_registers", blow_up)
+    rows = session.rows("tcp-5020")
+    stale = {r.name for r in rows if r.stale}
+    assert "CO浓度" in stale, "寄存器区回读失败没体现在 stale 上"
+    assert not any(r.stale for r in rows if r.area == "co"), "位区走另一条回读路径"
+    assert not any(r.stale for r in rows if r.area == "di"), "位区走另一条回读路径"
+
+
+def test_a_stale_row_still_shows_the_csv_initial_not_a_zero(session, monkeypatch):
+    """读不到时那一格仍是初值 + stale：改成显示 0 或空串就是"设备报了 0"的演出。"""
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    monkeypatch.setattr(session.channel("tcp-5020").backend, "read_registers",
+                        lambda *_a, **_k: None)
+    row = next(r for r in session.rows("tcp-5020") if r.name == "CO浓度")
+    assert row.stale is True
+    assert row.value_text == "12.5", "回落初值是对的，但必须由 stale 说明它不是读数"
+    assert row.registers == (), "回读失败还不许冒充有一段寄存器"
+
+
+def test_stale_does_not_stick_once_the_backend_answers_again(session, monkeypatch):
+    """灰显不许粘住：读得回来就该恢复正常，否则界面迟早整表发灰、stale 失去分辨力。"""
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    backend = session.channel("tcp-5020").backend
+    real = backend.read_registers
+    broken = {"yes": True}
+
+    def flaky(unit_id, area, address, count):
+        if broken["yes"]:
+            raise OSError("backend gone")
+        return real(unit_id, area, address, count)
+
+    monkeypatch.setattr(backend, "read_registers", flaky)
+    assert any(r.stale for r in session.rows("tcp-5020"))
+    broken["yes"] = False
+    rows = session.rows("tcp-5020")
+    assert [r.name for r in rows if r.stale] == [], "读得回来了还在灰"
+    assert next(r.registers for r in rows if r.name == "CO浓度") == (0x0000, 0x4148)
+
+
+def test_a_bit_area_that_cannot_answer_is_stale_on_the_bit_path(session, monkeypatch):
+    """位区是另一条回读路（`read_bits`）：它失败时同样要置 stale，别只钉寄存器区。"""
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    monkeypatch.setattr(session.channel("tcp-5020").backend, "read_bits",
+                        lambda *_a, **_k: None)
+    rows = session.rows("tcp-5020")
+    bits = [r for r in rows if r.area in ("co", "di")]
+    assert bits and all(r.stale for r in bits), [r.name for r in bits]
+    assert not any(r.stale for r in rows if r.area == "hr"), "寄存器区没坏，不该跟着灰"
+
+
+def test_rows_are_not_stale_before_the_channel_starts(session):
+    session.load(loaded(free_port()))
+    assert not any(r.stale for r in session.rows("tcp-5020")), "没启动不是异常，不该灰显"
+
+
+def test_a_write_that_cannot_be_read_back_is_refused_and_greys_the_row(session, monkeypatch):
+    """写进去了但读不回来：`set_point` 仍报失败（M2-H2 已定），且那一行要灰——
+    界面继续显示旧值 + 不灰，等于说"设备还是这个值"，而寄存器其实已经变了。"""
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    monkeypatch.setattr(session.channel("tcp-5020").backend, "read_registers",
+                        lambda *_a, **_k: None)
+    res = session.set_point("tcp-5020", 11, "hr", 4, "37")
+    assert not res.ok and "read-back failed" in res.error
+    assert res.value_text == "" and res.registers == ()
+    row = next(r for r in session.rows("tcp-5020") if r.name == "风机状态")
+    assert (row.value_text, row.stale) == ("11", True)
 
 
 # ---------- 点表写 ----------
@@ -356,7 +459,7 @@ def test_bit_points_go_through_the_bit_path_not_the_register_one(session):
     session.start_channel("tcp-5020")
     res = session.set_point("tcp-5020", 11, "co", 0, "true")
     assert res.ok, res.error
-    assert res.value_text == "true" and res.registers == [1]
+    assert res.value_text == "true" and res.registers == (1,)
     client = connect(port)
     try:
         assert client.read_coils(0, count=1, device_id=11).bits[0] is True
@@ -480,6 +583,22 @@ def test_a_successful_write_marks_the_project_dirty(session):
     assert session.dirty is False
     assert session.set_point("tcp-5020", 11, "hr", 4, "37").ok
     assert session.dirty is True
+
+
+def test_write_is_the_pair_the_point_table_model_calls(session):
+    """`write()` 是 GUI 侧唯一的写入口：把 `WriteResult` 收成 `(ok, error)`。
+
+    只加一层薄封装、不改错误句式——错误文案的真相在 codec/validate 那一份里，
+    表格模型再抄一套话术，同一件错在现场就有两种说法（本项目防的就是这个）。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    assert session.write("tcp-5020", 11, "hr", 4, "37") == (True, "")
+    ok, error = session.write("tcp-5020", 11, "hr", 4, "abc")
+    assert ok is False and "uint16 needs an integer" in error
+    ok, error = session.write("tcp-5020", 11, "hr", 30, "1")
+    assert ok is False and "not in the point table" in error
 
 
 # ---------- 事件 ----------

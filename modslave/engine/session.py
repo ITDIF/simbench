@@ -7,6 +7,10 @@ Qt-free（不 import PySide6），所以 M1/M2 的内核测试不需要事件循
 未运行时用 CSV 初值。这里刻意不做任何"主站写入"回调、也不让引擎轮询——M1 的 backend
 只有 `packet_sink` / `on_connection` 两个钩子，多一个钩子就多一条跨线程改 UI 的路，
 而 10Hz 全表刷新实测最坏 0.34ms，不值得为它换推送。
+
+回读失败时那一格**仍然**显示 CSV 初值，但会带上 `Row.stale`：不带着它，"通道在跑却没
+读到"和"设备报了这个值"在界面上就是同一个样子（本项目最防的那类演出）；而"还没启动"
+不是异常，不标灰。
 """
 
 from __future__ import annotations
@@ -29,8 +33,12 @@ class Row:
     """点位表一行。字段顺序是**位置参数契约**：Task 5 的 `point_source.FakeEngine`
     按这个顺序构造，改名或换序都要先看 `tests/test_session.py` 那条顺序断言。
 
-    `registers` 现在就是一段整数序列（`_render` 给的是 list，Task 5 的替身给 tuple），
-    消费方按序列处理，不要按具体容器类型判等。
+    `registers` 定死 `tuple[int, ...]`（A–I 表 G）：`_render` 与替身给的是同一种容器，
+    上层才能用 `!=` 判"这行变了没有"。回读失败时它是**空的**，不是 `[0]`。
+
+    `stale` 只在**通道在跑且回读失败**时为真。"没启动"不是异常（那时显示 CSV 初值
+    是正确行为），"启动了却没读到"才是——两者回落的是同一份初值文字，界面上分不出来，
+    而把"没读到"演成"设备报了这个值"正是本项目最防的那类假象，所以这里必须带出来。
     """
 
     channel: str
@@ -45,6 +53,7 @@ class Row:
     registers: tuple[int, ...]
     readonly: bool
     waveform: str
+    stale: bool = False
 
     @property
     def key(self) -> tuple[str, int, str, int]:
@@ -191,18 +200,35 @@ class Session:
     # ---------- 点表读写 ----------
 
     def rows(self, channel: str) -> list[Row]:
-        """按点表顺序出一批行。通道在跑就回读寄存器，没跑就用 CSV 初值。"""
+        """按点表顺序出一批行。通道在跑就回读寄存器，没跑就用 CSV 初值。
+
+        `stale` 的判据是"通道在跑 **且** 这一行回读失败"：没跑的时候显示初值是
+        正确行为（ζ：一个通道都没起时表格照样可读），把它一起标灰就等于界面在
+        演出一个没发生的故障。
+        """
         with self._lock:
             runtime = self._channels.get(channel)
             meta = list(self._rows_meta.get(channel, ()))
+        running = bool(runtime and runtime.running)
         out: list[Row] = []
         for unit_id, device, pt in meta:
-            regs = self._read_back(runtime, pt, unit_id)
+            regs, failed = self._read_back(runtime, pt, unit_id)
             value_text, registers = _render(pt, regs)
             out.append(Row(channel, device, unit_id, pt.name, pt.area, pt.address,
                            pt.datatype, pt.word_order, value_text, registers,
-                           pt.readonly, pt.waveform))
+                           pt.readonly, pt.waveform, stale=failed and running))
         return out
+
+    def write(self, channel: str, unit_id: int, area: str, address: int,
+              text: str) -> tuple[bool, str]:
+        """点位表模型（`gui/point_table`）用的写入口：只把 `WriteResult` 收成二元组。
+
+        判定与错误文案全部留在 `set_point`/codec 那一份里——GUI 抄一套自己的话术，
+        同一件错在现场就有两种说法。要 `value_text`/`registers` 的调用方直接用
+        `set_point`。
+        """
+        res = self.set_point(channel, unit_id, area, address, text)
+        return (res.ok, res.error)
 
     def set_point(self, channel: str, unit_id: int, area: str, address: int,
                   text: str) -> WriteResult:
@@ -240,8 +266,8 @@ class Session:
             return WriteResult(False, f"engine write failed: {exc}")
         if not ok:
             return WriteResult(False, f"{area} address {address} is outside the point table")
-        regs = self._read_back(runtime, pt, unit_id)
-        if regs is None:
+        regs, failed = self._read_back(runtime, pt, unit_id)
+        if failed or regs is None:
             # 写成功但读不回来：这不是"值没变"，是回读通道出了毛病。宁可说"没读到"，
             # 也不许回一个初值冒充当前值（那一格会被当成"设备报了这个值"）。
             return WriteResult(False, f"read-back failed for {area} {address}")
@@ -312,42 +338,57 @@ class Session:
             self._stop_one(runtime)
 
     def _read_back(self, runtime: ChannelRuntime | None, pt: Point,
-                   unit_id: int) -> list[int] | None:
-        """回读一个点位当前的寄存器。通道没跑/地址不在块内/后端异常一律回 None。
+                   unit_id: int) -> tuple[list[int] | None, bool]:
+        """回读一个点位当前的寄存器，返回 `(regs, failed)`。
 
-        返回 None 时 `_render` 回落到 CSV 初值——那是"当前值未知"的显式表达，
-        比拿 0 冒充一个真值好（0 在界面上和"设备报了 0"分不出来）。
+        `failed` 与"regs 是 None"不是一回事，必须分开说：
+
+        * 通道没跑（`runtime`/`backend` 为空）→ `(None, False)`。那是"还没起"，
+          不是异常，界面上显示 CSV 初值就是正确行为（不标灰）。
+        * 后端抛异常、或回读 `None`/空序列 → `(None, True)`。那是"起了却没读到"，
+          调用方（`rows()`）据此置 `stale`——否则这一格和"设备真报了这个值"同形。
+
+        空序列也算失败：`_render` 对 `[]` 同样回落初值，只判 None 会把"读到一串空"
+        当成成功，`stale` 就漏了这一条。
         """
         if runtime is None or runtime.backend is None:
-            return None
+            return None, False
         try:
             if area_is_bit(pt.area):
                 bits = runtime.backend.read_bits(unit_id, pt.area, pt.address, 1)
-                return None if bits is None else [1 if bits[0] else 0]
-            return runtime.backend.read_registers(unit_id, pt.area, pt.address, pt.span)
+                if bits is None or not bits:
+                    return None, True
+                return [1 if bits[0] else 0], False
+            regs = runtime.backend.read_registers(unit_id, pt.area, pt.address, pt.span)
         except Exception:                                # noqa: BLE001
-            return None
+            return None, True
+        if not regs:
+            return None, True
+        return list(regs), False
 
 
-def _render(pt: Point, regs: list[int] | None) -> tuple[str, list[int]]:
+def _render(pt: Point, regs: list[int] | None) -> tuple[str, tuple[int, ...]]:
     """寄存器 -> 界面文案。回读失败（regs 为 None/空）时回落 CSV 初值。
 
-    **这个回落有两种含义，现在分不出来**：①通道没起，本来就该显示初值；
-    ②通道在跑但读不到，显示初值就是演给界面一个"设备报了这个值"。
-    Task 5 给 `Row` 加 `stale: bool` 把它们分开（界面据此灰掉那一格），并在那一步
-    同时补内核测试——所以这里不提前加半个 stale，也不许把 ② 改成显示 0 或空串。
+    回落本身有两种含义——①通道没起，本来就该显示初值；②通道在跑但读不到，显示初值
+    就是演给界面一个"设备报了这个值"。这一层分不出来（它拿不到通道状态），所以
+    `rows()` 用 `_read_back` 的 `failed` 补 `Row.stale` 把两者分开；这里不许改成
+    显示 0 或空串（那等于用一个假的 0 替掉"没读到"）。
+
+    寄存器一律回 `tuple`（A–I 表 G）：`Row.registers` 与 `WriteResult.registers`
+    共用这一份产出，两种容器并存会让上层的"这行变了没有"判等时好时坏。
     """
     if not regs:
-        return pt.initial, []
+        return pt.initial, ()
     try:
         value = decode(list(regs), pt.datatype, pt.word_order)
     except ValueError:
-        return pt.initial, list(regs)
+        return pt.initial, tuple(regs)
     if isinstance(value, bool):
-        return ("true" if value else "false"), list(regs)
+        return ("true" if value else "false"), tuple(regs)
     if isinstance(value, float):
-        return (f"{value:g}", list(regs))
-    return (str(value), list(regs))
+        return (f"{value:g}", tuple(regs))
+    return (str(value), tuple(regs))
 
 
 async def _awrite(backend, unit_id, area, address, registers):
