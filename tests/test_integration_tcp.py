@@ -462,9 +462,11 @@ def test_engine_calls_after_stop_are_a_domain_error(open_backend):
 
 
 def test_open_backend_fixture_leaves_no_thread_and_frees_the_port(open_backend):
-    """夹具的关停路径必须干净：loop 线程收掉、端口能重新 bind。
+    """夹具的关停路径必须干净：runner 的两个线程收掉、端口能重新 bind。
 
-    后面的用例靠 `free_port()` 挑端口，这里留一个活监听就会让后面的测试偶发红。
+    夹具现在跑生产件 `EngineRunner`：一个 loop 线程 `modslave-engine` + 一个事件 pump 线程
+    `modslave-engine-events`。`stop()` 少 join 掉一个，另一个就以 daemon 身份活到进程结束；
+    而后面的用例靠 `free_port()` 挑端口，这里留一个活监听就会让后面的测试偶发红。
     """
     before = {t.name for t in threading.enumerate()}
     port = free_port()
@@ -472,7 +474,8 @@ def test_open_backend_fixture_leaves_no_thread_and_frees_the_port(open_backend):
         client = connect(port)
         client.read_holding_registers(4, count=1, device_id=11)
         client.close()
-        assert len(threading.enumerate()) == len(before) + 1      # loop 线程在跑
+        assert {t.name for t in threading.enumerate()} - before == {
+            "modslave-engine", "modslave-engine-events"}          # 两个引擎线程都在跑
     assert {t.name for t in threading.enumerate()} == before
     check_port_is_free("127.0.0.1", port)                           # 端口已释放
 
