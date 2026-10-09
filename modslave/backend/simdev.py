@@ -8,6 +8,11 @@ from ..codec.point_codec import encode
 from ..project.model import AREAS, BIT_AREAS, Point, Project, area_is_bit, brief
 
 _INDEX = {"co": 0, "di": 1, "hr": 2, "ir": 3}
+if {**_INDEX} != {area: i for i, area in enumerate(AREAS)}:
+    # `_INDEX` 的键是第二份区清单、值是 SimDevice 元组的槽位（元组顺序就是 AREAS 顺序）。
+    # 加区漏改这里会让新区的点位在 build_sim_devices 里 KeyError 或塞错槽位；下标和键一起
+    # 钉，改 AREAS 顺序也拦得住（同裁决 H/M：两份真相一定会漂移，那就导入即炸）。
+    raise RuntimeError("_INDEX drifted from model.AREAS")
 
 # 位区占位的地址：抬到高位，避开真设备第一个线圈。pymodbus 的 `__create_block_bits`
 # 会把块首寄存器标成 BITS，放在 0 就等于对外承认这台设备有线圈 0..15。

@@ -2,6 +2,7 @@
 
 import pytest
 
+from modslave.project import csv_io, model
 from modslave.project.csv_io import (
     HEADER, format_wave_param, parse_wave_param, read_csv, read_csv_file,
     write_csv, write_csv_file,
@@ -518,3 +519,33 @@ def test_device_conflict_message_truncates_both_device_names():
     assert "..." in message
     assert junk[:100] not in message
     assert len(message) < 300
+
+
+def point_named(project, name):
+    for ch in project.channels:
+        for dev in ch.devices:
+            for pt in dev.points:
+                if pt.name == name:
+                    return pt
+    raise AssertionError(f"no point named {name!r}")
+
+
+@pytest.mark.parametrize("extra, expected", [("_BOOL_TRUE", True), ("_BOOL_FALSE", False)])
+def test_readonly_column_and_initial_share_one_bool_whitelist(monkeypatch, extra, expected):
+    """裁决 E：bool 白名单只许有一份。给 model 那张表加一个词，readonly 列必须跟着认。
+
+    实测旧状态：`model._BOOL_TRUE/_BOOL_FALSE` 与 `csv_io._TRUE/_FALSE` 逐字符相同地并存，
+    没有任何测试或导入期断言钉相等（initial 走 `parse_value(BOOL, ...)`，readonly 走 csv
+    自己那张表）。将来任一边加一个 token，同一张 CSV 里两列对同一个词就给相反答案——
+    `readonly` 判成"不是布尔"而 initial 判成 True，现场改点表的人会当成解析器的 bug 去调。
+    """
+    monkeypatch.setattr(model, extra, getattr(model, extra) | {"sure"})
+    text = ROWS + "tcp-502,COVI-1,11,电压,hr,4,uint16,ABCD,0,const,,sure\n"
+    project = read_csv(text, ports=ALL_PORTS)
+    assert point_named(project, "电压").readonly is expected
+
+
+def test_csv_io_does_not_keep_a_second_bool_table():
+    """结构判据：csv_io 里不许再摆第二张表——收敛靠"没有副本"，不靠"两份恰好相等"。"""
+    assert "_TRUE" not in vars(csv_io)
+    assert "_FALSE" not in vars(csv_io)

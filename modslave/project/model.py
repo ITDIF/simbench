@@ -34,10 +34,26 @@ _INT_BOUNDS: dict[str, tuple[int, int]] = {
     INT64: (-2**63, 2**63 - 1), UINT64: (0, 2**64 - 1),
 }
 _FLOAT_LIMIT = {FLOAT32: 3.4028234663852886e38, FLOAT64: 1.7976931348623157e308}
-# bool 初值只认白名单里的写法，其余（含空串）一律 ValueError：默默当 False 的错值
-# 会被当成平台 bug 去调，宁可启动时报错也不许猜
-_BOOL_TRUE: set[str] = {"1", "true", "yes", "y", "on"}
-_BOOL_FALSE: set[str] = {"0", "false", "no", "n", "off"}
+# bool 初值只认白名单里的写法，其余（含空串、`TURE`、`01`、`-1`）一律 ValueError：
+# 默默当 False 的错值会被当成平台 bug 去调，宁可启动时报错也不许猜（裁决 A）。
+# 这是全仓库**唯一**一份 bool 白名单（裁决 E）：`parse_bool` 判，`parse_value(BOOL)` 与
+# CSV 的 readonly 列都走它；消息里的 token 清单也从同一张表派生，不再各抄一遍。
+# 成对写是为了让展示顺序固定（1/0、true/false……），集合本身是无序的。第三个字段是
+# "这个词进不进用户可见的提示"：`y`/`n` 照认，但两个单字母混在清单里更难读，所以历史上
+# 就没写进消息（`readonly 'TURE' is not a boolean, use one of 1/0/...` 是要钉住的对外
+# 句式），这里把它显式标出来而不是让文案和判定各说一套。
+_BOOL_PAIRS: tuple[tuple[str, str, bool], ...] = (
+    ("1", "0", True), ("true", "false", True), ("yes", "no", True),
+    ("y", "n", False), ("on", "off", True))
+_BOOL_TRUE: set[str] = {pair[0] for pair in _BOOL_PAIRS}
+_BOOL_FALSE: set[str] = {pair[1] for pair in _BOOL_PAIRS}
+BOOL_TOKENS = "/".join(f"{t}/{f}" for t, f, shown in _BOOL_PAIRS if shown)
+if _BOOL_TRUE & _BOOL_FALSE:
+    # 一个词同时映射到真和假时，判定结果取决于分支顺序——这种表本身就不该存在
+    raise RuntimeError("bool whitelist maps one token to both True and False")
+if not set(BOOL_TOKENS.split("/")) <= (_BOOL_TRUE | _BOOL_FALSE):
+    # 消息里承诺的写法必须真认（照裁决 H 对 WAVE_SPEC 的做法：两个来源就一定会漂移）
+    raise RuntimeError("bool whitelist drifted from the token list in its messages")
 
 # 用户原值进错误消息要限长：401 位的脏值原样打出来能把整屏刷掉。
 _BRIEF_LIMIT = 80
@@ -103,6 +119,30 @@ def word_orders_allowed(datatype: str) -> tuple[str, ...]:
     return (WORD_ABCD,)
 
 
+def parse_bool(text) -> bool:
+    """全仓库唯一的 bool 判定（裁决 E）：白名单认不出来就抛 ValueError，绝不猜 False。
+
+    单独成一个公共函数是为了让"判 bool"这件事只有一个入口：`parse_value(BOOL, ...)`
+    走它，CSV 的 `readonly` 列也走它。`readonly` 不是 datatype 列，让 csv_io 去调
+    `parse_value(BOOL, ...)` 等于把"列名"和"类型名"两句话混在一处，两边都得改口径。
+
+    消息句式逐字保持原样：Python `bool` 原样返回（裁决 A），非字符串报
+    `bool needs a string value, got {type}: {brief}`，未识别 token 报
+    `bool needs one of {BOOL_TOKENS}, got {brief}`。
+    """
+    if isinstance(text, bool):
+        return text
+    if not isinstance(text, str):
+        raise ValueError(
+            f"bool needs a string value, got {type(text).__name__}: {brief(text)}")
+    key = text.strip().lower()
+    if key in _BOOL_TRUE:
+        return True
+    if key in _BOOL_FALSE:
+        return False
+    raise ValueError(f"bool needs one of {BOOL_TOKENS}, got {brief(text)}")
+
+
 def parse_value(datatype: str, text: str):
     """字符串 -> 原生 Python 值；类型不对或越界抛 ValueError，消息里带类型名。
 
@@ -110,19 +150,11 @@ def parse_value(datatype: str, text: str):
     字符串，收到 int/float/None 说明调用方传错了类型；截断或 str() 出来的值看着合法，
     静默错值会被当成平台 bug 去调。未知与越界同样报错，不替用户猜。
     """
-    if datatype == BOOL and isinstance(text, bool):
-        return text
+    if datatype == BOOL:
+        return parse_bool(text)             # 判定不在这里，见 parse_bool（裁决 E）
     if not isinstance(text, str):
         raise ValueError(
             f"{datatype} needs a string value, got {type(text).__name__}: {brief(text)}")
-    if datatype == BOOL:
-        key = text.strip().lower()
-        if key in _BOOL_TRUE:
-            return True
-        if key in _BOOL_FALSE:
-            return False
-        raise ValueError(
-            f"bool needs one of 1/0/true/false/yes/no/on/off, got {brief(text)}")
     if datatype == STRING:
         _ascii_bytes(text)                        # 只为校验，口径与 register_span 一致
         return text

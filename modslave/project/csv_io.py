@@ -10,7 +10,9 @@ import csv
 import io
 from pathlib import Path
 
-from .model import Device, Point, Project, TcpChannel, brief
+from .model import (
+    Device, Point, Project, TcpChannel, BOOL_TOKENS, brief, parse_bool,
+)
 
 HEADER = ["channel", "device", "unit_id", "name", "area", "address", "datatype",
           "word_order", "initial", "waveform", "wave_param", "readonly"]
@@ -18,11 +20,9 @@ HEADER = ["channel", "device", "unit_id", "name", "area", "address", "datatype",
 # 空的 device/name 把空串原样带进模型，validate 一条 error 都不出、从站照起。Excel
 # 少拖一格就会这样，后果是点位挂到无名通道上，GUI、报文和日志三边都对不上号。
 _IDENTITY_COLUMNS = ("channel", "device", "name")
-# readonly 只认这两张表，其余（含空串、`TURE` 这种拼错的）一律 ValueError：默默当
-# False 会把"只读"的保护静默变成"可写"，主站就能改写一个真设备只读的点位。
-# 口径与 model.py 里 bool 初值（_BOOL_TRUE/_BOOL_FALSE）对称——宁可报错，绝不静默给错值。
-_TRUE = {"1", "true", "yes", "y", "on"}
-_FALSE = {"0", "false", "no", "n", "off"}
+# readonly 认哪些写法不在这里定：判定住在 model.parse_bool，本文件只负责把"认不出来"
+# 翻译成点表这一列的说法并补列名（裁决 E——两份白名单会让同一张 CSV 的 readonly 列和
+# initial 列对同一个词给相反答案）。
 
 
 def read_csv(text: str, ports: dict[str, int] | None = None, address_offset: int = 0,
@@ -162,14 +162,18 @@ def _require_text(value, what: str, index: int) -> str:
 
 
 def _require_bool(text: str, what: str) -> bool:
-    """白名单判布尔：认不出来就报错，绝不替用户猜一个 False（行号由 read_csv 补）。"""
-    key = text.strip().lower()
-    if key in _TRUE:
-        return True
-    if key in _FALSE:
-        return False
-    raise ValueError(f"{what} {brief(text)} is not a boolean, "
-                     f"use one of 1/0/true/false/yes/no/on/off")
+    """白名单判布尔：认不出来就报错，绝不替用户猜一个 False（行号由 read_csv 补）。
+
+    判定不在这里做（裁决 E）：`model.parse_bool` 是全仓库唯一那张 bool 白名单，
+    `initial` 列（走 `parse_value(BOOL, ...)`）与 `readonly` 列共用它。这里只把
+    "认不出来"换成本文件已经钉住的句式，并保留列名——`{what} 'TURE' is not a boolean,
+    use one of ...` 是点表编辑者看的，带列名比带类型名有用。
+    """
+    try:
+        return parse_bool(text)
+    except ValueError:
+        raise ValueError(f"{what} {brief(text)} is not a boolean, "
+                         f"use one of {BOOL_TOKENS}") from None
 
 
 def _channel_for(channels: dict[str, TcpChannel], name: str, ports: dict[str, int],

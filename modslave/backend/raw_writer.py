@@ -9,9 +9,14 @@ from __future__ import annotations
 from pymodbus.simulator import DataType
 from pymodbus.simulator.simutils import SimUtils
 
-from ..project.model import brief
+from ..project.model import AREAS, brief
 
 _BLOCK = {"co": "c", "di": "d", "hr": "h", "ir": "i"}
+if set(_BLOCK) != set(AREAS):
+    # 区名清单在这里抄了一份（值是 pymodbus SimRuntime 的块键，派生不出来）。model 加一个
+    # 区而这里漏改时，`_block` 会拿着一个不存在的键回 None，读写双双静默失败——导入即炸
+    # 比静默错值好查（同裁决 H/M 对两份真相的口径）。
+    raise RuntimeError("_BLOCK keys drifted from model.AREAS")
 
 
 def _check_values(area: str, values: list[int]) -> None:
