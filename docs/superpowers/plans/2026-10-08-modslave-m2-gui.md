@@ -43,6 +43,20 @@
 | ε | 未保存修改的退出提示 | **做**：窗口标题带 `*`，关闭时问一次 | 现场点了半小时点表被误关是真损失 |
 | ζ | 一个通道都没起时 | 表格可读（显示点表与初值），改值按钮禁用并给出原因 | 让"看配置"不依赖"起服务" |
 
+## 执行期已裁决的偏离（M2 Task 1–2 落地后确定，优先级高于下面的计划正文）
+
+| # | 计划正文的写法 | 已定口径 | 证据 |
+|---|---|---|---|
+| A | `_offenders(folder, needles, allow_backend=False)` + 靠 `len(parts)` 猜层级 | M1 已把它改成 `_offenders(folder, needles, root=ROOT, skip_packages=())` + `_top_package()`。Qt 守卫用 **`skip_packages=(GUI_PACKAGE,)`** 传参；`allow_backend` 这个死参早已不存在 | 照抄本计划 Step 4 会把 4 条按位置传 `root` 的既有用例打成垃圾参数，并重新引入 M1 评审修掉的"按路径长度猜层级" |
+| B | `runner.submit(noop())`（测试里传协程对象） | `submit` 收**协程工厂**：写成 `runner.submit(noop)`。计划正文两处自相矛盾，以工厂为准（Task 3 的 `submit(lambda: backend.start())` 也是工厂形） | `submit(noop())` 实测 `TypeError: 'coroutine' object is not callable`，还会留 "never awaited" |
+| C | `stop()` 置位后 pump 线程立刻 `return` | 置位后**必须把队列排空再退**（轮询收紧到 10ms，队列真空才退出） | 实测按"置位即退"写，120 次 start/stop 丢 3 次、最坏一次 30 条只送到 1 条；后果是"通道已停但设备树还挂在 running" |
+| D | conftest 里再写一个 `drain()` 助手 | **不加**。计划正文那句 `QtCore.QCoreApplication.eventLoop()` 在 PySide6 6.9.2 上不存在（`AttributeError`）。测试里等事件投递统一用 `QTest.qWait(ms)` 或 `for _: processEvents()` 定次轮询；跨线程排空用 `EngineRunner.drain()`（Qt-free 那一个，不是 conftest 的） | 全计划无用例调 conftest 的 `drain()`，加进去就是必崩的死代码。同类坑：`QCoreApplication.platformName()` 也不存在，取平台名用 `QtGui.QGuiApplication.platformName()` |
+| E | `test_open_backend_fixture_leaves_no_thread_and_frees_the_port` 断言"线程数 +1" | 夹具换成生产 `EngineRunner` 后是 **2** 个线程（loop + pump）。断言改成**点名** `{"modslave-engine", "modslave-engine-events"}` 并在退出后断言这两个名字都不存在——比数字断言更结实 | 数字断言在实现变更时必然假失败；点名断言同时还能挡住线程名漂移 |
+
+**本计划的 Task 1、Task 2 的参考代码块同样是"裁决前快照"**：与仓库实际不一致时以仓库与本表为准。Task 3 之后每完成一组，就把该组新产生的口径追加进这张表，并把对应代码块前补一行快照提示（措辞沿用 M1 计划里那行）。
+
+---
+
 ## 文件结构（M2 新增部分）
 
 ```
@@ -137,6 +151,8 @@ Run: `.venv/Scripts/python.exe -m pytest tests/test_architecture.py -q`
 Expected: FAIL —`test_only_gui_touches_pyside6` 因 `skip_folders`/`_offenders` 签名不符或 `gui/` 不存在而红（`test_gui_actually_exists_and_is_the_only_qt_owner` 会明确报"gui/ 还不存在"）。**如果它直接绿了，说明守卫又是恒过的——停下报告，别继续。**
 
 - [ ] **Step 4: 给 `_offenders` 加显式 skip 参数**
+
+> 本节代码是裁决前快照，与仓库实际有差异（见上方 A–E 表）。以仓库与本表为准，不要照抄。
 
 按现有实现的最小改法（签名默认空元组，行为向后兼容）：
 
@@ -300,6 +316,8 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "chore: 加 Py
 - Test: `tests/test_runner.py`
 
 - [ ] **Step 1: 写失败测试**
+
+> 本节与下一步的实现代码是裁决前快照（见上方 B、C 两行：`submit` 要传工厂、pump 停机要排空）。以仓库与本表为准。
 
 ```python
 # tests/test_runner.py
