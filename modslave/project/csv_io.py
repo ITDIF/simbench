@@ -158,8 +158,9 @@ def _device_for(devices: dict[tuple[str, int], Device], channel: TcpChannel,
         channel.devices.append(devices[key])
     existing = devices[key].name
     if existing != device_name:
-        # 同 (channel, unit_id) 就是一个设备；换了名说明点表里 unit 号抄串了行。
-        # 静默建成两个同名不同 unit 的设备，主站读到的就是另一台机器的值
+        # 同 (channel, unit_id) 就是一个设备；同一个 unit 号带出两个名字，要么是
+        # unit 号抄串了行、要么是设备名打错。静默并进其中任何一个，主站读到的都是
+        # 另一台设备的值——两边都没法从报文看出来，只能当场停下问人
         raise ValueError(f"line {index}: unit_id {unit_id} is already used by device "
                          f"{existing!r}, got {device_name!r}")
     return devices[key]
