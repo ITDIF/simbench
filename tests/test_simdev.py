@@ -154,9 +154,10 @@ def test_empty_register_area_reads_illegal_address_at_datastore_layer():
 
     占位条目把地址 0 标成 DataType.INVALID，`SimRuntime.__check_block` 见到
     `flags[0] & RunTimeFlag_TYPE == INVALID` 就回 ILLEGAL_ADDRESS，主站侧就是异常码 2。
-    **这是 datastore 层断言**（走的是主站读路径实际调用的同一套
-    `SimCore.async_getValues` / `SimRuntime.async_getValues`），
-    Task 11 落地 TCP backend 后要用真主站 `read_input_registers(0)` 再验一次。
+    **这是 datastore 层断言**（走 `SimCore.async_getValues`），真主站版本已经落在
+    `tests/test_integration_tcp.py::test_empty_input_register_area_answers_exception_2_to_a_real_master`。
+    两层都留着：datastore 层不用起端口、失败信息直指标志位，协议层才排得掉"区选错了/
+    帧解析变了"这类只在完整链路上出现的问题。
     """
     proj = _proj(Point("h", "hr", 0, "uint16", initial="7"))
     core = SimCore(build_sim_devices(proj))
@@ -174,9 +175,10 @@ def test_empty_bit_area_reads_and_writes_illegal_address_at_datastore_layer():
     （`async_setValues` 返回 `None`），等于一台压根没有线圈的假从站对"风机启动"回
     ACK 并读回 True——假设备对外撒谎，比显示错值更糟。
     **这是 datastore 层断言**（走的是主站读写路径实际调用的同一套
-    `SimCore.async_getValues` / `SimCore.async_setValues`），
-    Task 11 落地 TCP backend 后要用真主站 `read_coils(0, count=16)` /
-    `write_coil(0, True)` 再验一次。
+    `SimCore.async_getValues` / `SimCore.async_setValues`），真主站版本已经落在
+    `tests/test_integration_tcp.py::test_empty_bit_area_answers_exception_2_to_a_real_master`
+    （读写两条路 + 占位窗口的残余代价由
+    `test_placeholder_bit_window_is_the_pinned_residual_cost` 钉住）。
     """
     proj = _proj(Point("h", "hr", 0, "uint16", initial="7"))
     core = SimCore(build_sim_devices(proj))

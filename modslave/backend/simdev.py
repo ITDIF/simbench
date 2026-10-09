@@ -44,8 +44,10 @@ def placeholder_for(area: str) -> SimData:
       残余代价：位 65520..65535 这一小段对外是"已定义"的，任何真设备的第一线圈都不
       会在那儿，且该区一旦有真点位就不再补占位。
 
-    datastore 层的两条钉桩用例（tests/test_simdev.py 的 `..._at_datastore_layer`）
-    要求 Task 11 用真主站再验一次。
+    datastore 层的两条钉桩用例在 `tests/test_simdev.py`（`..._at_datastore_layer`），
+    真主站版本在 `tests/test_integration_tcp.py`
+    （`test_empty_input_register_area_answers_exception_2_to_a_real_master`、
+    `test_empty_bit_area_answers_exception_2_to_a_real_master`）。
     """
     if area_is_bit(area):
         return SimData(_BIT_PLACEHOLDER_ADDRESS, 1, 0, DataType.BITS)
