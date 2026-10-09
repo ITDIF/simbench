@@ -53,7 +53,12 @@
 | D | conftest 里再写一个 `drain()` 助手 | **不加**。计划正文那句 `QtCore.QCoreApplication.eventLoop()` 在 PySide6 6.9.2 上不存在（`AttributeError`）。测试里等事件投递统一用 `QTest.qWait(ms)` 或 `for _: processEvents()` 定次轮询；跨线程排空用 `EngineRunner.drain()`（Qt-free 那一个，不是 conftest 的） | 全计划无用例调 conftest 的 `drain()`，加进去就是必崩的死代码。同类坑：`QCoreApplication.platformName()` 也不存在，取平台名用 `QtGui.QGuiApplication.platformName()` |
 | E | `test_open_backend_fixture_leaves_no_thread_and_frees_the_port` 断言"线程数 +1" | 夹具换成生产 `EngineRunner` 后是 **2** 个线程（loop + pump）。断言改成**点名** `{"modslave-engine", "modslave-engine-events"}` 并在退出后断言这两个名字都不存在——比数字断言更结实 | 数字断言在实现变更时必然假失败；点名断言同时还能挡住线程名漂移 |
 
-**本计划的 Task 1、Task 2 的参考代码块同样是"裁决前快照"**：与仓库实际不一致时以仓库与本表为准。Task 3 之后每完成一组，就把该组新产生的口径追加进这张表，并把对应代码块前补一行快照提示（措辞沿用 M1 计划里那行）。
+| F | `filters_for()` 用 `(event.function_code or 0) & 0x80` 判异常 | **`fc & 0x80` 或 `parsed` 含 `EXCEPTION` 两形都认**。M1 已钉的 backend 契约里 `parse_packet` 把 0x80 脱掉再放进 `function_code`，异常信息只在 `parsed` 文案里 | 只按位判则 GUI 的"异常"标签对真从站永远为空——从站刚回了异常码 2，界面却说没发生异常。实测：修前 `buckets=['全部','响应']`，修后 `['全部','响应','异常']` |
+| G | `Row.registers` 标注 `tuple[int, ...]`，但 `_render` 返回 list，Task 3 断言写 `== [0x0000, 0x4148]` | 一次定死成 **tuple**：`_render` 返回 `tuple(regs)`，相关断言改成元组比较；`point_source._registers` 本来就返回 tuple | 两种容器并存会让 `test_refresh_touches_only_changed_rows` 之类的相等判断时好时坏，GUI 层更没法判"这行变了没有" |
+| H | `check_port_is_free()` 用裸 `bind` 探针 | 待办：补一个 **connect 级探针**（能连上=有实例在服务 → 拒绝启动）。bind 探针在 Windows 上对"对方绑 `127.0.0.1:port`、自己绑 `0.0.0.0:port`"的组合会成功，双监听仍可能 | 实测 `probe bind 0.0.0.0 -> OK / probe bind 127.0.0.1 -> FAIL 10048`。窄，但正是"改了 CSV 重启，平台读到旧点表"那一类。归 H4 那批补 |
+| I | 通道面板状态标签 `● 运行中` 定宽 96px | 槽位装不下时**改文案，不加宽、不截断**（`● 运行`／`○ 停止`），且四种状态必须同一宽度 | 用户对布局挪动零容忍；靠加宽解决会推挤同行控件 |
+
+**本计划的 Task 1–4 的参考代码块同样是"裁决前快照"**：与仓库实际不一致时以仓库与本表为准。Task 3 之后每完成一组，就把该组新产生的口径追加进这张表，并把对应代码块前补一行快照提示（措辞沿用 M1 计划里那行）。
 
 ---
 
@@ -2142,6 +2147,8 @@ Expected: 全通过（报文视图 8 条 + 缓冲 13 条）。`test_geometry_is_
 失败时改**布局**（定宽槽、去掉 setVisible 增删），不要把断言放松。
 
 - [ ] **Step 4: 通道面板的失败测试**
+
+> 本节与 Step 5 的参考代码注意按上方 F–I 表校对（尤其 I 的定宽文案口径）。
 
 `modslave/gui/channel_panel.py` + `tests/test_gui_channel_panel.py`。**为什么必须有这一层**：
 spec §11 把"通道启停"列进 M2、§7 画了"通道属性"，只有工具栏"全部启动/全部停止"时，
