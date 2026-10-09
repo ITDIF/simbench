@@ -17,7 +17,10 @@ from ..project.model import Project
 from .raw_writer import RawRegisterWriter
 from .simdev import build_sim_devices
 
-_NOISE = "Datastore unable to fulfill request"
+_NOISE_PREFIX = "Datastore unable to fulfill request"
+# 只挡"未定义 unit id 回落 devices[0] 抛 KeyError: 0"这一种已知噪音：三个片段必须**同时**
+# 出现才抑制（前缀 + 异常本身 + 抛出它的那一帧）。
+_UNIT_FALLBACK_MARKS = (_NOISE_PREFIX, "KeyError: 0", "__get_device")
 # 起停都是"毫秒级就好，超过 5 秒就是坏了"：真值见 _await_listener 与 stop 的注释
 _START_TIMEOUT = 5.0
 _STOP_TIMEOUT = 5.0
@@ -25,16 +28,31 @@ _POLL = 0.005
 
 
 class _DropDatastoreNoise(logging.Filter):
-    """未定义 unit id 会走 SimCore 的 devices[0] 回落抛 KeyError，pymodbus 把整段栈
-    打进日志。协议行为是对的（主站收到异常码 4），噪音要压掉。
+    """压掉"未定义 unit id 扫总线"那一条栈，但**只**压那一条。
 
-    实测（"已实测事实"4）：一次 1..247 的总线扫描刷 492 行栈。这里压的是 ERROR 级的那
-    一条（`requesthandler.py` 的 `Log.error("Datastore unable to fulfill request: {}; {}")`），
-    消息里带着 traceback 全文，所以按消息前缀判、不按栈判。
+    协议行为是对的（主站收到异常码 4，服务不崩，"已实测事实"4），一次 1..247 扫描会刷
+    492 行栈，所以要压。但判据不能按消息前缀一刀切：`requesthandler.py` 打这句的地方是
+    一个裸 `except Exception`，datastore 路径上**任何**异常都汇到同一句、都回异常码 4。
+    按前缀判就会把模拟器自己的崩溃一起吞掉——真出内部 bug（M4 波形算出坏寄存器、点表映射
+    越界）时主站只看到 4，日志一条不剩，而"异常码 4"与"unit 不在线"在报文上完全同形，
+    现场根本分辨不出来（spec §13 的第一风险）。这条边界由
+    `test_internal_datastore_failure_is_not_swallowed` 钉住。
+
+    为什么按文本判、不按 record 结构判：pymodbus 的 `Log.error(fmt, *args)` 在自己的
+    `Log._logger.log(...)` 里已经把 `{}` 填成完整字符串再发记录，实测 `record.args == ()`
+    ——拿不到异常对象、也拿不到栈对象，只剩文本可读。被抑制那一条的文本实测长这样：
+    `Datastore unable to fulfill request: 0; Traceback ... return self.devices[device_id]
+    if device_id in self.devices else self.devices[0] ... KeyError: 0`，
+    所以三个片段合起来指向的就是 `SimCore.__get_device` 那一帧的 `KeyError: 0`。
+
+    **版本耦合**：这三段文本是 pymodbus 3.15.0 的实测形状。升级 pymodbus 时这条判据必须
+    重新验一遍——文案或帧名一变，抑制就会失效（表现是日志重新刷屏，属于可见的退化，
+    不会悄悄把真异常吞掉；反方向失效不可能，因为判据是"三句都对上才压"）。
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return _NOISE not in str(record.getMessage())
+        text = str(record.getMessage())
+        return not all(mark in text for mark in _UNIT_FALLBACK_MARKS)
 
 
 def configure_library_logging(level: int = logging.ERROR) -> None:

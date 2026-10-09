@@ -303,14 +303,16 @@ def test_placeholder_bit_window_is_the_pinned_residual_cost(bare_master):
 
 
 def test_bus_scan_does_not_flood_the_log(master, caplog):
-    """总线扫描 1..50：异常码照回，栈不许刷进日志（事实 4 的 492 行就是这么来的）。
+    """总线扫描 1..247：异常码照回，栈不许刷进日志（事实 4 的 492 行就是这么来的）。
 
     两条断言配对使用才不会假绿：没有栈 + 确实抓到了日志记录。只判前者的话，"logger 整个
     被关掉/根本没接 handler"也能过，而那条用例就再也没在守任何东西。
+    范围按完整地址空间 1..247 扫（现场用工具点一次"扫描从站"就是这个量级，只扫 1..50
+    会把 51 号以后的 unit 留在测试盲区里）。
     """
     client, _ = master
     with caplog.at_level(logging.DEBUG, logger="pymodbus.logging"):
-        for unit in range(1, 50):
+        for unit in range(1, 248):
             got = client.read_holding_registers(0, count=1, device_id=unit)
             if unit not in (11, 12):
                 assert got.isError() and got.exception_code == 4
@@ -319,6 +321,33 @@ def test_bus_scan_does_not_flood_the_log(master, caplog):
     assert not any("Datastore unable to fulfill request" in t for t in texts)
     assert len(texts) > 0, "caplog 没抓到任何 pymodbus 记录，上面的断言是空的"
     # 服务照旧活着
+    assert client.read_holding_registers(4, count=1, device_id=11).registers == [11]
+
+
+def test_internal_datastore_failure_is_not_swallowed(master, caplog, monkeypatch):
+    """datastore 里换成**别的**异常时，日志必须还看得见——降噪只许挡已知的那一种。
+
+    `requesthandler.py` 那句 `Log.error("Datastore unable to fulfill request: {}; {}")`
+    外面是一个裸 `except Exception`：datastore 路径上任何异常都汇到这一句、回异常码 4。
+    真出现内部 bug（M4 波形算出坏寄存器、点表映射越界）时，如果按消息前缀一刀切，主站
+    收到 4、日志一条不剩，而"异常码 4"与"unit 不在线"在报文上完全同形，现场无从分辨
+    （spec §13 列的第一风险）。这里拿真主站打一条 RuntimeError 进来钉住这个边界。
+    """
+    client, backend = master
+    core = backend._server.context
+
+    async def internal_bug(*args, **kwargs):
+        raise RuntimeError("internal engine bug")
+
+    monkeypatch.setattr(core, "async_getValues", internal_bug)
+    with caplog.at_level(logging.DEBUG, logger="pymodbus.logging"):
+        got = client.read_holding_registers(0, count=1, device_id=11)
+    assert got.isError() and got.exception_code == 4
+    texts = [str(r.getMessage()) for r in caplog.records]
+    assert any("internal engine bug" in t for t in texts), texts
+    assert any("Traceback" in t for t in texts), texts
+    # 服务照旧活着：先撤掉注入的异常，否则读到的还是刚才那条 4
+    monkeypatch.undo()
     assert client.read_holding_registers(4, count=1, device_id=11).registers == [11]
 
 
