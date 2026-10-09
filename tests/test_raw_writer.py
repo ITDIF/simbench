@@ -184,3 +184,89 @@ def test_write_registers_with_empty_list_is_rejected():
         writer.write_registers(11, "hr", 0, [])
     with pytest.raises(ValueError, match="empty value list"):
         writer.write_registers(11, "hr", 0, ())
+
+
+# ---- 裁决 5 的同一判据补到整数参数：address / bit_address / count ----
+
+@pytest.mark.parametrize("address", [None, "0", 1.5, True, [0]])
+def test_write_registers_rejects_non_int_address(address):
+    """实测 `write_registers(11,'hr',None,[1])` 抛 TypeError 逃逸；`True` 更糟——
+    `bool` 是 int 的子类，地址被静默当成 1，写进隔壁那个寄存器。
+
+    引擎传进来的地址是算出来的（`base + offset`），算错一步就是脏值；判据与值列表
+    同口径（非 int / bool 混入 → ValueError），消息点名是哪个参数。
+    """
+    store = core()
+    writer = RawRegisterWriter(store)
+    with pytest.raises(ValueError) as excinfo:
+        writer.write_registers(11, "hr", address, [1])
+    assert str(excinfo.value) == f"address must be an int, got {address!r}"
+    assert asyncio.run(store.async_getValues(11, 3, 0, 2)) == [1, 2]   # 一个字节都没动
+
+
+@pytest.mark.parametrize("count", [None, "2", 1.5, True, [1]])
+def test_read_registers_rejects_non_int_count(count):
+    """`count=True` 实测回 `[1]`（当成 1 个寄存器），脏 count 读到的是错位的数据。"""
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError) as excinfo:
+        writer.read_registers(11, "hr", 0, count)
+    assert str(excinfo.value) == f"count must be an int, got {count!r}"
+
+
+@pytest.mark.parametrize("address", [None, "0", 1.5, True, [0]])
+def test_read_registers_rejects_non_int_address(address):
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError) as excinfo:
+        writer.read_registers(11, "hr", address, 1)
+    assert str(excinfo.value) == f"address must be an int, got {address!r}"
+
+
+@pytest.mark.parametrize("value", [None, "0", 1.5, True, [0]])
+def test_write_bits_rejects_non_int_bit_address(value):
+    """位号同理：`write_bits(11,'co',None,True)` 实测 `TypeError: unsupported operand
+    type(s) for //`；`bit_address=True` 会静默把线圈 1 点亮。
+
+    `True` 在这里走的是地址参数（不是位值），所以照样按整数判据拒。
+    """
+    store = core()
+    writer = RawRegisterWriter(store)
+    with pytest.raises(ValueError) as excinfo:
+        writer.write_bits(11, "co", value, True)
+    assert str(excinfo.value) == f"bit_address must be an int, got {value!r}"
+    assert writer.read_bits(11, "co", 0, 8) == [False] * 8
+
+
+@pytest.mark.parametrize("count", [None, "2", 1.5, True, [1]])
+def test_read_bits_rejects_non_int_count(count):
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError) as excinfo:
+        writer.read_bits(11, "co", 0, count)
+    assert str(excinfo.value) == f"count must be an int, got {count!r}"
+
+
+@pytest.mark.parametrize("address", [None, "0", 1.5, True, [0]])
+def test_read_bits_rejects_non_int_bit_address(address):
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError) as excinfo:
+        writer.read_bits(11, "co", address, 1)
+    assert str(excinfo.value) == f"bit_address must be an int, got {address!r}"
+
+
+def test_programming_errors_still_beat_the_unknown_unit_shortcut():
+    """脏参数是 bug，unit 不存在是运行期状态：前者必须抛，不许被 `return None/False` 吞。"""
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError, match="address must be an int"):
+        writer.read_registers(77, "hr", None, 1)
+    with pytest.raises(ValueError, match="address must be an int"):
+        writer.write_registers(77, "hr", None, [1])
+
+
+def test_clean_integers_still_work_after_the_gate():
+    """gate 不许误杀：真 int（含负数与 0）走原来的判定，不新增异常。"""
+    store = core()
+    writer = RawRegisterWriter(store)
+    assert writer.write_registers(11, "hr", 1, [77]) is True
+    assert writer.read_registers(11, "hr", 1, 1) == [77]
+    assert writer.read_registers(11, "hr", -1, 1) is None       # 越界仍是 None
+    assert writer.write_registers(11, "hr", -1, [1]) is False   # 越界仍是 False
+    assert writer.write_bits(11, "co", 0, True) is True

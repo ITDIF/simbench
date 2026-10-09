@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import MISSING, fields
 from pathlib import Path
 
 from .model import BOOL, Device, Point, Project, TcpChannel, brief, parse_value
@@ -69,6 +70,33 @@ def _require_array(value, what: str) -> list:
     return value
 
 
+def _required_keys(model_cls) -> tuple[str, ...]:
+    """dataclass 里没有默认值的字段就是 project.json 的必填键，清单由字段定义派生。
+
+    不在这里抄第二份键名列表（同裁决 M 对 codec `_NUMERIC` 的要求）：`Point` 加一个必填
+    字段时，手抄的清单必然漏，缺键又退回 `KeyError` 逃逸。`row`（CSV 行号，不进 json）
+    有默认值，自然不会被算成必填键。
+    """
+    return tuple(f.name for f in fields(model_cls)
+                 if f.default is MISSING and f.default_factory is MISSING)
+
+
+def _require_keys(raw: dict, model_cls, loc: str) -> None:
+    """缺必填键 → 领域 ValueError，不是 `KeyError`。
+
+    `raw["area"]` 直接下标在缺键时抛 `KeyError: 'area'`，而本模块的契约是"文件读不到 →
+    OSError / 读出来了但读不懂 → ValueError"（`load` 的 docstring、Task 12 的装载口只
+    `except ValueError`）：手改 project.json 删掉一行是纯粹的"读不懂"，逃逸成 KeyError
+    就是当场 traceback。而且 `KeyError: 'area'` 既不说是哪个点位也不说是哪个设备，现场
+    对着几千行的工程文件找不到该补哪一条，所以消息按层级点名，序号从 1 数（与 CSV 行号
+    同向）。形状 gate（`_require_object`）必须排在它前面：`key not in "p"` 在字符串上是
+    子串判定，会把"point 不是 object"说成"缺键"。
+    """
+    for key in _required_keys(model_cls):
+        if key not in raw:
+            raise ValueError(f"project.json {loc} is missing required key '{key}'")
+
+
 def _point_to_dict(point: Point) -> dict:
     out = {name: getattr(point, name) for name in _POINT_FIELDS}
     out["wave_param"] = dict(point.wave_param)
@@ -76,9 +104,10 @@ def _point_to_dict(point: Point) -> dict:
     return out
 
 
-def _point_from_dict(raw: dict) -> Point:
+def _point_from_dict(raw: dict, index: int, device_name: str) -> Point:
     _require_object(raw, "point")
-    loc = f"point {brief(raw.get('name'))}"
+    _require_keys(raw, Point, f"point #{index} of device {brief(device_name)}")
+    loc = f"point {brief(raw['name'])}"
     # initial 只 str()，不截断也不判类型（裁决 B）：`100.5` 进来变成字符串 "100.5"，
     # 由 validate 的 [initial] 一条说完；这里判就变成 loader 造第二套类型口径。
     return Point(
@@ -96,13 +125,16 @@ def _device_to_dict(device: Device) -> dict:
             "points": [_point_to_dict(p) for p in device.points]}
 
 
-def _device_from_dict(raw: dict) -> Device:
+def _device_from_dict(raw: dict, index: int, channel_name: str) -> Device:
     _require_object(raw, "device")
-    return Device(name=raw["name"],
+    _require_keys(raw, Device, f"device #{index} of channel {brief(channel_name)}")
+    name = raw["name"]
+    return Device(name=name,
                   unit_id=_require_int(raw["unit_id"], "unit_id",
-                                       f"device {brief(raw.get('name'))}"),
-                  points=[_point_from_dict(p)
-                          for p in _require_array(raw.get("points", []), "points")])
+                                       f"device {brief(name)}"),
+                  points=[_point_from_dict(p, i, name)
+                          for i, p in enumerate(
+                              _require_array(raw.get("points", []), "points"), 1)])
 
 
 def _channel_to_dict(channel: TcpChannel) -> dict:
@@ -111,15 +143,18 @@ def _channel_to_dict(channel: TcpChannel) -> dict:
             "devices": [_device_to_dict(d) for d in channel.devices]}
 
 
-def _channel_from_dict(raw: dict) -> TcpChannel:
+def _channel_from_dict(raw: dict, index: int) -> TcpChannel:
     _require_object(raw, "channel")
+    _require_keys(raw, TcpChannel, f"channel #{index}")
+    name = raw["name"]
     return TcpChannel(
-        name=raw["name"], type=raw.get("type", "tcp"),
+        name=name, type=raw.get("type", "tcp"),
         host=raw.get("host", "0.0.0.0"),
         port=_require_int(raw.get("port", 502), "port",
-                          f"channel {brief(raw.get('name'))}"),
-        devices=[_device_from_dict(d)
-                 for d in _require_array(raw.get("devices", []), "devices")])
+                          f"channel {brief(name)}"),
+        devices=[_device_from_dict(d, i, name)
+                 for i, d in enumerate(
+                     _require_array(raw.get("devices", []), "devices"), 1)])
 
 
 def to_dict(project: Project) -> dict:
@@ -138,7 +173,8 @@ def from_dict(data: dict) -> Project:
         raise ValueError(f"unsupported project.json version {brief(version)}, "
                          f"expected {VERSION}")
     channels = _require_array(data.get("channels", []), "channels")
-    return Project(channels=[_channel_from_dict(ch) for ch in channels],
+    return Project(channels=[_channel_from_dict(ch, i)
+                             for i, ch in enumerate(channels, 1)],
                    tick_ms=_require_int(data.get("tick_ms", 100), "tick_ms", "project"))
 
 

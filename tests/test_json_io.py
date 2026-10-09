@@ -394,3 +394,60 @@ def test_dirty_version_is_truncated_in_the_message():
     assert "..." in message
     assert junk[:100] not in message
     assert len(message) < 200
+
+
+# ---- loader 契约的最后一类：缺必填键（现场手改 project.json 删掉一行）----
+
+@pytest.mark.parametrize("key", ["name", "area", "address", "datatype"])
+def test_point_missing_required_key_is_a_domain_error(key):
+    """`raw["area"]` 直接下标取值时缺键抛 `KeyError`，与 loader 的 ValueError 契约不符。
+
+    loader 的契约（`load` 的 docstring + Task 12 的装载口）是"文件读不到 → OSError，
+    读出来了但读不懂 → ValueError"，装载口只 `except ValueError`：缺键是纯粹的"读不懂"，
+    逃逸成 KeyError 就是当场 traceback，而且那条消息（`KeyError: 'area'`）不带点位与
+    设备，现场根本不知道是工程文件里哪一行被删了。消息按层级点名（同 `_require_object`）。
+    """
+    data = _doc()
+    del _point_part(data)[key]
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == \
+        f"project.json point #1 of device 'D' is missing required key '{key}'"
+
+
+@pytest.mark.parametrize("key", ["name", "unit_id"])
+def test_device_missing_required_key_is_a_domain_error(key):
+    data = _doc()
+    del data["channels"][0]["devices"][0][key]
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == \
+        f"project.json device #1 of channel 'c' is missing required key '{key}'"
+
+
+def test_channel_missing_required_key_is_a_domain_error():
+    data = _doc()
+    del data["channels"][0]["name"]
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == \
+        "project.json channel #1 is missing required key 'name'"
+
+
+def test_shape_gate_runs_before_the_missing_key_gate():
+    """`"point": "p"` 的错是"形状"不是"缺键"：消息必须先说 must be an object。
+
+    `key not in "p"` 在字符串上是子串判定，不 gate 形状就会把形状错说成缺键错，
+    现场按缺键去补字段反而补出第二个错。
+    """
+    data = _doc()
+    data["channels"][0]["devices"][0]["points"] = ["p"]
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == "project.json point must be an object, got str"
+
+
+def test_complete_document_still_loads_after_the_missing_key_gate():
+    """gate 不许误杀：`_doc()` 这种"只带必填键"的合法文档照常加载（可选键有默认值）。"""
+    proj = from_dict(_doc())
+    assert proj.channels[0].devices[0].points[0].name == "p"

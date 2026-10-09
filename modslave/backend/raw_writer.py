@@ -40,6 +40,23 @@ def _check_values(area: str, values: list[int]) -> None:
         raise ValueError(f"{area} registers must be ints in 0..65535, got {brief(values)}")
 
 
+def _check_int(value, what: str) -> int:
+    """address / bit_address / count 的整数判据，与 `_check_values` 同口径（裁决 5）。
+
+    实测两条残留：`write_registers(11,'hr',None,[1])` 抛 `TypeError: unsupported operand
+    type(s) for -`，`read_registers(11,'hr',0,None)` 抛 `TypeError: '<=' not supported`——
+    脏参数从引擎逃出去就是 traceback，而装载口/调用口只兜 `ValueError`。
+    更危险的是 `bool`：`isinstance(True, int)` 为真，实测
+    `write_registers(11,'hr',True,[1])` 把值写进 **1 号寄存器**、
+    `read_registers(11,'hr',0,True)` 回 `[1]`（count 当成 1）——一个合法但错位读写，
+    主站读到的是隔壁点位，现场只会当平台 bug 调。判据与值元素同一条：非 int 或 bool 混入
+    就 ValueError；负数与越界正整数不在这里判（那不是类型错，由 `_defined` 回 None/False）。
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{what} must be an int, got {brief(value)}")
+    return value
+
+
 def _defined(flags: list[int], offset: int, count: int) -> bool:
     """`[offset, offset+count)` 这段是不是点表真定义过的地址。
 
@@ -62,8 +79,10 @@ class RawRegisterWriter:
 
     def write_registers(self, unit_id: int, area: str, address: int,
                         values: list[int]) -> bool:
-        # 两个编程错误先炸，再谈运行期数据错误：值列表不对，unit 存不存在都不重要。
+        # 编程错误（area / address / 值列表）先炸，再谈运行期数据错误：参数不对，
+        # unit 存不存在都不重要。
         block = self._block(unit_id, area)   # 未知 area -> ValueError
+        _check_int(address, "address")       # 非 int / bool 混入 -> ValueError
         _check_values(area, values)          # 脏容器/空表/越界/非 int -> ValueError（不再掩码）
         if block is None:                    # 未知 unit -> 运行期数据错误
             return False
@@ -78,6 +97,8 @@ class RawRegisterWriter:
     def read_registers(self, unit_id: int, area: str, address: int,
                        count: int) -> list[int] | None:
         block = self._block(unit_id, area)
+        _check_int(address, "address")
+        _check_int(count, "count")
         if block is None:
             return None
         start, _length, registers, flags = block
@@ -101,6 +122,7 @@ class RawRegisterWriter:
         if not isinstance(value, bool):
             raise ValueError(f"{area} bit value must be a bool, got {brief(value)}")
         block = self._block(unit_id, area)
+        _check_int(bit_address, "bit_address")
         if block is None:
             return False
         start, _length, registers, flags = block
@@ -115,6 +137,8 @@ class RawRegisterWriter:
     def read_bits(self, unit_id: int, area: str, bit_address: int,
                   count: int) -> list[bool] | None:
         block = self._block(unit_id, area)
+        _check_int(bit_address, "bit_address")
+        _check_int(count, "count")
         if block is None:
             return None
         start, _length, registers, flags = block
