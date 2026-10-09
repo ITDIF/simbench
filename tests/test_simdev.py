@@ -5,9 +5,10 @@ import pytest
 from pymodbus.constants import ExcCodes
 from pymodbus.simulator import DataType, SimDevice
 from pymodbus.simulator.simcore import SimCore
+from modslave.backend import simdev
 from modslave.backend.simdev import area_to_index, build_sim_devices, simdata_for_point
 from modslave.codec.point_codec import encode
-from modslave.project.model import Device, Point, Project, TcpChannel
+from modslave.project.model import AREAS, Device, Point, Project, TcpChannel
 
 
 def _proj(*points, unit=11, name="c1"):
@@ -187,3 +188,41 @@ def test_same_unit_id_across_channels_is_rejected():
     proj = Project(channels=[p1.channels[0], p2.channels[0]])
     with pytest.raises(ValueError, match="unit_id 11"):
         build_sim_devices(proj)
+
+
+def test_unknown_area_is_a_domain_error_not_silently_a_register_area():
+    """实测：`area="holding"` 以前静默按 REGISTERS 建块，要到 `build_sim_devices`
+    才在 `area_to_index` 抛 `KeyError`（非领域异常、还不带点位名）。
+
+    假设备因此会把自己"该区不存在"的口径错法带上线：主站读 hr 拿到值，而点表作者
+    以为自己在配一个叫 holding 的区。未知 area 只可能是点表或调用方的错，当场带上
+    点位名问人（裁决 6）。
+    """
+    with pytest.raises(ValueError) as excinfo:
+        simdata_for_point(Point("温度", "holding", 0, "uint16", initial="1"))
+    assert str(excinfo.value) == "unknown area 'holding' for point '温度'"
+
+
+@pytest.mark.parametrize("area", ["HR", "HOLDING", "coil", "", "input", None])
+def test_every_area_outside_the_four_is_rejected_with_the_point_name(area):
+    """大小写也算未知：CSV/json loader 会把 area 规范化成小写，`HR` 进到这里就是脏值。"""
+    with pytest.raises(ValueError, match="unknown area"):
+        simdata_for_point(Point("p", area, 0, "uint16", initial="1"))
+
+
+def test_bit_and_register_areas_still_map():
+    """gate 不许误杀四个合法区：co/di 走 BITS，hr/ir 走 REGISTERS。"""
+    assert simdata_for_point(Point("p", "co", 0, "bool", initial="true")).datatype \
+        is DataType.BITS
+    assert simdata_for_point(Point("p", "di", 0, "bool", initial="true")).datatype \
+        is DataType.BITS
+    assert simdata_for_point(Point("p", "hr", 0, "uint16", initial="1")).datatype \
+        is DataType.REGISTERS
+    assert simdata_for_point(Point("p", "ir", 0, "uint16", initial="1")).datatype \
+        is DataType.REGISTERS
+
+
+def test_simdev_does_not_keep_a_second_area_list():
+    """M1：`_AREAS` 是手抄的第二份真相，元组顺序必须直接取自 model.AREAS（同裁决 M）。"""
+    assert simdev.AREAS is AREAS
+    assert [simdev.area_to_index(a) for a in AREAS] == [0, 1, 2, 3]

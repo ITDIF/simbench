@@ -15,13 +15,26 @@ _BLOCK = {"co": "c", "di": "d", "hr": "h", "ir": "i"}
 
 
 def _check_values(area: str, values: list[int]) -> None:
-    """裁决 2：入口拒绝越界值，`& 0xFFFF` 只许用在产出侧（与 codec 的 `_check_registers` 同口径）。
+    """裁决 2/5：入口拒绝脏容器、空值表与越界值，`& 0xFFFF` 只许用在产出侧。
 
-    掩码会把 70000 静默截成 4464 写进寄存器，主站读到的是一个"合法但错误"的遥测量，
-    现场只会当成平台 bug 去调。引擎的写入值都来自 codec，天然在 0..65535 内，出现
-    越界值（或 bool/float/str）只可能是引擎或调用方的 bug —— 必须在写之前当场炸出来。
+    判据与 codec 的 `_check_registers` 同口径同句式（不是 list/tuple 就拒、消息同一句），
+    但谓词不跨层复用：`backend → codec` 的依赖会让"引擎只用 raw_writer 写寄存器"这条
+    边界变模糊，宁可留两句一样的文案。
+
+    - 脏容器：`write_registers(11,'hr',0,5)` 实测抛 `TypeError`（逃逸），`set()`/`{}`/`()`
+      实测静默返回 False。整数迭代到 str/int 上才会炸，所以容器判定必须排在前面。
+    - 空值表：以前同样静默 False，语义不明——"一个都没写"和"地址未定义写不进"是两件
+      事，Task 11 的批量写会把成功当失败。现在单独抛 `empty value list`。
+    - 越界/脏元素：掩码会把 70000 静默截成 4464 写进寄存器，主站读到的是一个"合法但
+      错误"的遥测量，现场只会当成平台 bug 去调。引擎的写入值都来自 codec，天然在
+      0..65535 内，出现越界值（或 bool/float/str）只可能是引擎或调用方的 bug。
+
     先整表校验再落地，绝不半写：`[1, 70000]` 不能把地址 0 改了一半。
     """
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{area} registers must be ints in 0..65535, got {brief(values)}")
+    if not values:
+        raise ValueError("empty value list")
     if any(not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 0xFFFF
            for v in values):
         raise ValueError(f"{area} registers must be ints in 0..65535, got {brief(values)}")
@@ -51,7 +64,7 @@ class RawRegisterWriter:
                         values: list[int]) -> bool:
         # 两个编程错误先炸，再谈运行期数据错误：值列表不对，unit 存不存在都不重要。
         block = self._block(unit_id, area)   # 未知 area -> ValueError
-        _check_values(area, values)          # 越界/非 int -> ValueError（不再掩码）
+        _check_values(area, values)          # 脏容器/空表/越界/非 int -> ValueError（不再掩码）
         if block is None:                    # 未知 unit -> 运行期数据错误
             return False
         start, _length, registers, flags = block
@@ -79,7 +92,14 @@ class RawRegisterWriter:
         四区独立形态下 `use_bit_addressing` 恒为 True（"已实测事实"2），元组里的 start
         已经是**寄存器下标**（`__create_block_bits` 返回 `int(start_address / 16)`），
         所以先 `// 16` 换寄存器、再 `% 16` 取位偏移，与 `SimRuntime.get_bit_block` 同式。
+
+        值只收 Python bool（裁决 4，与 `write_registers` 的严格口径对称）：实测
+        `write_bits(11,'co',0,"0")` 把线圈置成 True，`"no"` 同样置 True，`None`/`[]`/`""`
+        静默 False。`bool(value)` 对非空字符串恒真，正是裁决 A 禁的"未识别值静默给
+        bool"——引擎想关风机、位被写成开，主站读回一个合法但相反的开关量。
         """
+        if not isinstance(value, bool):
+            raise ValueError(f"{area} bit value must be a bool, got {brief(value)}")
         block = self._block(unit_id, area)
         if block is None:
             return False

@@ -6,7 +6,7 @@ from modslave.project.csv_io import (
     HEADER, format_wave_param, parse_wave_param, read_csv, read_csv_file,
     write_csv, write_csv_file,
 )
-from modslave.project.model import Project
+from modslave.project.model import Device, Point, Project, TcpChannel
 from modslave.project.validate import error_lines, validate_project
 
 ROWS = """channel,device,unit_id,name,area,address,datatype,word_order,initial,waveform,wave_param,readonly
@@ -432,3 +432,89 @@ def test_write_csv_uses_exactly_the_header_contract_and_lf():
     assert text.splitlines()[0] == ",".join(HEADER)
     assert "\r" not in text
     assert len(text.splitlines()) == 5                      # 表头 + 4 个点位
+
+
+# ---- 裁决 8：三个身份列不许为空（Excel 少拖一格就会交出这样一张表）----
+
+def _row(**overrides) -> str:
+    """一行合法点表，测试按需把某一列留空。"""
+    cells = {"channel": "tcp-502", "device": "COVI-1", "unit_id": "11", "name": "CO",
+             "area": "hr", "address": "0", "datatype": "uint16", "word_order": "ABCD",
+             "initial": "0", "waveform": "const", "wave_param": "", "readonly": "false"}
+    cells.update(overrides)
+    return ",".join(HEADER) + "\n" + ",".join(cells[col] for col in HEADER) + "\n"
+
+
+@pytest.mark.parametrize("column", ["channel", "device", "name"])
+def test_empty_identity_column_is_rejected_with_line_number(column):
+    """空 channel 会建出一个名为 '' 的通道，空 device/name 把空串原样带进模型。
+
+    后果是点位挂到无名通道上：GUI 列表、报文解析、日志三边都对不上号，而从站照样
+    起得来。行号只有 loader 知道，所以这条必须停在 read_csv，不许挪进 validate。
+    """
+    with pytest.raises(ValueError) as excinfo:
+        read_csv(_row(**{column: ""}), ports=ALL_PORTS)
+    assert str(excinfo.value) == f"line 2: {column} must not be empty"
+
+
+@pytest.mark.parametrize("column", ["channel", "device", "name"])
+def test_whitespace_only_identity_column_is_also_empty(column):
+    """单元格只有空格：`_rows` 已经 strip 过，判据必须看 strip 之后的长度。"""
+    with pytest.raises(ValueError, match=f"line 2: {column} must not be empty"):
+        read_csv(_row(**{column: "   "}), ports=ALL_PORTS)
+
+
+def test_two_rows_with_empty_channel_do_not_merge_into_an_unnamed_channel():
+    """实测旧行为：两行空 channel 会并进同一个 `''` 通道，现在两行都拒绝。"""
+    text = (",".join(HEADER) + "\n"
+            ",COVI-1,11,p1,hr,0,uint16,ABCD,0,const,,false\n"
+            ",COVI-1,11,p2,hr,1,uint16,ABCD,0,const,,false\n")
+    with pytest.raises(ValueError) as excinfo:
+        read_csv(text, ports=ALL_PORTS)
+    assert str(excinfo.value) == "line 2: channel must not be empty"
+
+
+def test_empty_name_is_not_left_for_validate_to_notice():
+    """validate 对空 name 一条 error 都不出（实测），空串能一路走到模型里：
+    所以挡它的地方只能是 loader，这条断言同时钉住"两边都没静默放行"。"""
+    proj = Project(channels=[TcpChannel(name="c", devices=[Device(
+        name="D", unit_id=1, points=[Point("", "hr", 0, "uint16")])])])
+    assert error_lines(validate_project(proj)) == []
+    with pytest.raises(ValueError, match="line 2: name must not be empty"):
+        read_csv(_row(name=""), ports=ALL_PORTS)
+
+
+def test_other_columns_may_stay_empty():
+    """只有三个身份列不许空：word_order/waveform/wave_param/initial 留空仍按默认走。"""
+    proj = read_csv(_row(word_order="", waveform="", wave_param="", initial=""),
+                    ports=ALL_PORTS)
+    pt = proj.channels[0].devices[0].points[0]
+    assert (pt.word_order, pt.waveform, pt.wave_param, pt.initial) == \
+        ("ABCD", "const", {}, "")
+
+
+# ---- 裁决 N 在本轮的四处漏网：消息必须走 brief() 截断 ----
+
+def test_header_mismatch_message_truncates_the_actual_header():
+    """200 列的厂商表：旧写法实测 1020 个字符（期望表头是我们自己的常量，不截）。"""
+    header = ",".join(f"col{i}" for i in range(200))
+    with pytest.raises(ValueError) as excinfo:
+        read_csv(header + "\n", ports=ALL_PORTS)
+    message = str(excinfo.value)
+    assert f"expected {','.join(HEADER)}" in message
+    assert "..." in message
+    assert "col99" not in message
+    assert len(message) < 300
+
+
+def test_device_conflict_message_truncates_both_device_names():
+    """实测 654 字符：冲突的两个设备名都要 brief()，判定逻辑不变。"""
+    junk = "D" * 400
+    text = ROWS + f"tcp-502,{junk},11,电压,hr,4,uint16,ABCD,0,const,,false\n"
+    with pytest.raises(ValueError) as excinfo:
+        read_csv(text, ports=ALL_PORTS)
+    message = str(excinfo.value)
+    assert message.startswith("line 6: unit_id 11 is already used by device 'COVI-1', got '")
+    assert "..." in message
+    assert junk[:100] not in message
+    assert len(message) < 300

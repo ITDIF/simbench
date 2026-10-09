@@ -14,6 +14,10 @@ from .model import Device, Point, Project, TcpChannel, brief
 
 HEADER = ["channel", "device", "unit_id", "name", "area", "address", "datatype",
           "word_order", "initial", "waveform", "wave_param", "readonly"]
+# 三个身份列：空的 channel 会建出一个名为 '' 的通道（两行还会并进同一个无名通道），
+# 空的 device/name 把空串原样带进模型，validate 一条 error 都不出、从站照起。Excel
+# 少拖一格就会这样，后果是点位挂到无名通道上，GUI、报文和日志三边都对不上号。
+_IDENTITY_COLUMNS = ("channel", "device", "name")
 # readonly 只认这两张表，其余（含空串、`TURE` 这种拼错的）一律 ValueError：默默当
 # False 会把"只读"的保护静默变成"可写"，主站就能改写一个真设备只读的点位。
 # 口径与 model.py 里 bool 初值（_BOOL_TRUE/_BOOL_FALSE）对称——宁可报错，绝不静默给错值。
@@ -35,6 +39,10 @@ def read_csv(text: str, ports: dict[str, int] | None = None, address_offset: int
     channels: dict[str, TcpChannel] = {}
     devices: dict[tuple[str, int], Device] = {}
     for index, cell in rows:
+        # 身份列判空停在 try 之外：`_require_text` 的消息自带行号，再套一层前缀就变成
+        # "line 2: line 2: ..."。行号信息只有 loader 有，所以这条不许挪进 validate。
+        for col in _IDENTITY_COLUMNS:
+            _require_text(cell[col], col, index)
         try:
             address = _require_int(cell["address"], "address") + address_offset
             unit_id = _require_int(cell["unit_id"], "unit_id")
@@ -112,9 +120,11 @@ def _rows(text: str) -> list[tuple[int, dict[str, str]]]:
         raise ValueError("csv is empty")
     header = [c.strip().lower() for c in lines[0][1]]
     if header != HEADER:
-        # 两个表头都要打出来：只说"表头不对"，现场无法判断是模板换了还是列名写错
+        # 两个表头都要打出来：只说"表头不对"，现场无法判断是模板换了还是列名写错。
+        # 实际表头走 brief()（裁决 N）：200 列的厂商表实测把消息撑到 1020 个字符，
+        # 期望表头是我们自己的常量、原样打印才有比对价值。
         raise ValueError(f"header mismatch: expected {','.join(HEADER)}, "
-                         f"got '{','.join(header)}'")
+                         f"got {brief(','.join(header))}")
     if len(lines) == 1:
         # 只有表头（或表头外加注释）不能当成"读出一个零点位工程"：那样从站会
         # 起成功却什么都不应答，用户只会怀疑平台。这里就停下，话说明白。
@@ -134,6 +144,21 @@ def _require_int(text: str, what: str) -> int:
         # brief() 截断（裁决 N）：厂商表里一格粘了几百个字符时，报错还是那一句，
         # 但原值不再能把真正的线索挤出屏幕
         raise ValueError(f"{what} {brief(text)} is not an integer") from None
+
+
+def _require_text(value, what: str, index: int) -> str:
+    """身份列（channel/device/name）不许为空：空串原样进模型 = 建出一个无名通道/设备。
+
+    判据只看 strip 之后的长度——`_rows` 已经 strip 过，所以 `"   "` 这一格在 Excel 里
+    和留空完全等价，同样要拦。非 `str` 走 brief() 打出来（裁决 N），虽然 csv 模块给
+    我们的永远是 str，这一支留着是为了 `read_csv` 被别的调用方复用时不至于抛
+    `TypeError` 逃逸（json_io 同一条契约）。
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"line {index}: {what} must be a string, got {brief(value)}")
+    if not value:
+        raise ValueError(f"line {index}: {what} must not be empty")
+    return value
 
 
 def _require_bool(text: str, what: str) -> bool:
@@ -176,7 +201,8 @@ def _device_for(devices: dict[tuple[str, int], Device], channel: TcpChannel,
     if existing != device_name:
         # 同 (channel, unit_id) 就是一个设备；同一个 unit 号带出两个名字，要么是
         # unit 号抄串了行、要么是设备名打错。静默并进其中任何一个，主站读到的都是
-        # 另一台设备的值——两边都没法从报文看出来，只能当场停下问人
+        # 另一台设备的值——两边都没法从报文看出来，只能当场停下问人。
+        # 两个名字都走 brief()（裁决 N）：实测脏名字能把这条消息撑到 654 个字符。
         raise ValueError(f"line {index}: unit_id {unit_id} is already used by device "
-                         f"{existing!r}, got {device_name!r}")
+                         f"{brief(existing)}, got {brief(device_name)}")
     return devices[key]

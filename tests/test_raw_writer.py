@@ -125,3 +125,62 @@ def test_bit_write_outside_block_returns_false():
     writer = RawRegisterWriter(core())
     assert writer.write_bits(11, "co", 100, True) is False
     assert writer.read_bits(11, "co", 100, 1) is None
+
+
+# ---- 裁决 4：位值必须是真 bool（与 write_registers 的严格口径对称）----
+
+@pytest.mark.parametrize("value", ["0", "1", "no", "yes", "TURE", None, [], {}, "",
+                                    0, 1, 1.0])
+def test_write_bits_only_accepts_a_python_bool(value):
+    """实测：`write_bits(11,'co',0,"0")` 把线圈置 True，`"no"` 同样置 True。
+
+    `"0"`/`"no"` 是非空字符串恒真，`None`/`[]`/`""` 恒假——未识别值静默给一个 bool 正是
+    裁决 A 禁的那种事：引擎写下去的位和它想写的相反，主站读回来的是一个"合法但错误"的
+    开关量，现场只会当成平台 bug 调。不许改成 `bool(value)`，要当场炸。
+    """
+    store = core()
+    writer = RawRegisterWriter(store)
+    with pytest.raises(ValueError) as excinfo:
+        writer.write_bits(11, "co", 0, value)
+    assert str(excinfo.value) == f"co bit value must be a bool, got {value!r}"
+    # 抛错不许留下半个写入：地址 0..7 仍是初值 False
+    assert writer.read_bits(11, "co", 0, 8) == [False] * 8
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_write_bits_still_accepts_real_bools(value):
+    """严格 gate 不许误杀：真 bool 照旧能写，且写后读回同一个 bool。"""
+    writer = RawRegisterWriter(core())
+    assert writer.write_bits(11, "co", 3, value) is True
+    assert writer.read_bits(11, "co", 3, 1) == [value]
+
+
+# ---- 裁决 5：容器 gate 与空值列表，句式与 codec 的 `_check_registers` 一致 ----
+
+@pytest.mark.parametrize("values", [5, "x", None, {}, {1, 2}, 1.5])
+def test_write_registers_rejects_non_container_values(values):
+    """实测逃逸/静默两种都有：`write_registers(11,'hr',0,5)` 抛 TypeError，
+    `set()`/`{}`/`()` 静默返回 False。判据与 codec 同口径：不是 list/tuple 就 ValueError。
+    """
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError) as excinfo:
+        writer.write_registers(11, "hr", 0, values)
+    assert str(excinfo.value) == \
+        f"hr registers must be ints in 0..65535, got {values!r}"
+
+
+def test_write_registers_accepts_a_tuple_of_ints():
+    """codec 的容器 gate 收 list 与 tuple，这里必须同宽，否则引擎传 tuple 就自家人挨炸。"""
+    store = core()
+    writer = RawRegisterWriter(store)
+    assert writer.write_registers(11, "hr", 0, (7, 8)) is True
+    assert asyncio.run(store.async_getValues(11, 3, 0, 2)) == [7, 8]
+
+
+def test_write_registers_with_empty_list_is_rejected():
+    """空值列表以前静默返回 False：Task 11 的批量写会把"根本没写"当成一次普通失败。"""
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError, match="empty value list"):
+        writer.write_registers(11, "hr", 0, [])
+    with pytest.raises(ValueError, match="empty value list"):
+        writer.write_registers(11, "hr", 0, ())

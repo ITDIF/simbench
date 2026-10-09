@@ -5,11 +5,9 @@ from __future__ import annotations
 from pymodbus.simulator import DataType, SimData, SimDevice
 
 from ..codec.point_codec import encode
-from ..project.model import Point, Project, area_is_bit
+from ..project.model import AREAS, BIT_AREAS, Point, Project, area_is_bit, brief
 
 _INDEX = {"co": 0, "di": 1, "hr": 2, "ir": 3}
-# SimDevice 的元组顺序（与 _INDEX 一致）；空区补占位时要按区选 datatype。
-_AREAS = ("co", "di", "hr", "ir")
 
 # 位区占位的地址：抬到高位，避开真设备第一个线圈。pymodbus 的 `__create_block_bits`
 # 会把块首寄存器标成 BITS，放在 0 就等于对外承认这台设备有线圈 0..15。
@@ -55,8 +53,18 @@ def placeholder_for(area: str) -> SimData:
 
 
 def simdata_for_point(point: Point) -> SimData:
+    """一个点位 -> 一条 SimData；area 判不出来就当场问人（裁决 6）。
+
+    实测旧行为：`area="holding"` 走 `area_is_bit` 的 else 分支，**静默按 REGISTERS 建
+    块**，一路到 `build_sim_devices` 才在 `area_to_index` 抛 `KeyError`——非领域异常、
+    不带点位名，Task 12 的装载口（只 `except ValueError`）会当场 traceback。三分支显式
+    判定把口径钉死：位区、寄存器区、未知，各走各的，未知区不许被当成寄存器区上线。
+    """
+    if point.area not in AREAS:
+        raise ValueError(f"unknown area {brief(point.area)} "
+                         f"for point {brief(point.name)}")
     registers = encode(point.typed_initial(), point.datatype, point.word_order)
-    if area_is_bit(point.area):
+    if point.area in BIT_AREAS:
         return SimData(point.address, 1, [bool(registers[0])], DataType.BITS,
                        readonly=point.readonly)
     return SimData(point.address, 1, [int(r) for r in registers], DataType.REGISTERS,
@@ -81,7 +89,8 @@ def build_sim_devices(project: Project) -> list[SimDevice]:
     devices = []
     for unit_id in sorted(by_unit):
         blocks = by_unit[unit_id]
-        for i, area in enumerate(_AREAS):
+        # AREAS 就是 SimDevice 元组的顺序（co/di/hr/ir），不在这里抄第二份清单（裁决 M）
+        for i, area in enumerate(AREAS):
             if not blocks[i]:
                 blocks[i].append(placeholder_for(area))
             blocks[i].sort(key=lambda e: e.address)
