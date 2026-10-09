@@ -156,3 +156,75 @@ def test_row_key_is_absent_from_json_text_and_saved_file(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "row" not in text
     assert '"initial": "12.5"' in text                # 初值在文件里始终是字符串
+
+
+# ---- readonly 的布尔口径（与 CSV 那条同一个洞）----
+
+def _readonly_raw(value, area="hr", datatype="uint16"):
+    """一条 readonly 被改成任意 JSON 值的工程，模拟手改过的 project.json。"""
+    return {"version": 1, "tick_ms": 100,
+            "channels": [{"name": "c", "host": "0.0.0.0", "port": 502,
+                          "devices": [{"name": "D", "unit_id": 1,
+                                       "points": [{"name": "p", "area": area,
+                                                   "address": 0, "datatype": datatype,
+                                                   "initial": "0",
+                                                   "readonly": value}]}]}]}
+
+
+@pytest.mark.parametrize("value", [
+    "false", "FALSE", " No ", "n", "off", "0",        # 字符串本身合法，判成 False
+    False, "true", "TRUE", " Yes ", "y", "on", "1", True])   # 其余判成 True
+def test_readonly_accepts_python_bool_and_whitelisted_strings(value):
+    """`"false"` 是非空字符串，`bool()` 一律判 True：只读点位会被静默点亮。
+
+    改成白名单判定后两侧都不能翻：翻成全 True 主站写不进任何点，翻成全 False 就把
+    我们自己设的只读保护悄悄关掉（与 CSV 那条同一个事故方向）。
+    """
+    expected = value is True or str(value).strip().lower() in \
+        {"true", "yes", "y", "on", "1"}
+    assert _only_point(from_dict(_readonly_raw(value))).readonly is expected
+
+
+@pytest.mark.parametrize("value", [None, 2, 1, 0, "", "TURE", "01", [], [True], 1.0])
+def test_readonly_rejects_everything_else(value):
+    """null、数字、拼错的 token、空串、列表都抛 ValueError：`bool()` 对它们要么静默
+    False 要么静默 True，而静默错值会被当成平台 bug 去调（宁可报错，绝不猜）。"""
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(_readonly_raw(value))
+    assert str(excinfo.value) == f"readonly must be a boolean, got {value!r}"
+
+
+@pytest.mark.parametrize("area,datatype", [("hr", "uint16"), ("ir", "uint16")])
+def test_dirty_readonly_raises_at_the_loader_not_as_a_validate_line(area, datatype):
+    """脏 readonly 在 loader 就炸，不是一条 [readonly] 校验清单：load() 的调用点只
+    expect ValueError，所以消息必须自己把字段名说清楚，不能只说 "is not valid"。"""
+    with pytest.raises(ValueError, match="readonly"):
+        from_dict(_readonly_raw("ture", area=area, datatype=datatype))
+
+
+def test_missing_readonly_still_defaults_to_false():
+    """缺字段仍默认 False：我们自己的导出永远写这个字段，缺它说明是手改的，但默认
+    False 不改变任何已有值的语义，保留（与上面 defaults 那条同口径）。"""
+    data = _readonly_raw(True)
+    del data["channels"][0]["devices"][0]["points"][0]["readonly"]
+    assert _only_point(from_dict(data)).readonly is False
+
+
+def test_very_long_dirty_readonly_is_truncated_in_the_message():
+    """截断口径同裁决 N：几百个字符的脏 readonly 不许把真正的线索挤出屏幕。"""
+    junk = "T" * 400
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(_readonly_raw(junk))
+    message = str(excinfo.value)
+    assert message.startswith("readonly must be a boolean, got '")
+    assert "..." in message
+    assert len(message) < 200
+
+
+def test_exported_readonly_roundtrips_unchanged():
+    """写出去的是 JSON 布尔（不是字符串），严格口径必须先认得自己的导出格式，否则
+    save/load 往返会把工程判成非法文件。"""
+    assert _only_point(from_dict(to_dict(sample()))).readonly is True
+    writable = Project(channels=[TcpChannel(name="c", devices=[Device(
+        name="D", unit_id=1, points=[Point("p", "hr", 0, "uint16", readonly=False)])])])
+    assert _only_point(from_dict(to_dict(writable))).readonly is False

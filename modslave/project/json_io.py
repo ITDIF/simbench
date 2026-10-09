@@ -5,11 +5,26 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .model import Device, Point, Project, TcpChannel
+from .model import BOOL, Device, Point, Project, TcpChannel, brief, parse_value
 
 VERSION = 1
 _POINT_FIELDS = ("name", "area", "address", "datatype", "initial", "word_order",
                  "waveform", "wave_param", "readonly")
+
+
+def _require_bool(value, what: str) -> bool:
+    """readonly 只认 Python bool 和 bool 白名单里的字符串，其余一律 ValueError。
+
+    `bool(raw.get("readonly"))` 有两个静默错值的方向：`"false"` 是非空字符串恒真（把
+    可写点亮成只读，主站写不进去），`None`/`0`/`[]` 静默 False（把我们故意设的只读保护
+    关掉，主站就能改写真设备只读的点位）。判定口径复用 `model.parse_value(BOOL, ...)`，
+    白名单只此一份（裁决 E/M）；换消息只为了带上字段名，loader 的 ValueError 会被
+    Task 12 的装载口原样打印。
+    """
+    try:
+        return parse_value(BOOL, value)
+    except ValueError:
+        raise ValueError(f"{what} must be a boolean, got {brief(value)}") from None
 
 
 def _point_to_dict(point: Point) -> dict:
@@ -28,7 +43,7 @@ def _point_from_dict(raw: dict) -> Point:
         word_order=raw.get("word_order", "ABCD"),
         waveform=raw.get("waveform", "const"),
         wave_param=dict(raw.get("wave_param", {})),
-        readonly=bool(raw.get("readonly", False)))
+        readonly=_require_bool(raw.get("readonly", False), "readonly"))
 
 
 def _device_to_dict(device: Device) -> dict:
