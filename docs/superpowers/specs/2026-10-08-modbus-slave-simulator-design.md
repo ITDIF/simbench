@@ -73,6 +73,8 @@ v1 明确不做（接口留缝，见 §9）：
   → 结论：报文监视窗有官方挂点，不 fork 库。
 - `SimCore` 暴露 `async_getValues/async_setValues(device_id, func_code, address, count)`
   （`simulator/simcore.py:45-67`）——这是运行期改寄存器的入口。
+  **M1 实测修正**：这条路带 `readonly` 判定，会把引擎自己的写入也拒掉（回异常码 2），
+  所以我们只用它读、不用它写，写走 `backend/raw_writer.py` 直接改寄存器列表（§8、§12）。
 - `DataType` 的字序不可配：`SimUtils.bytesToRegisters` 硬用 `int.from_bytes(..., "big")`
   （`simulator/simutils.py:117-124`），我在 3.15.0 源码里没找到任何 word/byte swap 选项。
   → 结论：字序转换自己实现（§6）；寄存器区（hr/ir）一律按原始 reg16 数组喂 pymodbus，
@@ -125,7 +127,9 @@ project/    数据模型（Project/Channel/Device/Point）+ project.json + CSV �
 
 - 录入：CSV/GUI → `project` 模型 → `validate()` → 生成 `SimDevice` 列表 → `Backend`
 - 运行：引擎 tick（默认 100ms）→ `Waveform` 算值 → `PointCodec.encode` →
-  `SimCore.async_setValues` → 主站读时 pymodbus 直接出寄存器，不等 GUI
+  **直接改 `SimRuntime.block[..][2]` 的寄存器列表**（`backend/raw_writer.py`；已实测不能用
+  `SimCore.async_setValues`，它把 `readonly` 点上的引擎自写一起拒，见 §8/§12）→
+  主站读时 pymodbus 直接出寄存器，不等 GUI
 - 监视：`trace_packet(is_outgoing, bytes)` → `PacketEvent` → 环形缓冲（5000 条）→ 报文窗
 
 ## 5. 数据模型与 CSV
@@ -145,11 +149,17 @@ word_order, initial, waveform, wave_param, readonly
   用导入对话框的"整体偏移"输入框处理，模型里不藏隐式规则；点位表另开一列显示 `4x/3x/1x/0x`
   惯例形式便于对照
 - `datatype`：`bool int16 uint16 int32 uint32 int64 uint64 float32 float64 string reg16`
-- `word_order`：取值 `ABCD`（默认）/ `CDAB` / `BADC` / `DCBA`。四种全支持的类型是
-  int32/uint32/float32/string；int64/uint64/float64 只支持 `ABCD` 和 `DCBA`（§6）；
-  单寄存器类型（bool/int16/uint16/reg16）该列填了也忽略，校验时给一条 warning 不报错
+- `word_order`：取值 `ABCD`（默认）/ `CDAB` / `BADC` / `DCBA`。四种全支持的类型只有
+  int32/uint32/float32；`string` **只支持 `ABCD`**（已实测调整：4 个字母只描述 4 字节置换，
+  8 字节以上没有公认定义，与 64 位同理收窄）；int64/uint64/float64 只支持 `ABCD` 和 `DCBA`
+  （§6）；单寄存器类型（bool/int16/uint16/reg16）本来就只有 2 字节，填 `ABCD` 不算错，
+  填其它值只给一条 warning，不拦启动（§8）
 - `waveform`：`const / ramp / sine / random / step`；`wave_param` 见下方波形参数表
-- `readonly`：`true/false`，主站写该点返回异常码
+- `readonly`：`true/false`，主站写该点返回异常码。**未识别的值（含空串、`TURE` 这种拼错的）
+  一律启动前报错**，不静默当成可写——静默就是把"只读"的保护悄悄关掉。
+  已实测：`SimData.readonly` 同时挡主站**和我们自己的引擎**（`SimCore.async_setValues`
+  也回异常码 2），所以运行期写寄存器一律走"直接改 `SimRuntime.block[..][2]` 的列表"
+  那条路（`backend/raw_writer.py`，见 §8），`readonly` 只用来对外撒谎成真设备的样子
 
 波形参数（`wave_param`，`k=v;k=v`；`t` 一律为引擎启动后的单调时钟秒，避免系统时间跳变影响曲线）：
 
@@ -211,11 +221,20 @@ word_order, initial, waveform, wave_param, readonly
 | DCBA | DC BA |
 
 `string` 按 ASCII 两两打包（v1 只支持 ASCII，GBK 等多字节编码留给私有协议阶段），
-`count` 由长度推出。
+占用的寄存器数由长度推出。**字序只支持 `ABCD`**（§5）：两两打包的顺序就是"先到的字节在高字节"，
+给它配 `CDAB` 之类不是"另一种厂商接法"而是语义分歧，填了按启动前校验错误拦（§8）。
+
+**已实测（M1）：`SimData.count` 是"重复倍数"，不是地址跨度。** 实际跨度 =
+`len(values) × count`，写 `SimData(0, 10, [0]*10, REGISTERS)` 会占 100 个寄存器并把 20 号
+点位判成重叠（pymodbus 直接 `TypeError: SimData address 20 is overlapping!`）。
+→ 本项目**一律 `count=1`**，一个点位一条 `SimData`，占几个寄存器完全由值列表长度决定
+（钉在 `tests/test_simdev.py::test_hr_simdata_carries_encoded_initial_and_count_is_one`）。
 
 **64 位类型（int64/uint64/float64）只支持 `ABCD` 与 `DCBA`**：前者是 8 字节按大端原样切 reg，
-后者是 8 字节整体反转后切 reg。业界对 64 位的 `CDAB`/`BADC` 没有公认扩展定义（各家厂商含义
-不一致），我们不自己发明；CSV 里给 64 位类型填这两种值属启动前校验错误（§8）。
+后者是 **8 字节整体反转**后切 reg（不是"字序反转"——只反转 4 个 reg 的顺序等价于 `CDAB`，
+是另一回事，实测值见 `tests/test_codec_64bit.py`）。业界对 64 位的 `CDAB`/`BADC` 没有公认
+扩展定义（各家厂商含义不一致），我们不自己发明；CSV 里给 64 位类型填这两种值属启动前校验
+错误（§8）。
 
 v1 不做按位点位：一个寄存器就是一个点位，状态字手填整值（见 §2）。
 
@@ -245,17 +264,26 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 
 三档，不混：
 
-- **启动前校验，一次报全**：CSV 解析错误带行号；地址重叠；类型与区不匹配（如 co 上放 float32）；
-  `wave_param` 缺参或非法（`period=0`、`min>max`、类型不符）；64 位类型填 `CDAB`/`BADC`（§6）；
-  端口被占（Windows 10048）；
-  串口不存在或打不开；`unit_id` 越界。
+- **启动前校验，一次报全**：CSV 解析错误带行号；地址重叠（位区按位判、寄存器区按寄存器判，
+  两边口径实测不同，见 §12）；类型与区不匹配（如 co 上放 float32）；`wave_param` 缺参或非法
+  （`period=0`、`min>max`、类型不符）；`unit_id` 越界（只认 1..247，且不建 `id=0` 兜底设备）；
+  `host` 不是非空字符串；**`port=0`**（"让系统随便给一个"在 M1 也算 error——要读回实际端口
+  得从 pymodbus 内部摸 transport 对象，版本一变就碎）；**同一个 `(host, port)` 被两个通道
+  占用**（不等启动第二阶段炸 bind：Windows 只回 10048 且不带通道名，现场看不出是点表配置错）；
+  字序与数据类型冲突——**64 位类型填 `CDAB`/`BADC`、`string` 填非 `ABCD` 才是拦截项**
+  （语义有分歧，不许猜），而单寄存器类型（bool/int16/uint16/reg16）填了 `ABCD` 之外的值
+  只记一条 warning（§5）；端口被占（bind 阶段的 Windows 10048）；串口不存在或打不开。
   任一条不满足就**整个工程不启动**，把所有错误一次性列成清单，不做第一个错就崩。
-  注：单寄存器类型填了 `word_order` 只记 warning，不属拦截项（§5）。
 - **运行期**：USB-485 被拔 → 该通道状态置错、树节点标红、日志一条，**不自动重连**
   （现场拔插常是人有意的，静默重连会让人误判设备在线），提供"重启通道"按钮。
   TCP 服务异常同样处理。通道置错后，已缓冲的报文仍可翻阅（不清空环形缓冲），便于看断前最后几条。
-- **唯一保留的异常响应**：主站写 `readonly` 点 → 返回异常码（`SimData.readonly` /
-  `RunTimeFlag_READONLY`，v1 实测确认可用）。真实设备本来就会做这件事，不算注入。
+- **唯一保留的异常响应**：主站写 `readonly` 点 → 已实测返回**异常码 2（`ILLEGAL_ADDRESS`，
+  与越界读同码）**。真实设备本来就会做这件事，不算注入。但同一个标志位**也挡我们自己的引擎**
+  （`SimCore.async_setValues` 写只读点同样回 2 且值不变），所以运行期改寄存器一律不走
+  `SimCore`，改由 `backend/raw_writer.py` **直接改 `SimRuntime.block[..][2]` 的寄存器列表**
+  （`readonly` 因此只用于对外挡主站；用例：
+  `tests/test_raw_writer.py::test_write_into_readonly_block_succeeds_for_engine_but_master_is_refused`、
+  `tests/test_integration_tcp.py::test_readonly_point_blocks_master_but_not_engine`）。
 - 波形算出 NaN / 超 datatype 范围 → 钳位到边界 + 只记一条日志（同点同类错误 60s 内不重复刷屏）。
 
 ## 9. 留缝位置（将来加 v2 功能不推翻结构）
@@ -289,8 +317,13 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 
 每个里程碑都能单独跑起来。
 
-1. **M1 地基**：project 模型 + codec + TCP backend + 上述集成测试全绿。
+1. **M1 地基（已完成）**：project 模型 + codec + TCP backend + 上述集成测试全绿。
    验收：命令行起一个从站，第三方主站（QModMaster / 平台网关）能读到值。
+   落地在计划 `docs/superpowers/plans/2026-10-08-modslave-m1-kernel.md`、分支 `m1-kernel`，
+   命令行入口 commit `c134474`；全量 `.venv/Scripts/python.exe -m pytest` **556 passed**
+   （无 skip、无 xfail），其中 `tests/test_integration_tcp.py` 是真主站互测（八个功能码 +
+   异常码 + 字序 + 多 unit + 总线扫描日志），`tests/test_cli.py` 是命令行入口验收。
+   **还等人的只有人工那一条**：QModMaster 手连一遍计划 Task 12 Step 8 的 6 项。
 2. **M2 GUI 最小可用**：设备树 + 点位表 + 双击改值 + 通道启停。
 3. **M3 CSV 导入导出 + 报文监视窗 + 多通道独立启停**。
 4. **M4 波形引擎**（const/ramp/sine/random/step）+ 点位属性面板 —— 纯逻辑、可全自动测，
@@ -303,21 +336,48 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 的完整可用工具，全程可自动化验证。M5（RTU）单独出第二份计划，因为它需要你在笔记本 + USB-485
 上做人工冒烟，混进第一份会让"全部通过"无从判定。
 
-> 自审调整：本条顺序在批次 3 里原本是 RTU=M4、波形=M5。理由改了——波形不依赖硬件且是 v1
-> 必须项，RTU 依赖硬件，所以先做波形。
+**顺序变更（已生效）**：里程碑定稿为 **M4 波形引擎、M5 RTU**；批次 3 里原本排的是 RTU=M4、
+波形=M5。改过来的理由是波形不依赖硬件且是 v1 必须项、能全自动回归，RTU 必须真串口 +
+人工冒烟——先做波形，硬件那条不挡在前面。本份 M1 计划与后续 M2–M5 都按这个顺序执行。
 
 ## 12. 待实测确认（按里程碑各自清零，不写进代码假设）
 
-M1 内必须确认：
+M1 内必须确认（**已全部清零，下列结论都有对应用例钉住，改行为前先改用例**）：
 
-- `DataType.REGISTERS` + `readonly` + `SimData(count=N)` 组合下，越界读返回的异常码是否为
-  `ILLEGAL_ADDRESS`(0x02)，写只读点返回哪个码；
-- `SimCore.async_setValues` 写入四区独立设备时的 `func_code` 取值约定（用 1/2/3/4 还是
-  5/6/15/16 —— `ModbusDeviceContext._fx_mapper` 显示 1/5/15→co、2→di、3/6/16→hr、4→ir，
-  需实测确认 SimRuntime 走的是同一张表）；
-- co/di 四区独立模式下"每个寄存器代表一个线圈"的寻址口径是否与现场点表一致；
-- 未定义的地址段是否真的产生 ExceptionResponse（`SimDevice` 文档说"addresses not defined
-  are invalid"，这直接决定我们要不要把地址表铺满）。
+- **已实测：寄存器区的未定义地址与只读点都回异常码 2（`ILLEGAL_ADDRESS`）。**
+  `DataType.REGISTERS` + 值列表 + `count=1` 下，点表里的地址空洞被 `SimRuntime.__create_block`
+  填成 `DataType.INVALID`，主站读到就是 2；写 `readonly` 点同样是 2（不是别的码）。
+  → **点表不需要把地址铺满**。证据：
+  `tests/test_integration_tcp.py::test_undefined_register_address_returns_exception_2`、
+  `::test_readonly_point_blocks_master_but_not_engine`，datastore 层同口径见
+  `tests/test_simdev.py::test_empty_register_area_reads_illegal_address_at_datastore_layer`。
+- **已实测：`SimCore.async_getValues/async_setValues` 的 `func_code` 走的就是
+  `SimRuntime._fx_mapper` 那张表**（1/5/15→co、2→di、3/6/16→hr、4→ir），四区独立设备一样。
+  但 **`readonly` 会连引擎自己的写入一起拒**：`async_setValues(11, 4, 0, [999])` 回 2 且值不变。
+  → 运行期写寄存器**不走 `SimCore`**，改成直接改 `SimRuntime.block[..][2]` 的列表
+  （`backend/raw_writer.py`），主站路径的 `readonly` 判定不受影响。证据：
+  `tests/test_raw_writer.py::test_write_into_readonly_block_succeeds_for_engine_but_master_is_refused`、
+  `func_code` 取值见 `tests/test_simdev.py`（fc=1/2/3/4/5 五种 `async_getValues`/
+  `async_setValues` 断言，覆盖 co/di/hr/ir 四个区）。
+- **已实测：位区与寄存器区的"空洞"行为不对称，且 pymodbus 禁止 co/di 出现非 `BITS` 条目。**
+  同一 16 位寄存器覆盖下的未定义线圈**读得到（False）也写得进去（回 ACK）**，超出块才回 2；
+  寄存器区则一律回 2。四区独立形态强制 `use_bit_addressing=True`，**主站按位号寻址**，
+  我们不做 ×16 换算（与隧道现场点表一致）。空区必须补占位条目（pymodbus 不接受空 list），
+  而位区占位只能是 `BITS` → **占位地址抬到高地址 65520**：放地址 0 实测会让一台压根没有线圈的
+  假从站对外 ACK 线圈写（风机启动指令收到"成功"），比显示错值更糟。
+  残余代价（位 65520..65535 对外算"已定义"）也被钉住了。证据：
+  `tests/test_integration_tcp.py::test_bit_area_gap_is_readable_and_writable`、
+  `::test_empty_bit_area_answers_exception_2_to_a_real_master`、
+  `::test_placeholder_bit_window_is_the_pinned_residual_cost`，
+  datastore 层见 `tests/test_simdev.py::test_empty_bit_area_reads_and_writes_illegal_address_at_datastore_layer`。
+  重叠校验因此**位区按位判、寄存器区按寄存器判**。
+- **已实测：未定义的 `unit_id` 回异常码 4（`DEVICE_FAILURE`）且服务不崩，但 pymodbus 会往
+  `pymodbus.logging` 刷整段栈**（`SimCore.__get_device` 回落 `devices[0]` → `KeyError: 0`；
+  一次 1..247 的总线扫描实测 492 行）。协议行为是对的，噪音在 backend 层用日志 filter 压掉
+  （`configure_library_logging`）。**不建 `id=0` 兜底设备**：加了它总线扫描会变成 247 台全应答，
+  现场看到的是一条根本不存在的总线。证据：
+  `tests/test_integration_tcp.py::test_unknown_unit_id_answers_exception_4_and_server_survives`、
+  `::test_bus_scan_does_not_flood_the_log`、`tests/test_simdev.py::test_no_id_zero_device`。
 
 M5 内确认：
 
