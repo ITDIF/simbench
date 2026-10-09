@@ -1,11 +1,13 @@
 # tests/test_simdev.py
 import asyncio
+import dataclasses
 
 import pytest
 from pymodbus.constants import ExcCodes
 from pymodbus.simulator import DataType, SimDevice
 from pymodbus.simulator.simcore import SimCore
 from modslave.backend import simdev
+from modslave.backend.events import ChannelState, LogLine, PacketEvent, PointChanged
 from modslave.backend.simdev import area_to_index, build_sim_devices, simdata_for_point
 from modslave.codec.point_codec import encode
 from modslave.project.model import AREAS, Device, Point, Project, TcpChannel
@@ -38,8 +40,34 @@ def test_bit_point_uses_bits_datatype_and_one_value():
 
 
 def test_readonly_flag_is_passed_through():
+    """readonly 两侧都要钉住：恒 True 让主站写不进任何一个点，恒 False 把只读保护拆掉。
+
+    变异检查实测（整改前）：把 `simdata_for_point` 改成恒 `readonly=True`，全量 468 条
+    **全绿**——"风机启动永远写不进去"这种能毁掉 M1 验收的退化当时没有任何测试拦得住。
+    `is True`/`is False` 而不是 `==`：占位与真点位都走同一个 dataclass 字段，判 `is`
+    才挡得住把 readonly 写成 0/1 或 None 的改动。
+    """
     pt = Point("版本", "ir", 0, "uint16", initial="7", readonly=True)
     assert simdata_for_point(pt).readonly is True
+    writable = Point("温度", "hr", 0, "uint16", initial="7", readonly=False)
+    assert simdata_for_point(writable).readonly is False
+    # 位区同理：线圈写不进去 = 风机启不动，而报文上看不出任何异常
+    assert simdata_for_point(Point("启动", "co", 3, "bool",
+                                   initial="false", readonly=False)).readonly is False
+    assert simdata_for_point(Point("运行", "di", 4, "bool",
+                                   initial="true", readonly=True)).readonly is True
+
+
+def test_placeholder_entries_are_not_readonly():
+    """占位条目的 readonly 恒 False：它只用来让 pymodbus 肯建块，不许带只读语义。
+
+    占位标成 readonly=True 的话，引擎将来复用这一段地址（裁决 1 之后位区是 65520）
+    会被自己设的标志挡住，而且异常码 2 与"只读被拒"在主站侧是同一个码，现场查不到
+    到底是哪一条。
+    """
+    blocks = build_sim_devices(_proj(Point("h", "hr", 0, "uint16")))[0].simdata
+    for entry in (blocks[0][0], blocks[1][0], blocks[3][0]):
+        assert entry.readonly is False
 
 
 def test_device_is_built_as_four_blocks():
@@ -226,3 +254,47 @@ def test_simdev_does_not_keep_a_second_area_list():
     """M1：`_AREAS` 是手抄的第二份真相，元组顺序必须直接取自 model.AREAS（同裁决 M）。"""
     assert simdev.AREAS is AREAS
     assert [simdev.area_to_index(a) for a in AREAS] == [0, 1, 2, 3]
+
+
+def test_event_dataclass_fields_are_the_contract():
+    """events 的字段名/顺序/默认值是 Task 10、Task 11 和 GUI 的消费合同，改名换序即崩。
+
+    这四个 dataclass 此前零测试，而调用点是按属性名取值（`event.unit_id`）、按位置构造
+    （`PacketEvent("c", "rx", raw)`）的：任何一次重命名或插队都会静默改掉 GUI 拿到的
+    字段。这里做一次 `dataclasses.fields` 快照，改动必须先在这条上看见红。
+    """
+    def names(cls):
+        return [f.name for f in dataclasses.fields(cls)]
+
+    def defaults(cls):
+        return {f.name: f.default for f in dataclasses.fields(cls)
+                if f.default is not dataclasses.MISSING}
+
+    def factory_fields(cls):
+        return [f.name for f in dataclasses.fields(cls)
+                if f.default_factory is not dataclasses.MISSING]
+
+    assert names(PacketEvent) == ["channel", "direction", "raw", "unit_id",
+                                  "function_code", "parsed", "mono"]
+    assert defaults(PacketEvent) == {"unit_id": None, "function_code": None,
+                                     "parsed": "", "mono": 0.0}
+    assert names(ChannelState) == ["channel", "state", "detail"]
+    assert defaults(ChannelState) == {"detail": ""}
+    assert names(LogLine) == ["level", "text"]
+    assert defaults(LogLine) == {}                      # 没有默认值：两个字段都得传
+    assert names(PointChanged) == ["channel", "unit_id", "area", "address",
+                                   "value", "registers"]
+    assert defaults(PointChanged) == {}
+    assert factory_fields(PointChanged) == ["registers"]
+
+    # 顺序也是合同的一部分：按位置构造出来的字段必须落在同名位置上
+    packet = PacketEvent("tcp-502", "rx", b"\x00\x01\x00\x00")
+    assert (packet.channel, packet.direction, packet.raw) == \
+        ("tcp-502", "rx", b"\x00\x01\x00\x00")
+    assert (packet.unit_id, packet.function_code, packet.parsed, packet.mono) == \
+        (None, None, "", 0.0)
+    changed = PointChanged("tcp-502", 11, "hr", 0, 12.5)
+    assert (changed.channel, changed.unit_id, changed.area, changed.address,
+            changed.value) == ("tcp-502", 11, "hr", 0, 12.5)
+    assert changed.registers == []                      # default_factory，不是共享的 list
+    assert PointChanged("c", 1, "co", 0, True).registers is not changed.registers
