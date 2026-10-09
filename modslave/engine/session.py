@@ -20,6 +20,7 @@ from ..backend.modbus_tcp import ModbusTcpBackend
 from ..codec.point_codec import decode, encode
 from ..project.model import Point, Project, area_is_bit
 from ..project.validate import Issue, error_lines, validate_project
+from .packets import PacketStore
 from .runner import EngineRunner
 
 
@@ -69,7 +70,8 @@ class ChannelRuntime:
 
 
 class Session:
-    def __init__(self, runner: EngineRunner | None = None) -> None:
+    def __init__(self, runner: EngineRunner | None = None,
+                 packet_store: PacketStore | None = None) -> None:
         self._runner = runner or EngineRunner()
         # 谁建的 runner 谁负责收：外面传进来的可能同时给几个 Session 用，
         # shutdown() 替别人停线程会让另一个 Session 的下一发 submit 直接抛。
@@ -84,6 +86,15 @@ class Session:
         self._rows_meta: dict[str, list[tuple[int, str, Point]]] = {}
         self._dirty = False
         self._runner.subscribe(self._on_engine_event)
+        if packet_store is not None:
+            # 必须包这一层 isinstance：Session 的事件流里除 PacketEvent 还有 ChannelState，
+            # 直接 subscribe(packet_store.add) 会把"通道起了/停了"灌进报文缓冲，
+            # 表现成报文窗里冒出没有功能码的假帧。分流放在这里而不是 PacketStore.add 里，
+            # 是为了让 add 继续只是"收一条报文"这一个动作。
+            def to_store(event: object, store=packet_store) -> None:
+                if isinstance(event, PacketEvent):
+                    store.add(event)
+            self.subscribe(to_store)
 
     # ---------- 装载 ----------
 

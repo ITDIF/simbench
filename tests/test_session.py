@@ -218,19 +218,30 @@ def test_a_runtime_start_failure_becomes_an_error_state_not_a_half_started_chann
         assert states[0].channel == "tcp-5020" and str(port) in states[0].detail
 
 
+def engine_idents() -> set[int]:
+    """当前活着的 `modslave-engine*` 线程**身份**（ident）。
+
+    为什么不按名字做集合差：同一次 pytest 里可能有用例（或真 GUI）留着同名的线程，
+    按名字差会把"本用例新建的那两个"减掉，变成一条会假失败的断言。
+    点名判"是引擎线程"、ident 判"是本次新建的那一个"，两件事各管各的。
+    """
+    return {t.ident for t in threading.enumerate()
+            if t.name.startswith("modslave-engine") and t.is_alive()}
+
+
 def test_shutdown_of_an_owned_runner_leaves_no_engine_thread():
     """`Session()` 不接 runner 时自己拥有它：shutdown 必须把两个线程都收掉。"""
-    before = {t.name for t in threading.enumerate()}
+    before = engine_idents()
     port = free_port()
     owned = Session()
     try:
         owned.load(loaded(port))
         owned.start_channel("tcp-5020")
-        assert {"modslave-engine", "modslave-engine-events"} <= (
-            {t.name for t in threading.enumerate()} - before)
+        assert len(engine_idents() - before) == 2, (
+            "Session 自建 runner 应该带来 loop + events 两个引擎线程")
     finally:
         owned.shutdown()
-    assert {t.name for t in threading.enumerate()} == before
+    assert engine_idents() - before == set(), "shutdown 后仍留着本用例新建的引擎线程"
     check_port_is_free("127.0.0.1", port)
 
 
