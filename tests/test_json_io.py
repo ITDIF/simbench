@@ -228,3 +228,169 @@ def test_exported_readonly_roundtrips_unchanged():
     writable = Project(channels=[TcpChannel(name="c", devices=[Device(
         name="D", unit_id=1, points=[Point("p", "hr", 0, "uint16", readonly=False)])])])
     assert _only_point(from_dict(to_dict(writable))).readonly is False
+
+
+# ---- 裁决 2：整数字段不许静默截断（`int()` 会把 1.9 变成 1）----
+
+def _doc():
+    """一份最小合法 project.json，测试按需把某一个字段换成脏值。"""
+    return {"version": 1, "tick_ms": 100,
+            "channels": [{"name": "c", "host": "0.0.0.0", "port": 502,
+                          "devices": [{"name": "D", "unit_id": 1,
+                                        "points": [{"name": "p", "area": "hr",
+                                                   "address": 0, "datatype": "uint16",
+                                                   "initial": "0"}]}]}]}
+
+
+def _point_part(doc):
+    return doc["channels"][0]["devices"][0]["points"][0]
+
+
+@pytest.mark.parametrize("value", [1.9, None, [3], {}, "0", True, False])
+def test_address_must_be_a_real_int(value):
+    """`int(1.9)`=1、`int(True)`=1、`int(None)` 直接 TypeError：四种入口现在统一 ValueError。
+
+    地址被截断等于读写错寄存器，脏值必须当场问人，不许由模拟器替用户猜一个"看着合法"
+    的地址（与裁决 B 对 initial 的口径同向，也补掉裁决 O 只堵了 validate 的半边）。
+    """
+    data = _doc()
+    _point_part(data)["address"] = value
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == f"point 'p': address must be an integer, got {value!r}"
+
+
+@pytest.mark.parametrize("value", [11.9, True, None, [1], "1"])
+def test_unit_id_must_be_a_real_int(value):
+    """`unit_id: 11.9`→11、`true`→1 会让从站答错站号：主站扫到一台不存在的设备。"""
+    data = _doc()
+    data["channels"][0]["devices"][0]["unit_id"] = value
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == f"device 'D': unit_id must be an integer, got {value!r}"
+
+
+@pytest.mark.parametrize("value", [502.7, None, "502", [502]])
+def test_port_must_be_a_real_int(value):
+    """`port: 502.7`→502 是静默改了监听端口；端口绑错现场只看见"连不上"。"""
+    data = _doc()
+    data["channels"][0]["port"] = value
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == f"channel 'c': port must be an integer, got {value!r}"
+
+
+@pytest.mark.parametrize("value", [100.5, None, "100", True])
+def test_tick_ms_must_be_a_real_int(value):
+    """tick_ms 截断会让波形周期静默漂移，同样走 _require_int。"""
+    data = _doc()
+    data["tick_ms"] = value
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == f"project: tick_ms must be an integer, got {value!r}"
+
+
+@pytest.mark.parametrize("value", [0, 1, 65535])
+def test_plain_integers_still_load_unchanged(value):
+    """严格 gate 不许误杀合法值：address 与 unit_id 的整数照常原样读进来。"""
+    data = _doc()
+    _point_part(data)["address"] = value
+    data["channels"][0]["devices"][0]["unit_id"] = value
+    proj = from_dict(data)
+    assert proj.channels[0].devices[0].unit_id == value
+    assert proj.channels[0].devices[0].points[0].address == value
+
+
+def test_very_long_dirty_int_is_truncated_in_the_message():
+    """裁决 N：_require_int 的消息也必须走 brief()，几百个字符的脏值不许刷屏。"""
+    data = _doc()
+    _point_part(data)["address"] = "9" * 400
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    message = str(excinfo.value)
+    assert message.startswith("point 'p': address must be an integer, got '")
+    assert "..." in message
+    assert len(message) < 200
+
+
+# ---- 裁决 3：形状不对也必须是 ValueError，Task 12 的装载口只 except ValueError ----
+
+def test_top_level_must_be_an_object():
+    with pytest.raises(ValueError) as excinfo:
+        from_dict([{"version": 1}])
+    assert str(excinfo.value) == "project.json project must be an object, got list"
+
+
+def test_top_level_scalar_must_be_an_object():
+    with pytest.raises(ValueError) as excinfo:
+        from_dict("project")
+    assert str(excinfo.value) == "project.json project must be an object, got str"
+
+
+@pytest.mark.parametrize("value", [{"a": 1}, "c", 3, None])
+def test_channels_must_be_a_list(value):
+    """`channels` 是 dict 时旧写法直接 `AttributeError`/逐键解析，现在一条说清是哪一层。"""
+    data = _doc()
+    data["channels"] = value
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == \
+        f"project.json channels must be a list, got {type(value).__name__}"
+
+
+@pytest.mark.parametrize("section,label", [("channels", "channel"),
+                                            ("devices", "device"),
+                                            ("points", "point")])
+def test_each_level_must_be_an_object(section, label):
+    """channel / device / point 三个层级都必须是 JSON object：脏一层就说清是哪一层。"""
+    data = _doc()
+    holder = data
+    if section == "devices":
+        holder = data["channels"][0]
+    elif section == "points":
+        holder = data["channels"][0]["devices"][0]
+    holder[section] = ["x"]
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == f"project.json {label} must be an object, got str"
+
+
+def test_devices_must_be_a_list():
+    """实测过的逃逸口：`"devices": {...}` 之前抛 `TypeError: string indices must be integers`。"""
+    data = _doc()
+    data["channels"][0]["devices"] = {"name": "D"}
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == "project.json devices must be a list, got dict"
+
+
+def test_points_must_be_a_list():
+    data = _doc()
+    data["channels"][0]["devices"][0]["points"] = {"name": "p"}
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == "project.json points must be a list, got dict"
+
+
+def test_wave_param_must_be_an_object():
+    """`wave_param: [1, 2]` 之前让 `dict()` 抛 TypeError 逃出 loader。"""
+    data = _doc()
+    _point_part(data)["wave_param"] = [1, 2]
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    assert str(excinfo.value) == "project.json wave_param must be an object, got list"
+
+
+# ---- 裁决 N 在本轮的漏网之鱼：version 的渲染 ----
+
+def test_dirty_version_is_truncated_in_the_message():
+    data = _doc()
+    junk = "V" * 400
+    data["version"] = junk
+    with pytest.raises(ValueError) as excinfo:
+        from_dict(data)
+    message = str(excinfo.value)
+    assert message.startswith("unsupported project.json version '")
+    assert "..." in message
+    assert junk[:100] not in message
+    assert len(message) < 200
