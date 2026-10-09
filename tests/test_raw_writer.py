@@ -56,10 +56,45 @@ def test_write_outside_defined_range_returns_false():
     assert writer.write_registers(11, "hr", 1, [1, 2, 3]) is False
 
 
-def test_values_are_masked_to_16_bits():
+def test_out_of_range_register_write_is_rejected():
+    """裁决 2：越界值拒绝、不掩码。
+
+    `& 0xFFFF` 与裁决 J（decode 入口不许静默截断脏寄存器）口径相反：掩码会把
+    70000 变成 4464 写进寄存器，主站读到的是一个合法但错误的值。引擎的写入值都来自
+    codec，天然落在 0..65535 内，出现越界值只可能是引擎/调用方的 bug —— 正是要当场
+    炸出来的那种。
+    """
     store = core()
-    RawRegisterWriter(store).write_registers(11, "hr", 0, [0x1FFFF])
-    assert asyncio.run(store.async_getValues(11, 3, 0, 1)) == [0xFFFF]
+    writer = RawRegisterWriter(store)
+    with pytest.raises(ValueError,
+                       match=r"hr registers must be ints in 0\.\.65535, got \[70000\]"):
+        writer.write_registers(11, "hr", 0, [70000])
+    assert asyncio.run(store.async_getValues(11, 3, 0, 1)) == [1]   # 原值没被写进去
+
+
+def test_bool_and_non_int_register_values_are_rejected():
+    """bool 是 int 的子类，`write_bits` 才管位；寄存器列表里出现 bool/str/float 一律炸。"""
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError, match=r"hr registers must be ints"):
+        writer.write_registers(11, "hr", 0, [True])
+    with pytest.raises(ValueError, match=r"hr registers must be ints"):
+        writer.write_registers(11, "hr", 0, [-1])
+    with pytest.raises(ValueError, match=r"ir registers must be ints"):
+        writer.write_registers(11, "ir", 0, ["1"])
+    with pytest.raises(ValueError, match=r"hr registers must be ints"):
+        writer.write_registers(11, "hr", 1, [1.5])
+    # 顺序也要钉住：值列表是 bug 时，就算 unit 不存在照样抛，不许被 False 吞掉。
+    with pytest.raises(ValueError, match=r"hr registers must be ints"):
+        writer.write_registers(77, "hr", 0, [70000])
+
+
+def test_rejected_write_does_not_touch_any_address():
+    """先校验整表再落地：[1, 70000] 不许把地址 0 写进去一半（半写比不写更难查）。"""
+    store = core()
+    writer = RawRegisterWriter(store)
+    with pytest.raises(ValueError):
+        writer.write_registers(11, "hr", 0, [1, 70000])
+    assert asyncio.run(store.async_getValues(11, 3, 0, 2)) == [1, 2]
 
 
 def test_bit_write_and_read():

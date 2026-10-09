@@ -9,7 +9,22 @@ from __future__ import annotations
 from pymodbus.simulator import DataType
 from pymodbus.simulator.simutils import SimUtils
 
+from ..project.model import brief
+
 _BLOCK = {"co": "c", "di": "d", "hr": "h", "ir": "i"}
+
+
+def _check_values(area: str, values: list[int]) -> None:
+    """裁决 2：入口拒绝越界值，`& 0xFFFF` 只许用在产出侧（与 codec 的 `_check_registers` 同口径）。
+
+    掩码会把 70000 静默截成 4464 写进寄存器，主站读到的是一个"合法但错误"的遥测量，
+    现场只会当成平台 bug 去调。引擎的写入值都来自 codec，天然在 0..65535 内，出现
+    越界值（或 bool/float/str）只可能是引擎或调用方的 bug —— 必须在写之前当场炸出来。
+    先整表校验再落地，绝不半写：`[1, 70000]` 不能把地址 0 改了一半。
+    """
+    if any(not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 0xFFFF
+           for v in values):
+        raise ValueError(f"{area} registers must be ints in 0..65535, got {brief(values)}")
 
 
 def _defined(flags: list[int], offset: int, count: int) -> bool:
@@ -34,15 +49,17 @@ class RawRegisterWriter:
 
     def write_registers(self, unit_id: int, area: str, address: int,
                         values: list[int]) -> bool:
-        block = self._block(unit_id, area)
-        if block is None:
+        # 两个编程错误先炸，再谈运行期数据错误：值列表不对，unit 存不存在都不重要。
+        block = self._block(unit_id, area)   # 未知 area -> ValueError
+        _check_values(area, values)          # 越界/非 int -> ValueError（不再掩码）
+        if block is None:                    # 未知 unit -> 运行期数据错误
             return False
         start, _length, registers, flags = block
         offset = address - start
         if not _defined(flags, offset, len(values)):
             return False
         for i, value in enumerate(values):
-            registers[offset + i] = int(value) & 0xFFFF
+            registers[offset + i] = value
         return True
 
     def read_registers(self, unit_id: int, area: str, address: int,
