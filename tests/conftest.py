@@ -1,19 +1,38 @@
-"""起停后端的事件循环线程夹具。
+"""起停后端的事件循环线程夹具 + offscreen Qt 夹具。
 
 调用形态与后面 GUI 计划一致：asyncio loop 跑在专用线程，测试主体（真主站 client）在主线程，
 所以 backend 的 start/stop 必须经 `run_coroutine_threadsafe` 投回 loop 线程执行。
+
+Qt 这边只需要一个会话级的 `offscreen` QApplication：实测该平台下 `show()` +
+`processEvents()` 之后控件几何是真的（900 宽、工具栏 27 高），所以"状态变化不许挪布局"
+能写成断言，不需要真显示器，也不需要 pytest-qt。
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import socket
 import threading
 
 import pytest
 
+# 必须在任何 PySide6 import 之前落定：Qt 平台插件在第一次 import 时就绑死了，
+# 之后再改这个变量只会留下一个已经起在 windows 平台上的 QApplication（CI/无头机器上直接崩）。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from modslave.backend.modbus_tcp import ModbusTcpBackend
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """offscreen 模式的 QApplication。实测 show()+processEvents() 后几何是真的。"""
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    yield app
+    # 不 quit：QApplication 退出后无法再建，同一次会话里还要给后面的用例用
 
 
 def free_port() -> int:

@@ -18,6 +18,7 @@ import modslave
 LIBRARY_ONLY = ("pymodbus", "serial")        # 只许出现在 backend/
 GUI_ONLY = ("PySide6", "PyQt5")              # 只许出现在 gui/（M2 才落地）
 BACKEND = "backend"
+GUI_PACKAGE = "gui"
 
 # 由包自己的位置推出根目录：pytest 的 cwd 变了也不影响判定（不依赖 "modslave" 这个相对路径）
 ROOT = pathlib.Path(modslave.__file__).resolve().parent
@@ -131,6 +132,43 @@ def test_backend_does_not_touch_gui():
     assert offenders == [], f"GUI leaked into backend/: {offenders}"
 
 
+def test_only_gui_touches_pyside6():
+    """PySide6 只许出现在 modslave/gui/。
+
+    这条是 M2 新增的线：引擎/点表/后端一旦摸 Qt，pytest 就必须起事件循环，
+    内核测试立刻和界面绑死——那是 M1 特意拆开的东西。
+    """
+    scanned = _scanned_files(None, skip_packages=(GUI_PACKAGE,))
+    assert scanned, "除了 gui/ 一个文件都没扫到，这条 Qt 守卫是空跑"
+    offenders = _offenders(None, GUI_ONLY, skip_packages=(GUI_PACKAGE,))
+    assert offenders == [], f"Qt leaked outside gui/: {offenders}"
+
+
+def test_gui_actually_exists_and_is_the_only_qt_owner():
+    """防空跑：gui/ 里必须真有人 import Qt，否则上一条是恒真断言。
+
+    和 `test_backend_actually_ownes_the_library_imports` 同一个理由：只判"违规者为 0"，
+    那么把 gui/ 的 Qt import 全删掉（或目录名拼错导致没人被豁免）这条照样绿。
+    """
+    files = _python_files(GUI_PACKAGE)
+    assert files, "modslave/gui/ 还不存在——M2 没开始，别留一条空守卫"
+    importers = {f.name for f in files if "PySide6" in _imported_modules(f)}
+    assert importers, "gui/ 里没有任何 PySide6 import，守卫失去意义"
+
+
+def test_project_codec_engine_backend_do_not_touch_gui():
+    """逐层点名：engine/backend/project/codec 四个目录都不许出现 Qt。
+
+    整仓扫描那条已经覆盖这里，但按目录再钉一遍是为了失败信息能直接指到人：
+    `engine/` 是 M2 新加的、最容易"顺手 import 一下 QtCore 拿 QTimer"的一层。
+    """
+    for folder in ("engine", BACKEND, "project", "codec"):
+        scanned = _scanned_files(folder)
+        assert scanned, f"{folder}/ 一个文件都没扫到，这条守卫是空跑"
+        offenders = _offenders(folder, GUI_ONLY)
+        assert offenders == [], f"Qt leaked into {folder}/: {offenders}"
+
+
 # ---- 扫描器自身的判据：不许"看起来能抓其实抓不到" ----
 
 def test_guard_flags_a_planted_gui_import_in_backend(tmp_path):
@@ -159,6 +197,26 @@ def test_guard_flags_a_planted_gui_import_in_project_and_codec(tmp_path):
     offenders = _offenders("project", GUI_ONLY, root) + \
         _offenders("codec", GUI_ONLY, root)
     assert len(offenders) == 2, offenders
+
+
+def test_guard_flags_a_planted_gui_import_outside_gui(tmp_path):
+    """`test_only_gui_touches_pyside6` 的植入样本：gui/ 之外 import Qt 必须报。
+
+    真实仓库现在没人违规，所以那条守卫只能证明"此刻是干净的"；这条证明"脏了会红"，
+    顺带钉住豁免口径只认 `gui` 这一个顶层包名（写成 `GUI_PACKAGE="GUI"` 之类的拼错，
+    这里会立刻变成"gui/ 里的 Qt 也被报出来"）。
+    """
+    root = _fake_root(tmp_path, {
+        "gui/bridge.py": "from PySide6 import QtCore\n",
+        "engine/session.py": "import PySide6\n",
+        "project/model.py": "from PyQt5.QtCore import Qt\n",
+    })
+    scanned = _scanned_files(None, root, skip_packages=(GUI_PACKAGE,))
+    assert [f.name for f in scanned] == ["session.py", "model.py"], scanned
+    offenders = _offenders(None, GUI_ONLY, root, skip_packages=(GUI_PACKAGE,))
+    leaked = {pathlib.Path(o.rsplit(": ", 1)[0]).relative_to(root).as_posix()
+              for o in offenders}
+    assert leaked == {"engine/session.py", "project/model.py"}, offenders
 
 
 def test_library_import_outside_backend_is_still_a_leak(tmp_path):
