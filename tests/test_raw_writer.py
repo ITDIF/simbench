@@ -270,3 +270,58 @@ def test_clean_integers_still_work_after_the_gate():
     assert writer.read_registers(11, "hr", -1, 1) is None       # 越界仍是 None
     assert writer.write_registers(11, "hr", -1, [1]) is False   # 越界仍是 False
     assert writer.write_bits(11, "co", 0, True) is True
+
+
+@pytest.mark.parametrize("area", ["co", "di"])
+def test_register_api_refuses_bit_areas(area):
+    """同一个"地址 0"在两条路径下含义不同，所以不许混用。
+
+    实测混用的后果：`write_registers(11,'co',0,[0x0002])` 返回 True，点亮的是
+    **线圈 1**（寄存器 0 的第 1 位），而 `write_bits(11,'co',0,...)` 的 0 才是
+    主站眼里的线圈 0。M1 没有引擎调用所以没爆，M4 一旦按点位地址调 write_registers
+    就是静默错值（想关风机、写成开）。
+    """
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError, match=f"{area} is a bit area; use write_bits"):
+        writer.write_registers(11, area, 0, [1])
+    with pytest.raises(ValueError, match=f"{area} is a bit area; use read_bits"):
+        writer.read_registers(11, area, 0, 1)
+
+
+def test_bit_api_still_works_after_the_register_gate():
+    writer = RawRegisterWriter(core())
+    assert writer.write_bits(11, "co", 2, True) is True
+    assert writer.read_bits(11, "co", 0, 4)[2] is True
+    assert writer.read_bits(11, "di", 0, 4) == [True, True, True, True]
+
+
+def test_register_api_still_works_for_register_areas():
+    writer = RawRegisterWriter(core())
+    assert writer.write_registers(11, "hr", 0, [5, 6]) is True
+    assert writer.read_registers(11, "hr", 0, 2) == [5, 6]
+
+
+def test_area_gate_beats_the_unknown_unit_shortcut():
+    """编程错误优先于运行期数据错误：unit 不存在时也不许把位区静默回 False。"""
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError, match="bit area"):
+        writer.write_registers(77, "co", 0, [1])
+
+
+@pytest.mark.parametrize("area", ["hr", "ir"])
+def test_bit_api_refuses_register_areas(area):
+    """镜像方向同样不许混用：拿位接口写 hr，"地址 0"会变成寄存器 0 的第 0 位。"""
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError, match=f"{area} is a register area; use write_registers"):
+        writer.write_bits(11, area, 0, True)
+    with pytest.raises(ValueError, match=f"{area} is a register area; use read_registers"):
+        writer.read_bits(11, area, 0, 1)
+
+
+def test_unknown_area_still_reports_unknown_area_not_area_kind():
+    """拼错的区名要报"不认识这个区"，不能被类别门控抢先说成 register area。"""
+    writer = RawRegisterWriter(core())
+    with pytest.raises(ValueError, match="unknown area"):
+        writer.write_bits(11, "xr", 0, True)
+    with pytest.raises(ValueError, match="unknown area"):
+        writer.read_registers(11, "xr", 0, 1)

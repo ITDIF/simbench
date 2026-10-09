@@ -9,7 +9,7 @@ from __future__ import annotations
 from pymodbus.simulator import DataType
 from pymodbus.simulator.simutils import SimUtils
 
-from ..project.model import AREAS, brief
+from ..project.model import AREAS, BIT_AREAS, brief
 
 _BLOCK = {"co": "c", "di": "d", "hr": "h", "ir": "i"}
 if set(_BLOCK) != set(AREAS):
@@ -43,6 +43,24 @@ def _check_values(area: str, values: list[int]) -> None:
     if any(not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 0xFFFF
            for v in values):
         raise ValueError(f"{area} registers must be ints in 0..65535, got {brief(values)}")
+
+
+def _check_area_kind(area: str, want_bits: bool, partner: str) -> None:
+    """寄存器接口只服务 hr/ir（`want_bits=False`），位接口只服务 co/di（True）。
+
+    两边的"地址 0"含义不同：位区的 0 是**线圈 0**，寄存器路径的 0 是**寄存器 0 的第 0
+    位**。实测混用后果是 `write_registers(11,'co',0,[0x0002])` 返回 True 而点亮的是
+    **线圈 1**——引擎想关风机、写成开，主站读回一个合法但相反的量。M1 没有引擎调用所以
+    还没爆，M4 一按点位地址调 `write_registers` 就会中。镜像方向同理：拿 `write_bits`
+    写 hr 会把寄存器 0 的第 0 位当线圈改。
+
+    `want_bits` 由调用点显式给（不解析方法名后缀——那样 `write_bits` 传
+    `partner="write_registers"` 会被判反）。`partner` 只负责把消息里"该改用哪个方法"
+    说准。未知区名不在这里判，由 `_block` 的 `unknown area` 负责。
+    """
+    if area in _BLOCK and (area in BIT_AREAS) != want_bits:
+        kind = "bit" if area in BIT_AREAS else "register"
+        raise ValueError(f"{area} is a {kind} area; use {partner}")
 
 
 def _check_int(value, what: str) -> int:
@@ -86,6 +104,7 @@ class RawRegisterWriter:
                         values: list[int]) -> bool:
         # 编程错误（area / address / 值列表）先炸，再谈运行期数据错误：参数不对，
         # unit 存不存在都不重要。
+        _check_area_kind(area, False, "write_bits")   # 位区误用 -> ValueError（排在 unit 判定前）
         block = self._block(unit_id, area)   # 未知 area -> ValueError
         _check_int(address, "address")       # 非 int / bool 混入 -> ValueError
         _check_values(area, values)          # 脏容器/空表/越界/非 int -> ValueError（不再掩码）
@@ -101,6 +120,7 @@ class RawRegisterWriter:
 
     def read_registers(self, unit_id: int, area: str, address: int,
                        count: int) -> list[int] | None:
+        _check_area_kind(area, False, "read_bits")
         block = self._block(unit_id, area)
         _check_int(address, "address")
         _check_int(count, "count")
@@ -126,6 +146,7 @@ class RawRegisterWriter:
         """
         if not isinstance(value, bool):
             raise ValueError(f"{area} bit value must be a bool, got {brief(value)}")
+        _check_area_kind(area, True, "write_registers")
         block = self._block(unit_id, area)
         _check_int(bit_address, "bit_address")
         if block is None:
@@ -141,6 +162,7 @@ class RawRegisterWriter:
 
     def read_bits(self, unit_id: int, area: str, bit_address: int,
                   count: int) -> list[bool] | None:
+        _check_area_kind(area, True, "read_registers")
         block = self._block(unit_id, area)
         _check_int(bit_address, "bit_address")
         _check_int(count, "count")
