@@ -238,6 +238,17 @@ def test_every_area_outside_the_four_is_rejected_with_the_point_name(area):
         simdata_for_point(Point("p", area, 0, "uint16", initial="1"))
 
 
+def test_build_sim_devices_raises_the_domain_error_not_a_key_error():
+    """裁决 6 的症状其实有两条路：`blocks[area_to_index(pt.area)].append(simdata_for_point(pt))`
+    里下标表达式先求值，脏 area 仍旧抛 `KeyError: 'holding'`（非领域异常、不带点位名），
+    Task 12 的装载口只 `except ValueError` 会当场 traceback。必须改成先建 SimData。
+    """
+    proj = _proj(Point("温度", "holding", 0, "uint16", initial="1"))
+    with pytest.raises(ValueError) as excinfo:
+        build_sim_devices(proj)
+    assert str(excinfo.value) == "unknown area 'holding' for point '温度'"
+
+
 def test_bit_and_register_areas_still_map():
     """gate 不许误杀四个合法区：co/di 走 BITS，hr/ir 走 REGISTERS。"""
     assert simdata_for_point(Point("p", "co", 0, "bool", initial="true")).datatype \

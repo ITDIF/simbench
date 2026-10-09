@@ -85,7 +85,10 @@ def build_sim_devices(project: Project) -> list[SimDevice]:
             owner.setdefault(unit, ch.name)
             blocks = by_unit.setdefault(unit, ([], [], [], []))
             for pt in dev.points:
-                blocks[area_to_index(pt.area)].append(simdata_for_point(pt))
+                # 先建 SimData 再定位区：下标表达式 `area_to_index(pt.area)` 要是先求值，
+                # 脏 area 就会以 `KeyError` 冒出来（非领域异常、不带点位名，裁决 6）。
+                entry = simdata_for_point(pt)
+                blocks[area_to_index(pt.area)].append(entry)
     devices = []
     for unit_id in sorted(by_unit):
         blocks = by_unit[unit_id]
