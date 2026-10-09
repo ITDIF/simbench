@@ -73,6 +73,23 @@ def brief(value, limit: int = _BRIEF_LIMIT) -> str:
     return text[:limit] + "..."
 
 
+def brief_name(value, limit: int = _BRIEF_LIMIT) -> str:
+    """身份名（通道名/设备名/点位名/host）的限长形式：只砍尾巴，**不加引号**。
+
+    和 `brief()` 的分工：`brief` 打的是"用户填进去的值"，带 repr 的引号才有用（空串和
+    两个空格看得出区别）；身份名是拼进 `Issue.where` 与消息里给人定位用的，套上引号就把
+    已钉死的对外句式改掉了（`[overlap] c1/D1/q: ...`、`port 502 on host 0.0.0.0 already
+    used by channel tcp-502`）。厂商把整段说明塞进通道名时，一条 1244 字符的错误行能把
+    "一次报全"的清单真正那条挤出去，所以这里同样限长，旋钮与 `brief` 共用一个。
+
+    非字符串走 `str()`，与原来 f-string 拼出来的样子一致（`{ch.name}` 本来就是 str()）。
+    """
+    text = value if isinstance(value, str) else str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
 def area_is_bit(area: str) -> bool:
     """co/di 是位区：一个点位 = 一个线圈/离散输入。"""
     return area in BIT_AREAS

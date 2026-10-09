@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .model import (
     AREAS, BOOL, DATATYPES, STRING, WAVEFORMS, WORD_ABCD, WORD_ORDERS,
-    area_is_bit, brief, register_span, word_orders_allowed,
+    area_is_bit, brief, brief_name, register_span, word_orders_allowed,
 )
 
 # 波形参数表（spec §5）。M4 实现波形时必须复用这张表，不要再抄一份。
@@ -48,24 +48,27 @@ def validate_project(project) -> list[Issue]:
     seen: set[str] = set()
     bound: dict[tuple[str, int], str] = {}      # (host, port) -> 最先占用的通道名
     for ch in project.channels:
+        # `where` 是清单每行开头的定位串，身份名原样拼进来时一个 400 字符的通道名能把
+        # 整屏刷掉（真出现：厂商把整段说明塞进通道名）。判定不动，只截渲染（同裁决 N）。
+        name = brief_name(ch.name)
         if ch.name in seen:
-            issues.append(Issue("error", "channel_duplicated", ch.name,
+            issues.append(Issue("error", "channel_duplicated", name,
                                 f"channel name {brief(ch.name)} used twice"))
         seen.add(ch.name)
         if ch.type != "tcp":
-            issues.append(Issue("error", "channel_type", ch.name,
+            issues.append(Issue("error", "channel_type", name,
                                 f"channel type {brief(ch.type)} is not supported in M1"))
         port_ok = _is_int(ch.port) and 1 <= ch.port <= 65535
         host_ok = isinstance(ch.host, str) and bool(ch.host)
         if not host_ok:
-            issues.append(Issue("error", "host", ch.name,
+            issues.append(Issue("error", "host", name,
                                 f"host must be a non-empty string, got {brief(ch.host)}"))
         # 只判“非空字符串”，不判 IP 字面量语法（裁决 T）：主机名/IPv6/前导零都合法，
         # 这里造第二套判定容易误杀，真绑不上时 bind 的 OSError 已经足够明确。
         if not port_ok:
             # port=0（“让系统随便给一个”）在 M1 也是 error：要从 pymodbus 内部摸
             # transport 对象才能读回实际端口，版本一变就碎
-            issues.append(Issue("error", "port", ch.name,
+            issues.append(Issue("error", "port", name,
                                 f"port {brief(ch.port)} must be in 1..65535"))
         _devices(ch, issues)
         # 同 host+port 的两个通道要等启动第二阶段才炸 bind，Windows 只回一句 10048、
@@ -76,9 +79,9 @@ def validate_project(project) -> list[Issue]:
         if port_ok and host_ok:
             key = (ch.host, ch.port)
             if key in bound:
-                issues.append(Issue("error", "port_duplicated", ch.name,
-                                    f"port {ch.port} on host {ch.host} already used by "
-                                    f"channel {bound[key]}"))
+                issues.append(Issue("error", "port_duplicated", name,
+                                    f"port {ch.port} on host {brief_name(ch.host)} "
+                                    f"already used by channel {brief_name(bound[key])}"))
             else:
                 bound[key] = ch.name
     if not _is_int(project.tick_ms) or not 10 <= project.tick_ms <= 60000:
@@ -90,7 +93,7 @@ def validate_project(project) -> list[Issue]:
 def _devices(ch, issues: list[Issue]) -> None:
     units: dict[int, str] = {}
     for dev in ch.devices:
-        where = f"{ch.name}/{dev.name}"
+        where = f"{brief_name(ch.name)}/{brief_name(dev.name)}"
         if not _is_int(dev.unit_id) or not 1 <= dev.unit_id <= 247:
             issues.append(Issue("error", "unit_range", where,
                                 f"unit_id {brief(dev.unit_id)} outside 1..247"))
@@ -100,7 +103,7 @@ def _devices(ch, issues: list[Issue]) -> None:
             if dev.unit_id in units:
                 issues.append(Issue("error", "unit_duplicated", where,
                                     f"unit_id {brief(dev.unit_id)} already used by "
-                                    f"{units[dev.unit_id]}"))
+                                    f"{brief_name(units[dev.unit_id])}"))
             # 跨通道重复 unit_id 不在这里判：那是 Task 8 build_sim_devices 的 ValueError
             units[dev.unit_id] = dev.name
         _points(ch.name, dev, issues)
@@ -109,7 +112,8 @@ def _devices(ch, issues: list[Issue]) -> None:
 def _points(channel_name: str, dev, issues: list[Issue]) -> None:
     used: dict[tuple[str, int], str] = {}
     for pt in dev.points:
-        loc = f"{channel_name}/{dev.name}/{pt.name}"
+        loc = (f"{brief_name(channel_name)}/{brief_name(dev.name)}/"
+               f"{brief_name(pt.name)}")
         if pt.row:
             loc = f"{loc} (line {pt.row})"
         if pt.datatype not in DATATYPES:

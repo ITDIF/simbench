@@ -381,3 +381,29 @@ def test_issue_is_frozen_and_renders_the_blocking_line():
         pass
     else:
         raise AssertionError("Issue 必须是 frozen dataclass：清单生成后不许被改写")
+
+
+def test_overlong_identity_names_do_not_flood_the_report():
+    """厂商把整段说明塞进身份列时，"一次报全"的清单不许被一行撑爆。
+
+    实测旧行为：通道名/设备名/点位名/host 原样拼进 `Issue.where` 与 `port_duplicated` 的
+    消息，单行 668/647/512 字符——几十条错时屏幕上全是同一坨说明文字，真正要改的那条被
+    挤出去。判定逻辑一个字都不动，只在渲染处截断（同裁决 N 对原值限长的要求）。
+    """
+    junk = "C" * 400
+    host = "h" * 300
+    ch_a = TcpChannel(name=junk, host=host, port=502, devices=[
+        Device(name=junk, unit_id=11, points=[_p(name=junk), _p(name="q", address=0)])])
+    ch_b = TcpChannel(name=junk + "2", host=host, port=502, devices=[
+        Device(name=junk, unit_id=12, points=[_p(name=junk)])])
+    project = Project(channels=[ch_a, ch_b])
+
+    issues = validate_project(project)
+    lines = error_lines(issues)
+    assert lines, "这份点表至少要报出 overlap 与 port_duplicated"
+    assert {(i.code, i.level) for i in issues} >= {
+        ("overlap", "error"), ("port_duplicated", "error")}
+    for line in lines:
+        assert len(line) < 400, f"{len(line)} 字符: {line[:60]}..."
+        assert junk not in line, "身份名原样进了消息"
+    assert any("..." in line for line in lines), "没有一条被截断，说明限长没生效"
