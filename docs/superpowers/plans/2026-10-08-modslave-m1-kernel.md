@@ -1373,6 +1373,8 @@ Expected: FAIL — module missing
 
 - [ ] **Step 3: Write json_io.py**
 
+> **注意：本节代码是裁决前的快照，与仓库实际实现有差异（见上方「执行期已裁决的偏离」表）；以 `modslave/project/json_io.py` 为准，不要照抄本节。**
+
 ```python
 """project.json 读写。它是运行态唯一真相，与 CSV 双向可导。"""
 
@@ -1457,7 +1459,7 @@ def load(path: Path) -> Project:
 - [ ] **Step 4: Run it, verify pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_json_io.py`
-Expected: 9 passed
+Expected: 91 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1597,6 +1599,8 @@ Run: `.venv/Scripts/python.exe -m pytest tests/test_csv_io.py`
 Expected: FAIL — module missing
 
 - [ ] **Step 3: Write csv_io.py**
+
+> **注意：本节代码是裁决前的快照，与仓库实际实现有差异（见上方「执行期已裁决的偏离」表）；以 `modslave/project/csv_io.py` 为准，不要照抄本节。**
 
 ```python
 """CSV 点表读写。列顺序即合同；解析错误带行号，好让厂商点表能当场改对。"""
@@ -1739,7 +1743,7 @@ def _device_for(devices: dict[tuple[str, int], Device], channel: TcpChannel,
 - [ ] **Step 4: Run it, verify pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_csv_io.py`
-Expected: 17 passed
+Expected: 69 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1851,6 +1855,8 @@ Expected: FAIL — module missing
 
 - [ ] **Step 3: Write simdev.py 与 events.py**
 
+> **注意：本节代码是裁决前的快照，与仓库实际实现有差异（见上方「执行期已裁决的偏离」表）；以 `modslave/backend/simdev.py` 为准，不要照抄本节。**
+
 ```python
 # modslave/backend/simdev.py
 """点表 -> pymodbus SimDevice。这是本工具唯一允许 import pymodbus 的地方之一。"""
@@ -1948,7 +1954,7 @@ class PointChanged:
 - [ ] **Step 4: Run it, verify pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_simdev.py`
-Expected: 11 passed
+Expected: 28 passed
 
 - [ ] **Step 5: Commit**
 
@@ -2068,6 +2074,8 @@ Expected: FAIL — `ModuleNotFoundError: modslave.backend.raw_writer`
 
 - [ ] **Step 4: Write raw_writer.py**
 
+> **注意：本节代码是裁决前的快照，与仓库实际实现有差异（见上方「执行期已裁决的偏离」表）；以 `modslave/backend/raw_writer.py` 为准，不要照抄本节。**
+
 ```python
 """运行期直接读写 SimRuntime 的寄存器列表。
 
@@ -2150,7 +2158,7 @@ class RawRegisterWriter:
 - [ ] **Step 5: Run it, verify pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_raw_writer.py`
-Expected: 11 passed
+Expected: 67 passed
 
 - [ ] **Step 6: Commit**
 
