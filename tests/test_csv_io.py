@@ -318,21 +318,68 @@ def test_loader_does_not_range_check_addresses_validate_does():
 
 # ---- 逐列口径 ----
 
-def test_readonly_accepts_only_the_true_whitelist():
-    rows = [f'tcp-502,D,1,n{ i },co,{ i },bool,ABCD,true,const,,{ value }'
-            for i, value in enumerate(["TRUE", " 1 ", "Yes", "y", "on"])]
+def test_readonly_accepts_both_whitelists_case_insensitively():
+    """大小写混写与两侧空格都要认：厂商表里 TRUE/Yes/off 都出现过，认不出来就是错值。"""
+    true_values = ["TRUE", "true", "  true  ", "YES", "Yes", "y", "ON", "on", "1"]
+    false_values = ["False", "false", " FALSE ", "NO", "no", "n", "N", "OFF", "off", "0"]
+    rows = [f'tcp-502,D,1,t{ i },co,{ i },bool,ABCD,true,const,,{ value }'
+            for i, value in enumerate(true_values)]
+    rows += [f'tcp-502,D,1,f{ i },co,{ 100 + i },bool,ABCD,true,const,,{ value }'
+             for i, value in enumerate(false_values)]
     text = ",".join(HEADER) + "\n" + "\n".join(rows) + "\n"
     proj = read_csv(text, ports=ALL_PORTS)
-    assert [p.readonly for p in proj.channels[0].devices[0].points] == [True] * 5
-    rows = [f'tcp-502,D,1,n{ i },co,{ i },bool,ABCD,true,const,,{ value }'
-            for i, value in enumerate(["false", "0", "no", "n", "off", "", "TURE"])]
-    text = ",".join(HEADER) + "\n" + "\n".join(rows) + "\n"
+    assert [p.readonly for _, _, p in proj.iter_points()] == \
+        [True] * len(true_values) + [False] * len(false_values)
+
+
+@pytest.mark.parametrize("value", ["TURE", "01", "2", ""])
+def test_unrecognised_readonly_is_rejected_with_line_number(value):
+    """拼错的、数字串不像布尔的、留空的 readonly 一律报错：静默当 False 就是让
+    主站能改写一个真设备只读的点位，那是事故不是格式问题（空串也不给默认值）。"""
+    bad = ROWS + f"tcp-502,风机-1,12,X,hr,9,uint16,ABCD,0,const,,{value}\n"
+    with pytest.raises(ValueError) as excinfo:
+        read_csv(bad, ports=ALL_PORTS)
+    assert str(excinfo.value) == (
+        f"line 6: readonly {value!r} is not a boolean, "
+        f"use one of 1/0/true/false/yes/no/on/off")
+
+
+def test_readonly_roundtrip_writes_lowercase_and_reads_back_identical():
+    """write_csv 写的是小写 true/false，正好落在新规则的白名单里：导出文件必须
+    仍然读得回来且全等，否则我们自己的导出会把自己判成非法点表。"""
+    text = (",".join(HEADER) + "\n"
+            "tcp-502,D,1,p1,co,0,bool,ABCD,true,const,,TRUE\n"
+            "tcp-502,D,1,p2,co,1,bool,ABCD,true,const,, 1 \n"
+            "tcp-502,D,1,p3,co,2,bool,ABCD,true,const,,off\n"
+            "tcp-502,D,1,p4,co,3,bool,ABCD,true,const,,n\n")
     proj = read_csv(text, ports=ALL_PORTS)
-    assert [p.readonly for p in proj.channels[0].devices[0].points] == [False] * 7
+    assert [p.readonly for _, _, p in proj.iter_points()] == [True, True, False, False]
+    out = write_csv(proj)
+    assert [line.rsplit(",", 1)[-1] for line in out.splitlines()[1:]] == \
+        ["true", "true", "false", "false"]
+    assert read_csv(out, ports=ALL_PORTS) == proj
+
+
+def test_sample_point_table_still_validates_clean():
+    """严格 readonly 不该让任何合法点表失败：样例表读进来校验清单仍为空。"""
+    assert error_lines(validate_project(read_csv(ROWS, ports=ALL_PORTS))) == []
+
+
+def test_very_long_dirty_readonly_is_truncated_in_the_message():
+    """与 address 同一条截断口径（裁决 N）：脏 readonly 也不许把线索挤出屏幕。"""
+    junk = "T" * 400
+    bad = ROWS + f"tcp-502,风机-1,12,X,hr,9,uint16,ABCD,0,const,,{junk}\n"
+    with pytest.raises(ValueError) as excinfo:
+        read_csv(bad, ports=ALL_PORTS)
+    message = str(excinfo.value)
+    assert message.startswith("line 6: readonly '")
+    assert " is not a boolean, use one of 1/0/true/false/yes/no/on/off" in message
+    assert "..." in message
+    assert junk[:100] not in message
 
 
 def test_empty_word_order_and_waveform_get_the_model_defaults():
-    text = ",".join(HEADER) + "\ntcp-502,D,1,p1,hr,0,uint16,,0,,,\n"
+    text = ",".join(HEADER) + "\ntcp-502,D,1,p1,hr,0,uint16,,0,,,false\n"
     pt = read_csv(text, ports=ALL_PORTS).channels[0].devices[0].points[0]
     assert (pt.word_order, pt.waveform, pt.wave_param, pt.readonly) == \
         ("ABCD", "const", {}, False)

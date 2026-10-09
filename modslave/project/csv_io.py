@@ -14,7 +14,11 @@ from .model import Device, Point, Project, TcpChannel, brief
 
 HEADER = ["channel", "device", "unit_id", "name", "area", "address", "datatype",
           "word_order", "initial", "waveform", "wave_param", "readonly"]
+# readonly 只认这两张表，其余（含空串、`TURE` 这种拼错的）一律 ValueError：默默当
+# False 会把"只读"的保护静默变成"可写"，主站就能改写一个真设备只读的点位。
+# 口径与 model.py 里 bool 初值（_BOOL_TRUE/_BOOL_FALSE）对称——宁可报错，绝不静默给错值。
 _TRUE = {"1", "true", "yes", "y", "on"}
+_FALSE = {"0", "false", "no", "n", "off"}
 
 
 def read_csv(text: str, ports: dict[str, int] | None = None, address_offset: int = 0,
@@ -34,6 +38,7 @@ def read_csv(text: str, ports: dict[str, int] | None = None, address_offset: int
         try:
             address = _require_int(cell["address"], "address") + address_offset
             unit_id = _require_int(cell["unit_id"], "unit_id")
+            readonly = _require_bool(cell["readonly"], "readonly")
         except ValueError as exc:
             # 行号只在这一层加：底层只知道"哪一列的哪个值读不懂"，
             # 现场改点表靠的是"第几行"，两个信息必须同时出现
@@ -44,7 +49,7 @@ def read_csv(text: str, ports: dict[str, int] | None = None, address_offset: int
             word_order=(cell["word_order"] or "ABCD").upper(),
             waveform=(cell["waveform"] or "const").lower(),
             wave_param=parse_wave_param(cell["wave_param"]),
-            readonly=cell["readonly"].lower() in _TRUE, row=index)
+            readonly=readonly, row=index)
         channel = _channel_for(channels, cell["channel"], ports, notes)
         device = _device_for(devices, channel, unit_id, cell["device"], index)
         device.points.append(point)
@@ -129,6 +134,17 @@ def _require_int(text: str, what: str) -> int:
         # brief() 截断（裁决 N）：厂商表里一格粘了几百个字符时，报错还是那一句，
         # 但原值不再能把真正的线索挤出屏幕
         raise ValueError(f"{what} {brief(text)} is not an integer") from None
+
+
+def _require_bool(text: str, what: str) -> bool:
+    """白名单判布尔：认不出来就报错，绝不替用户猜一个 False（行号由 read_csv 补）。"""
+    key = text.strip().lower()
+    if key in _TRUE:
+        return True
+    if key in _FALSE:
+        return False
+    raise ValueError(f"{what} {brief(text)} is not a boolean, "
+                     f"use one of 1/0/true/false/yes/no/on/off")
 
 
 def _channel_for(channels: dict[str, TcpChannel], name: str, ports: dict[str, int],
