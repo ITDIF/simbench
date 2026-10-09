@@ -87,7 +87,13 @@ QModMaster 连上能读到浮点值、写到只读点收到异常码 2。
 | Q | `_SINGLE = {BOOL, INT16, UINT16, REG16}` 手抄类型清单 | 由 `model.word_orders_allowed` 派生（“只允许 ABCD 的类型”），validate 里不维护第二份真相（同裁决 M）。`string` 显式排除：它也只允许 `ABCD`，但填别的是 error 不是 warning——单寄存器类型填字序只是没意义，string 填字序是语义分歧 | Task 5 |
 | R | 同 `(host, port)` 的两个通道留到启动第二阶段炸 bind（Windows 只回 10048，不带通道名，现场看不出是点表配置错） | 启动前一次报全：`code="port_duplicated"`，`where` 是后加入那个通道名，message 写明 `port 502 on host 0.0.0.0 already used by channel tcp-502`。不同 host 同 port 各自监听，**不算**冲突；非整数/越界 port 已被 `port` 那条拦下，不重复报；非字符串 host 不参与判定 | Task 5（本轮） |
 | S | 计划正文 Task 5 Step 1 用 `_p(), _p(name="q", address=1)` 断言 `overlap` | 笔误：紧邻不是重叠（`register_span("uint16") == 1`，事实 5「点表不需要把地址铺满」）。已改成双向钉住——0 与 0 判重叠、0 与 1 判合法 | Task 5 |
-| T | `validate` 对 `host` 零校验：空串/`None`/`[]` 都进不了任何判定，一路放到启动才炸 | `host` 必须是**非空 `str`**，否则一条 `code="host"` 的 error（`where` 是通道名，消息 `host must be a non-empty string, got ''`，脏值同样用 `brief()` 渲染）。**不做 IP 字面量语法校验**：`999.1.1.1` 这类留给 bind 阶段的 `OSError`——字符串 IP 合法性判断容易误杀主机名/IPv6 写法，而绑不上端口时错误已经足够明确，不在这里造第二套判定。脏 host 与脏 port 一样**不参与** `port_duplicated` 判定 | Task 5（本轮） |
+| U | 同一 `(host, port)` 起第二个实例时两边都打印"listening 成功"，主站读的仍是**旧点表**（实测叠 3 个 LISTENING、30 次读全拿旧值，杀掉 A 才变 B） | `ModbusTcpBackend.start()` 先把端口交给 pymodbus 之前用**裸 `socket.bind()` 探针**自检，占用即抛 `PortInUseError`（消息含 `host:port` 与"可能是上一个模拟器实例"）。bind 与 listen 之间有 TOCTOU，所以措辞是"可能已被占用"，不说死。判据换成**可失败**的：起第二个必须红，"同端口再起一次也能成功"不算通过 | Task 10/12 |
+| V | 日志 filter 按消息前缀 `Datastore unable to fulfill request` 抑制 | 那条是 pymodbus 的**裸 `except Exception`**，datastore 路径上任何内部 bug 都走它——按前缀抑制会把"模拟器自己崩"一起吞掉，而主站收到的异常码 4 与"unit 不在线"在报文上同形。判据收窄到只挡已知的 `KeyError: 0` unit 回落；**内部异常必须仍在日志里**（有测试分别钉住这两侧） | Task 10 |
+| W | `read/write_registers` 允许接 `co/di` | 位区的"地址 0"是**线圈 0**，寄存器路径的"地址 0"是寄存器 0 的第 0 位（实测 `write_registers(11,'co',0,[0x0002])` 点亮的是**线圈 1**）。两边都加类别门控，抛 `ValueError` 并指明该用哪个方法；未知区名仍报 `unknown area` | Task 9 |
+| X | 校验清单的 `Issue.where` 与 `port_duplicated` 原样拼通道名/设备名/点位名/host | 厂商把整段说明塞进通道名时单行 1244 字符，会把真正那条错误挤出屏幕。身份名走 `model.brief_name()`（**只截断不加引号**，判定逻辑与已钉住的对外句式不动） | Task 5 |
+| Y | `test_backend_does_not_touch_gui` 是**恒过守卫**（`ROOT` 就是 `modslave/`，backend 下每个文件都被 `continue` 掉） | 改成显式声明跳过哪一层；并给每条守卫配"该有的人必须有"式防空跑断言 + 扫描器自测；删掉无人使用的死参 `allow_backend`。变异验证：往 backend 塞 `import PySide6`，架构测试必须红 | Task 10 |
+
+**另**：Task 10/11/12 的参考代码块同样是裁决前的快照（Task 11 里 `regs_to_float(CDAB) == 12.5` 与同块 `[0x0000,0x4148]` 自相矛盾——CDAB 必须**换字**才是 12.5；Task 10 的 `await asyncio.sleep(0)` 会把 bind 失败吞成"已启动"）。以仓库与上述 U–Y 为准，不要照抄那三节。
 
 ---
 
@@ -108,18 +114,22 @@ modslave-sim/
 │   │   ├── validate.py          # 启动前全量校验，一次报所有问题
 │   │   ├── json_io.py           # project.json 读写
 │   │   └── csv_io.py            # CSV 读写
+│   ├── csv_io_entry.py          # CSV/工程装载口（CLI 与 GUI 共用：读文件+端口+校验）
 │   ├── codec/
 │   │   ├── __init__.py
 │   │   └── point_codec.py       # 值 <-> 原始 reg16 数组（字序在这层）
+│   ├── engine/
+│   │   └── __init__.py          # M4 波形/tick 的包，M1 只占位不实现
 │   └── backend/
 │       ├── __init__.py
-│       ├── events.py            # PacketEvent / ChannelState / LogLine（后续里程碑也用它）
-│       ├── simdev.py            # 点表 -> SimDevice/SimData
-│       ├── raw_writer.py        # 直接读写寄存器列表（绕开 readonly）
-│       └── modbus_tcp.py        # pymodbus TCP server 封装 + 日志降噪
+│       ├── events.py            # PacketEvent / ChannelState / LogLine / PointChanged
+│       ├── simdev.py            # 点表 -> SimDevice/SimData（空区补 INVALID 占位）
+│       ├── raw_writer.py        # 直接读写寄存器列表（绕开 readonly；寄存器/位接口不混用）
+│       └── modbus_tcp.py        # pymodbus TCP 封装：启动前 bind 自检 + 报文钩子 + 降噪
 └── tests/
     ├── __init__.py              # Task 1 Step 5 建的包标记（空文件）
     ├── conftest.py              # 起停后端的事件循环线程夹具
+    ├── test_architecture.py     # 分层守卫（AST，含防空跑断言与扫描器自测）
     ├── test_model.py
     ├── test_codec_single.py
     ├── test_codec_32bit.py
@@ -130,10 +140,11 @@ modslave-sim/
     ├── test_csv_io.py
     ├── test_simdev.py
     ├── test_raw_writer.py
-    └── test_integration_tcp.py
+    ├── test_integration_tcp.py   # 真主站互测（M1 门禁）
+    └── test_cli.py               # 命令行入口 + 子进程真连一次
 ```
 
-依赖方向由测试守住（Task 10 里的 `test_no_pymodbus_outside_backend`）。
+依赖方向由 `tests/test_architecture.py` 守住：`test_only_backend_touches_pymodbus`（pymodbus/serial 只许在 `backend/`）、`test_backend_actually_ownes_the_library_imports`（防空跑：backend 里必须真有人 import）、`test_project_and_codec_do_not_touch_gui` 与 `test_backend_does_not_touch_gui`（下层不碰 Qt）、外加扫描器自测。扫描用 AST 而不是行前缀，所以函数体内的延迟 import 与 `from pymodbus.simulator.simcore import SimCore` 这种完整路径写法都跑不掉。
 
 ---
 
