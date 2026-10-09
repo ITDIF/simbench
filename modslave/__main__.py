@@ -12,7 +12,7 @@ import contextlib
 import signal
 import sys
 
-from .backend.modbus_tcp import ModbusTcpBackend
+from .backend.modbus_tcp import ModbusTcpBackend, PortInUseError
 from .csv_io_entry import load_point_table
 from .project.validate import error_lines, validate_project
 
@@ -148,6 +148,11 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(_serve(project.channels[0], args.quiet))
     except KeyboardInterrupt:
         print("\n[modslave] stopped", flush=True)
+    except PortInUseError as exc:
+        # 撞端口按一行错误报，不甩 traceback（和读不到文件同一个口径）：现场第一件事就是
+        # "再起一次"，而这里静默成功比报错更糟——两个监听叠在一起，主站继续读旧点表。
+        print(f"[error] [port] {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

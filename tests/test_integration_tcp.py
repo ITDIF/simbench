@@ -16,7 +16,8 @@ import pytest
 from pymodbus.client import ModbusTcpClient
 
 from modslave.backend.modbus_tcp import (
-    _DropDatastoreNoise, ModbusTcpBackend, configure_library_logging, parse_packet,
+    _DropDatastoreNoise, ModbusTcpBackend, PortInUseError, check_port_is_free,
+    configure_library_logging, parse_packet,
 )
 from modslave.codec.point_codec import encode
 from modslave.project.model import Device, Point, Project, TcpChannel
@@ -473,28 +474,59 @@ def test_open_backend_fixture_leaves_no_thread_and_frees_the_port(open_backend):
         client.close()
         assert len(threading.enumerate()) == len(before) + 1      # loop 线程在跑
     assert {t.name for t in threading.enumerate()} == before
-    with socket.socket() as probe:                                 # 端口已释放
-        probe.bind(("127.0.0.1", port))
+    check_port_is_free("127.0.0.1", port)                           # 端口已释放
 
 
-def test_start_waits_for_the_listener_and_reports_a_bind_failure():
-    """端口被占时 start() 必须抛，不许"返回成功但外面连不上"（静默失败）。
+def test_start_refuses_a_port_that_is_already_listened():
+    """端口已经有人在监听时，start() 必须在把端口交给 pymodbus 之前就拒绝。
 
-    计划里这里只有 `await asyncio.sleep(0)`；实测 bind 失败要再跑两三个 loop 迭代才落地，
-    sleep(0) 之后 `task.done()` 仍是 False，所以那条路会把失败吞成"已启动"。
+    实测：pymodbus 3.15.0 在 Windows 上连开两个 `ModbusTcpServer` 绑同一 `(host, port)`
+    会**两个都成功**（`_await_listener` 只看自己 transport 是否为 None，证明不了端口归属），
+    netstat 能叠出 3 个 LISTENING；主站的连接被先起来那个吃掉，于是"改了点位重启模拟器"
+    之后平台读到的还是旧值，而且两条日志都说 listening on 同一端口——没有任何线索指向
+    上一个没退干净的实例。所以这里自己拿裸 `socket.bind` 探一次。
+
+    措辞必须是"可能正被占用"：bind 与真正 listen 之间有窗口，探针只能证明"这端口现在
+    不归我们"，不能证明占用者是谁。
     """
     with socket.socket() as hog:
         hog.bind(("127.0.0.1", 0))
         port = hog.getsockname()[1]
         hog.listen(1)
-        backend = ModbusTcpBackend(
-            tunnel_project(port).channels[0])
+        backend = ModbusTcpBackend(tunnel_project(port).channels[0])
 
         async def scenario():
             await backend.start()
 
-        with pytest.raises(RuntimeError, match="Could not start listen"):
+        with pytest.raises(PortInUseError, match="may already be in use") as excinfo:
             asyncio.run(scenario())
+        message = str(excinfo.value)
+        assert str(port) in message                       # 带端口号，现场一眼对上
+        assert "WinError" in message or "errno" in message
+        assert backend._server is None                    # 没留下半个后端
+
+
+def test_await_listener_reports_a_late_bind_failure():
+    """探针之后仍可能晚到失败（TOCTOU、保留端口 10013）：`_await_listener` 照旧抛真异常。
+
+    `serve_forever()` 只有两种提前结束：bind 失败与被 shutdown。所以 task 一结束就说明
+    从站没起来，这里把真实异常原样抛出去，不许"start 成功但外面连不上"（静默失败）。
+    """
+    port = free_port()
+    backend = ModbusTcpBackend(tunnel_project(port).channels[0])
+
+    class NoListener:
+        transport = None
+
+    async def failing_serve_forever():
+        raise RuntimeError("Could not start listen, please check address.")
+
+    async def scenario():
+        task = asyncio.create_task(failing_serve_forever())
+        with pytest.raises(RuntimeError, match="Could not start listen"):
+            await backend._await_listener(NoListener(), task)
+
+    asyncio.run(scenario())
 
 
 def test_stop_is_idempotent_and_start_does_not_rebind():
@@ -510,8 +542,7 @@ def test_stop_is_idempotent_and_start_does_not_rebind():
         await backend.stop()
 
     asyncio.run(scenario())
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", port))
+    check_port_is_free("127.0.0.1", port)          # 重复 start/stop 没留下监听
 
 
 def test_parse_packet_handles_short_and_exception_frames():

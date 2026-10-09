@@ -15,10 +15,11 @@ import subprocess
 import sys
 import time
 
+import pytest
 from pymodbus.client import ModbusTcpClient
 
 from modslave import __main__ as cli
-from modslave.backend.modbus_tcp import ModbusTcpBackend
+from modslave.backend.modbus_tcp import ModbusTcpBackend, PortInUseError
 from modslave.codec.point_codec import encode
 from modslave.csv_io_entry import load_point_table
 from modslave.project.validate import error_lines
@@ -298,3 +299,66 @@ def test_cancelling_the_serve_task_releases_the_port():
             await backend.stop()
 
     assert asyncio.run(rebind()) == CO_CDAB       # 同端口确实起得来，值也还在
+
+
+def test_second_backend_on_the_same_port_is_refused():
+    """同一 `(host, port)` 上第二个实例必须**起不来**，不是"两个都成功"。
+
+    上面那条判据在这里帮不上忙：它测的是"第一个已经停了"，而现场的故障是第一个还活着
+    （改了点表再起一次，老进程没退干净）。实测 pymodbus 允许两个 server 绑同一端口都
+    "启动成功"、netstat 叠出 3 个 LISTENING、主站 30 次读全拿到旧点表的值——所以这条
+    用可失败的断言钉住：第二个 `start()` 抛端口占用类错误，端口号必须在消息里；而且
+    第一个 `stop()` 之后第二个确实起来、读到的是**新**值。
+    """
+    port = free_port()
+    project, _notes, issues = load_point_table(CSV, port_overrides={"tcp-5020": port})
+    assert error_lines(issues) == []
+    channel = project.channels[0]
+    channel.host = "127.0.0.1"
+    point = channel.devices[0].points[0]
+    assert (point.area, point.address, point.datatype) == ("hr", 0, "float32")
+    assert point.initial == "12.5"
+
+    zombie = ModbusTcpBackend(channel)            # A：还挂着上一版点表
+    fresh = ModbusTcpBackend(channel)             # B：模拟"改了点表再启动一次"
+
+    async def scenario():
+        await zombie.start()
+        point.initial = "99.5"                    # 改点表：CDAB 浮点两个寄存器都会变
+        old = zombie.read_registers(11, "hr", 0, 2)
+        with pytest.raises(PortInUseError) as excinfo:
+            await fresh.start()                   # 同一个端口：必须起不来
+        refused = str(port) in str(excinfo.value)
+        left_clean = fresh._server is None
+        await zombie.stop()
+        await fresh.start()                       # 端口真放开后第二个才允许起来
+        new = fresh.read_registers(11, "hr", 0, 2)
+        await fresh.stop()
+        return old, refused, left_clean, new
+
+    # 全程同一个 loop：backend 的 server 属于起它的那个 loop，跨 asyncio.run 复用会把
+    # stop() 打到已经关掉的 loop 上（实测 AttributeError: '_stop_serving'）。
+    old, refused, left_clean, new = asyncio.run(scenario())
+    assert refused, "端口号没出现在错误消息里，现场对不上是哪个端口"
+    assert left_clean, "起不来的那个实例留下了半个后端"
+    assert old == CO_CDAB                         # A 一直在按旧点表应答
+    assert new == encode(99.5, "float32", "CDAB")  # B 起来后读到的是新点表
+
+
+def test_cli_refuses_a_port_that_is_already_being_served():
+    """命令行撞端口是一行错误、不是 traceback：现场先杀僵尸进程才有线索。
+
+    这条判据在加探针之前**永远不会失败**——第二次启动是"成功"的，然后两个监听叠在一起、
+    主站继续读旧点表，日志里两边都写着 listening on 同一个端口。
+    """
+    port = free_port()
+    proc = start_server(port)
+    try:
+        client = wait_until_answering(proc, port)
+        client.close()
+        second = run_cli(CSV, "--host", "127.0.0.1", "--port", str(port), "--quiet")
+    finally:
+        terminate(proc)
+    assert second.returncode == 2, (second.stdout, second.stderr)
+    assert "[error]" in second.stderr and str(port) in second.stderr, second.stderr
+    assert "Traceback" not in second.stderr, second.stderr

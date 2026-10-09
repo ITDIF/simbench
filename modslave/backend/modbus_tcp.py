@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import socket
 import time
 
 from pymodbus import FramerType
@@ -73,6 +74,45 @@ def configure_library_logging(level: int = logging.ERROR) -> None:
             logger.addFilter(_DropDatastoreNoise())
 
 
+class PortInUseError(RuntimeError):
+    """端口不归我们：通常是上一个没退干净的模拟器实例还在监听。
+
+    继承 `RuntimeError` 是为了不砸已有调用方的 `except RuntimeError`（`_await_listener`
+    的晚到失败、`_require_writer` 的"通道没在跑"都从这里抛）。
+    """
+
+
+def check_port_is_free(host: str, port: int, channel_name: str | None = None) -> None:
+    """裸 `socket.bind` 探针：把端口交给 pymodbus **之前**先自己确认一次归属。
+
+    为什么必须自己探：pymodbus 3.15.0 在 Windows 上允许两个 `ModbusTcpServer` 绑同一个
+    `(host, port)` 都"启动成功"（它的 listener 带 SO_REUSEADDR 语义，`_await_listener`
+    只看自己 `server.transport` 是否为 None，证明不了端口归谁），netstat 上能叠出 3 个
+    LISTENING。实测后果：A 用旧点表、B 用新点表，两边都打印 `listening ...`，而主站的
+    连接被 A 吃掉——"改了点位重启模拟器"之后平台读到的还是旧值，现场完全没有线索指向
+    那个僵尸进程。
+
+    探针只 bind、不 listen，并且**立刻** close（`finally`），所以不会反过来把端口占住。
+    bind 与真正 listen 之间仍然存在 TOCTOU 窗口：这里只能说"这端口现在不归我们"，
+    因此消息写 "may already be in use"，不说死是谁占的；晚到失败由 `_await_listener`
+    兜（两条用例分别钉住这两个阶段）。
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, port))
+    except OSError as exc:
+        code = getattr(exc, "winerror", None)
+        detail = f"WinError {code}" if code is not None else f"errno {exc.errno}"
+        who = f"channel {channel_name}: " if channel_name else ""
+        raise PortInUseError(
+            f"{who}port {host}:{port} may already be in use by another process or a "
+            f"previous simulator instance (bind probe failed with [{detail}] "
+            f"{exc.strerror}); stop the instance that is holding it and start again"
+        ) from exc
+    finally:
+        probe.close()
+
+
 def parse_packet(raw: bytes) -> tuple[int | None, int | None, str]:
     """MBAP 头 + 功能码，给人看的摘要。只解析，不参与协议。
 
@@ -109,6 +149,9 @@ class ModbusTcpBackend:
         """建 SimDevice -> 起监听。重复调用是安全的（已经在跑就直接返回）。"""
         if self._server is not None:
             return
+        # 端口归属先自己确认：pymodbus 证明不了这件事（见 check_port_is_free 的实测说明），
+        # 让第二个实例"启动成功"就等于把主站的连接留给上一个僵尸进程。
+        check_port_is_free(self.channel.host, self.port, self.channel_name)
         configure_library_logging()
         devices = build_sim_devices(Project(channels=[self.channel]))
         server = ModbusTcpServer(
