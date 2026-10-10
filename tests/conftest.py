@@ -12,6 +12,7 @@ Qt 这边只需要一个会话级的 `offscreen` QApplication：实测该平台�
 from __future__ import annotations
 
 import contextlib
+import gc
 import os
 import socket
 
@@ -23,6 +24,25 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from modslave.backend.modbus_tcp import ModbusTcpBackend
 from modslave.engine.runner import EngineRunner
+
+# ---- 回收只许发生在 GUI 线程（口径见 spec §13 那条跨线程 ~QWidget 死锁）。
+# 引擎线程一旦触发自动回收，而回收链里有一个 GUI 线程刚丢弃的 QWidget 包装器，shiboken 就会
+# 在那个非 GUI 线程上走 `~QWidget → QWindow::close() → flushWindowSystemEvents() →
+# QWaitCondition::wait`，等主线程来收窗口事件；而主线程此刻正卡在 `runner.call` 里等引擎回话
+# —— 互等成环。表现不是"某条用例挂了"，而是整条 loop 不再回 `_run_once`：心跳停、后面每条
+# 用例的起停连片 10s 超时、`runner.stop()` 也失败（`loop.stop` 本身是排进回调的）。
+# 实测：`packet_view + integration_tcp` 这一对在回收开着时 3/3 挂死，`gc.disable()` 后 3/3 跑完。
+gc.collect()
+gc.freeze()          # 导入期建好的对象退出生成式回收，主线程那一次 collect 才便宜
+gc.disable()
+
+
+@pytest.fixture(autouse=True)
+def _collect_on_main_thread():
+    """循环照样要破，但只在 Qt 认为安全的那条线程上破。"""
+    yield
+    gc.collect()
+
 
 # 与 M1 的 _LoopThread.call 同一个上限：起停 backend 是毫秒级的事，10 秒不回就是坏了
 _CALL_TIMEOUT = 10.0
@@ -115,9 +135,14 @@ def open_backend(engine_runner):
         backend = ModbusTcpBackend(channel, packet_sink=packet_sink,
                                    on_connection=on_connection)
         try:
-            engine_runner.submit(lambda: backend.start()).result(_CALL_TIMEOUT)
+            # 走 `call` 而不是裸 `submit(...).result()`：引擎不回话时要把它当时卡在哪一起
+            # 报出来。裸 TimeoutError 只说"10s 没回"，而这次挂死全靠那句栈才分清是
+            # GC 在引擎线程上起不来、而不是 pymodbus 建 datastore 慢。
+            engine_runner.call(lambda: backend.start(), _CALL_TIMEOUT,
+                               f"test open channel {channel.name}")
             yield backend
         finally:
-            engine_runner.submit(lambda: backend.stop()).result(_CALL_TIMEOUT)
+            engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT,
+                               f"test close channel {channel.name}")
 
     yield _open

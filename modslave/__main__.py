@@ -102,36 +102,55 @@ async def _serve(channel, quiet: bool) -> None:
 def main(argv: list[str] | None = None) -> int:
     _reconfigure_streams()
     parser = argparse.ArgumentParser(prog="python -m modslave")
-    parser.add_argument("point_table", help="CSV 或 project.json")
+    parser.add_argument("point_table", nargs="?",
+                        help="CSV 或 project.json（只给 --gui 时可以省略，装载留给界面）")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--check", action="store_true", help="只校验，不监听")
     parser.add_argument("--quiet", action="store_true", help="不打印报文")
     parser.add_argument("--list", action="store_true", help="打印点表后退出")
+    parser.add_argument("--gui", action="store_true",
+                        help="打开桌面界面而不是命令行监听")
     args = parser.parse_args(argv)
+    if args.point_table is None and not args.gui:
+        parser.error("point table is required")
 
-    try:
-        project, notes, issues = load_point_table(args.point_table)
-    except OSError as exc:
-        # 文件读不到是操作错误：一句带路径的人话就够，不要甩一屏 traceback
-        detail = exc.strerror or exc
-        print(f"[error] [file] {args.point_table}: cannot read point table: {detail}",
-              file=sys.stderr)
-        return 2
+    project = None
+    if args.point_table is not None:
+        try:
+            project, notes, issues = load_point_table(args.point_table)
+        except OSError as exc:
+            # 文件读不到是操作错误：一句带路径的人话就够，不要甩一屏 traceback
+            detail = exc.strerror or exc
+            print(f"[error] [file] {args.point_table}: cannot read point table: {detail}",
+                  file=sys.stderr)
+            return 2
 
-    # 命令行覆盖排在校验之前一步：点表自己合法不代表 `--port 0`、`--host ""` 合法，
-    # 而"绝不带着非法配置起监听"这条闸门不能因为参数是命令行给的就绕过去
-    if not error_lines(issues) and _apply_overrides(project, args.host, args.port):
-        issues = validate_project(project)
+        # 命令行覆盖排在校验之前一步：点表自己合法不代表 `--port 0`、`--host ""` 合法，
+        # 而"绝不带着非法配置起监听"这条闸门不能因为参数是命令行给的就绕过去
+        if not error_lines(issues) and _apply_overrides(project, args.host, args.port):
+            issues = validate_project(project)
 
-    errors = _report(notes, issues)
-    if errors:
-        print(f"[modslave] {len(errors)} error(s); refusing to start", file=sys.stderr)
-        return 2
-    if not project.channels:
-        print("[modslave] the point table has no channel; check its first column",
-              file=sys.stderr)
-        return 2
+        errors = _report(notes, issues)
+        if errors:
+            print(f"[modslave] {len(errors)} error(s); refusing to start", file=sys.stderr)
+            return 2
+        if not project.channels:
+            print("[modslave] the point table has no channel; check its first column",
+                  file=sys.stderr)
+            return 2
+
+    if args.gui:
+        # 闸门在上面已经走过了：`--gui` 拿到的是校验通过的点表，坏点表在这里根本不开窗口
+        # （界面里那份清单是模态的，命令行不该让人对着一个弹框等 Ctrl+C）
+        from .gui.app import build_app
+        app, _window, session = build_app(
+            [args.point_table] if args.point_table else [])
+        try:
+            return app.exec()
+        except KeyboardInterrupt:
+            session.shutdown()
+            return 0
 
     if args.list:
         for channel in project.channels:

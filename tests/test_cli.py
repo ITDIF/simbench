@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import json
 import pathlib
 import subprocess
@@ -362,3 +363,53 @@ def test_cli_refuses_a_port_that_is_already_being_served():
     assert second.returncode == 2, (second.stdout, second.stderr)
     assert "[error]" in second.stderr and str(port) in second.stderr, second.stderr
     assert "Traceback" not in second.stderr, second.stderr
+
+
+# ---------- GUI 入口（Task 8） ----------
+
+def test_gui_entry_loads_the_point_table_and_starts_nothing(qapp):
+    """入口只做一件事：把点表接进界面。一个通道都不许自己起来。
+
+    命令行给的是点表路径，不是"顺便替我把从站起了"的授权；`●` 亮了操作员却没人让他起。
+    """
+    from modslave.gui.app import build_app
+
+    _app, window, session = build_app([CSV])
+    try:
+        names = session.channel_names()
+        assert names == ["tcp-5020"], names
+        assert not any(session.channel(name).running for name in names), "入口起了从站"
+        assert window.tree.topLevelItemCount(), "设备树是空的：点表没接进界面"
+        # 回收必须已经被收到 GUI 线程：留着自动回收，引擎线程某一次分配就会在
+        # 非 GUI 线程上销毁界面丢弃的 widget，和正等它回话的主线程互锁（spec §13）
+        assert not gc.isenabled(), "入口没关自动回收"
+    finally:
+        window.timer.stop()
+        window.deleteLater()
+        session.shutdown()          # runner 由 Session 自建，所以这一次 shutdown 真会收线程
+
+
+def test_gui_flag_still_refuses_a_point_table_with_errors(tmp_path, capsys):
+    """坏点表 + `--gui`：走的是同一道启动闸门，报完错就退，不许开一个空窗口等人关。
+
+    闸门在 `--gui` 之前一步是有原因的：界面里那份清单是模态的，命令行里弹一个没人点的
+    对话框等于把一次 CI 挂死在这里。
+    """
+    bad = tmp_path / "bad.csv"
+    bad.write_text(HEADER + "tcp-1,D,300,x,hr,0,uint16,ABCD,0,const,,false\n",
+                   encoding="utf-8")
+    assert cli.main([str(bad), "--gui"]) == 2
+    err = capsys.readouterr().err
+    assert "unit_id" in err and "refusing to start" in err, err
+
+
+def test_point_table_is_required_unless_the_gui_is_opened(capsys):
+    """`point_table` 改成可选只为一件事：`--gui` 可以先开空窗口再从界面里导入。
+
+    无界面那条路一个字节都不许变：少了点表就是 argparse 的错误退出，而不是"悄悄监听
+    一个空工程"。
+    """
+    with pytest.raises(SystemExit) as exc:
+        cli.main([])
+    assert exc.value.code == 2
+    assert "point table is required" in capsys.readouterr().err

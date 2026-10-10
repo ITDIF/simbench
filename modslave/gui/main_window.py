@@ -20,7 +20,9 @@
 
 from __future__ import annotations
 
+import gc
 import pathlib
+import time
 
 from PySide6 import QtGui, QtCore, QtWidgets
 
@@ -39,6 +41,11 @@ from .point_table import COLUMNS, PointTableModel
 
 _TICK_MS = 100
 _NOTICE_MS = 8000                       # 拒绝理由要在状态栏留够一读的时间，别一闪就没
+# 界面上每点一次导入/换工程都会留下一批已经没人引用的 widget；引用环得破，但**只能在
+# 这条线程上破**（口径见 spec §13：引擎线程上触发的一次自动回收如果碰到界面刚丢弃的
+# QWidget 包装器，shiboken 会在非 GUI 线程上 `~QWidget → QWindow::close()`，而它等的主
+# 线程正卡在 `runner.call` 上等引擎回话——互等成环，整个软件冻死）。
+_GC_EVERY_S = 5.0
 _STATUS_SLOT_WIDTH = 320                # 状态摘要的定宽槽（实测最长两条通道 ≈ 200px）
 _TREE_STRETCH, _TABLE_STRETCH = 1, 4
 _FIRST_SPLIT = [600, 400]   # 上栏:下栏 首屏比例（见 _build_layout）
@@ -71,6 +78,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._dirty_shown = False
         self._shown_error = ""
         self._confirming = False
+        self._next_collect = time.monotonic() + _GC_EVERY_S
 
         self.setCentralWidget(self._build_layout())
         self._build_toolbar()
@@ -221,7 +229,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status.showMessage(_one_line(message), _NOTICE_MS)
 
     def _stop_all(self) -> None:
-        self.session.stop_all()
+        try:
+            failures = self.session.stop_all()
+        except Exception as exc:                    # noqa: BLE001
+            self._log(f"[error] 全部停止异常：{type(exc).__name__}: {exc}")
+            self.status.showMessage("全部停止异常，原因见日志页", _NOTICE_MS)
+            return
+        for message in failures:
+            # 关不掉的通道要说得出名字和原因：只把那一格标红，操作员看不出端口还占着
+            self._log(f"[error] {message}")
+            self.status.showMessage(_one_line(message), _NOTICE_MS)
 
     def _check(self) -> None:
         # 已定口径：这里不许写 `self.session.project and validate(...)` 那种无意义表达式
@@ -301,6 +318,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if dirty != self._dirty_shown:            # 标题只在真变化时改，避免每跳重画标题
             self._dirty_shown = dirty
             self._refresh_title()
+        self._maybe_collect()
+
+    def _maybe_collect(self) -> None:
+        """到点就在 GUI 线程上破一次引用环（`app.py` 把自动回收关了，这里就是唯一的回收口）。
+
+        放在心跳里而不是另起一个计时器：心跳已经是 10Hz 且跑在主线程，再建一个 QTimer
+        只会多一条能独立失效的路径。
+        """
+        now = time.monotonic()
+        if now < self._next_collect:
+            return
+        self._next_collect = now + _GC_EVERY_S
+        gc.collect()
 
     def _surface_edit_error(self) -> None:
         """把表格模型的拒绝理由搬到屏幕上：只有那一格变色等于没告诉操作员为什么。"""

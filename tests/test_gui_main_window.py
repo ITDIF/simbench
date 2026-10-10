@@ -20,6 +20,7 @@
 
 import pathlib
 import socket
+import threading
 
 import pytest
 from PySide6 import QtCore, QtWidgets
@@ -156,6 +157,32 @@ def test_a_successful_edit_marks_the_title_dirty(window, qapp):
         window.point_model.index(row_of(window, "风机状态"), VALUE_COLUMN), "21") is True
     window._tick()
     assert window.windowTitle().endswith("*")
+
+
+def test_the_tick_is_the_only_reclaim_point_and_runs_on_the_gui_thread(
+        make_window, monkeypatch):
+    """自动回收已被入口关掉，所以"破引用环"只有心跳这一个口——它必须在 GUI 线程上。
+
+    引擎线程去破环时，shiboken 会在非 GUI 线程上销毁界面丢弃的 widget
+    （`~QWidget → QWindow::close() → 等主线程收窗口事件`），而主线程正卡在
+    `runner.call` 上等引擎，互等成环（spec §13）。这里既钉"只有主线程在收"，
+    也钉"一跳一次会变成 5 秒一次"——每跳都 collect 会把 10Hz 心跳变成卡顿源。
+    """
+    from modslave.gui import main_window as mw
+
+    window = make_window()
+    calls: list[bool] = []
+
+    def fake_collect(*_args):
+        # 这条线程就是 QApplication 所在的 GUI 线程（用例主体就跑在它上面）
+        calls.append(threading.current_thread() is threading.main_thread())
+
+    monkeypatch.setattr(mw.gc, "collect", fake_collect)
+    window._next_collect = 0.0                     # 当作已到点
+    window._tick()
+    window._tick()                                 # 刚收过，下一跳不该再收
+    assert calls == [True], calls
+    assert window._next_collect > 0.0, "到点之后没重新排下次，等于回到每跳一收"
 
 
 def test_the_tick_only_rewrites_the_title_when_dirty_changes(window):
@@ -332,6 +359,9 @@ def test_an_engine_timeout_is_reported_with_the_engine_stack_not_as_a_hang(
     assert "did not finish" in window.log_view.toPlainText()
     assert "modslave/engine/runner.py" in window.log_view.toPlainText(), "整段栈要留在日志"
     assert "\n" not in window.status.currentMessage()
+    # 拆窗在 monkeypatch 撤销**之前**跑（fixture 销毁是安装的反序），不主动撤掉的话
+    # teardown 里的 `shutdown()` 会一路撞在这个必然超时的 `call` 上，监听就留在端口上。
+    monkeypatch.undo()
 
 
 # ---------- ζ：一个通道都没起时 ----------
