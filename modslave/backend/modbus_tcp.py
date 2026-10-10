@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import select
 import socket
 import time
 
@@ -26,6 +27,13 @@ _UNIT_FALLBACK_MARKS = (_NOISE_PREFIX, "KeyError: 0", "__get_device")
 _START_TIMEOUT = 5.0
 _STOP_TIMEOUT = 5.0
 _POLL = 0.005
+# connect 级端口探针的两个时限（本机实测值，见 check_port_is_free 的说明）：
+# _CONNECT_TIMEOUT 是"握手最多允许多久"——真监听者的 SYN-ACK 由内核给，环回上实测
+# <1ms，全量 pytest 并发压着跑 40/40 都在 50ms 内完成；_CONNECT_HOLD 是"连上之后还要
+# 看它能不能留住"，只有人在服务时才会等满这 50ms。
+_CONNECT_TIMEOUT = 0.05
+_CONNECT_HOLD = 0.05
+_LOOPBACK = "127.0.0.1"
 
 
 class _DropDatastoreNoise(logging.Filter):
@@ -82,8 +90,112 @@ class PortInUseError(RuntimeError):
     """
 
 
-def check_port_is_free(host: str, port: int, channel_name: str | None = None) -> None:
-    """裸 `socket.bind` 探针：把端口交给 pymodbus **之前**先自己确认一次归属。
+def _refused(channel_name, host: str, port: int, probe_detail: str) -> PortInUseError:
+    """两个探针共用一句拒绝。
+
+    必须同时出现的东西：端口号（现场拿去对 netstat）、"previous simulator instance"
+    （第一嫌疑人就是没退干净的自己）、以及**双监听会造成什么**——这一句才是让人愿意去
+    杀进程而不是"再点一次启动看看"的理由。
+    """
+    who = f"channel {channel_name}: " if channel_name else ""
+    return PortInUseError(
+        f"{who}port {host}:{port} may already be in use by another process or a "
+        f"previous simulator instance ({probe_detail}); stop the instance that is "
+        f"holding it and start again, otherwise two listeners stack up on this port, "
+        f"the master is served by the older one, and a point-table change looks like "
+        f"it had no effect with nothing in the log to show for it")
+
+
+def _bind_probe(host: str, port: int, channel_name) -> None:
+    """裸 `socket.bind` 探针：同一个 host 上已经有人占着这个端口就立刻炸。
+
+    只 bind、不 listen，并且**立刻** close（`finally`），所以不会反过来把端口占住。
+    bind 与真正 listen 之间仍然存在 TOCTOU 窗口：这里只能说"这端口现在不归我们"。
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, port))
+    except OSError as exc:
+        code = getattr(exc, "winerror", None)
+        detail = f"WinError {code}" if code is not None else f"errno {exc.errno}"
+        raise _refused(channel_name, host, port,
+                       f"bind probe failed with [{detail}] {exc.strerror}") from exc
+    finally:
+        probe.close()
+
+
+def _is_being_served(target: str, port: int) -> bool:
+    """对 `target:port` 真连一次，并看这条连接**留不留得住**。
+
+    为什么不能只看 `connect_ex()==0`（本机实测）：上一个实例被硬杀之后，第一次 connect
+    仍然会成功（内核把 SYN 交给那个正在消失的 listener），随后立刻 RST——12 次里 9 次
+    是这个形状。照"连上就拒"写，每次"杀掉旧实例再起新的"都会被误拒，那比原来的双监听
+    更让人怀疑模拟器。所以连上之后还要在 `_CONNECT_HOLD` 里看一眼可读性：有人在服务 =
+    连接安静地留着；残影 = 立刻可读（RST 或 EOF）。
+
+    任何非 0 的 connect 结果（拒绝、超时、网络不可达）都算"没人在服务"。这一步是 bind
+    之外的加练，判不准时不许把用户的正常启动挡在门外。
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(_CONNECT_TIMEOUT)
+    try:
+        try:
+            if probe.connect_ex((target, port)) != 0:
+                return False
+        except OSError:
+            return False
+        try:
+            readable, _, _ = select.select([probe], [], [], _CONNECT_HOLD)
+        except OSError:
+            return True                 # 连上了而 select 都报错：按有人在服务处理
+        if not readable:
+            return True
+        try:
+            return bool(probe.recv(1))  # 对方主动说话也是"在服务"；空/异常=残影
+        except OSError:
+            return False
+    finally:
+        probe.close()
+
+
+def _connect_probe(host: str, port: int, channel_name) -> None:
+    """connect 级探针：补 bind 探针看不见的那两个窄洞。
+
+    本机实测（探针 socket 不带 SO_REUSEADDR，Windows）：
+
+    | 别人在监听    | 我们 bind    | 结果         |
+    |--------------|-------------|-------------|
+    | 127.0.0.1:P  | 0.0.0.0:P   | **OK** ← 洞 |
+    | 0.0.0.0:P    | 127.0.0.1:P | **OK** ← 洞 |
+    | 0.0.0.0:P    | 0.0.0.0:P   | FAIL 10048  |
+    | 127.0.0.1:P  | 127.0.0.1:P | FAIL 10048  |
+
+    也就是说 bind 只看得见"绑定地址完全一样"的冲突，而**通配与具体地址两个方向都能叠**。
+    叠上的后果不是报错而是静默读旧值：主站连的是先起来那一个，刚改完点表重启的这一个
+    一句日志都不说。所以这里对 `127.0.0.1:port` 真连一次——通配监听者和环回监听者都在
+    环回上应答，两个窄洞一起堵掉；`host` 是具体的非环回地址时再多探它自己（那种配置的
+    冲突只有打它本身才看得见）。
+
+    **还剩一处看不见**：对方只绑在另一块网卡的具体地址上（它 `192.168.1.5:P`、我们
+    `0.0.0.0:P`），它不该答环回，探它又必须枚举本机地址且会误拒别的服务，这里刻意不做。
+    现场最常见的形态——同一台笔记本上两个模拟器实例，默认都绑通配或都绑 127.0.0.1——
+    已经全部覆盖。
+    """
+    targets = [_LOOPBACK]
+    if host and host not in (_LOOPBACK, "localhost", "::1", "0.0.0.0", "::"):
+        targets.append(host)
+    for target in targets:
+        if _is_being_served(target, port):
+            raise _refused(channel_name, host, port,
+                           f"connect probe to {target}:{port} was accepted and the "
+                           f"connection stayed open, so something is serving this "
+                           f"port right now — most likely a previous simulator "
+                           f"instance that did not exit cleanly")
+
+
+def check_port_is_free(host: str, port: int,
+                       channel_name: str | None = None) -> None:
+    """把端口交给 pymodbus **之前**先自己确认归属：bind 一次、connect 一次。
 
     为什么必须自己探：pymodbus 3.15.0 在 Windows 上允许两个 `ModbusTcpServer` 绑同一个
     `(host, port)` 都"启动成功"（它的 listener 带 SO_REUSEADDR 语义，`_await_listener`
@@ -92,25 +204,13 @@ def check_port_is_free(host: str, port: int, channel_name: str | None = None) ->
     连接被 A 吃掉——"改了点位重启模拟器"之后平台读到的还是旧值，现场完全没有线索指向
     那个僵尸进程。
 
-    探针只 bind、不 listen，并且**立刻** close（`finally`），所以不会反过来把端口占住。
-    bind 与真正 listen 之间仍然存在 TOCTOU 窗口：这里只能说"这端口现在不归我们"，
-    因此消息写 "may already be in use"，不说死是谁占的；晚到失败由 `_await_listener`
-    兜（两条用例分别钉住这两个阶段）。
+    两级探针各管一半：bind 管"同一个绑定地址已经被占"（快、确定），connect 管"通配与
+    具体地址互叠"那一类 bind 根本看不见的情形（见 `_connect_probe` 的实测表）。两条都
+    只说"可能已被占用"——探针之后仍有 TOCTOU 窗口，真占用者是谁证明不了；晚到失败由
+    `_await_listener` 兜（用例分别钉住这两个阶段）。
     """
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        probe.bind((host, port))
-    except OSError as exc:
-        code = getattr(exc, "winerror", None)
-        detail = f"WinError {code}" if code is not None else f"errno {exc.errno}"
-        who = f"channel {channel_name}: " if channel_name else ""
-        raise PortInUseError(
-            f"{who}port {host}:{port} may already be in use by another process or a "
-            f"previous simulator instance (bind probe failed with [{detail}] "
-            f"{exc.strerror}); stop the instance that is holding it and start again"
-        ) from exc
-    finally:
-        probe.close()
+    _bind_probe(host, port, channel_name)
+    _connect_probe(host, port, channel_name)
 
 
 def parse_packet(raw: bytes) -> tuple[int | None, int | None, str]:
@@ -151,7 +251,11 @@ class ModbusTcpBackend:
             return
         # 端口归属先自己确认：pymodbus 证明不了这件事（见 check_port_is_free 的实测说明），
         # 让第二个实例"启动成功"就等于把主站的连接留给上一个僵尸进程。
-        check_port_is_free(self.channel.host, self.port, self.channel_name)
+        # 探针是阻塞 socket 调用，必须离开 loop 线程：实测在 loop 上直接跑时，探针那
+        # 300ms 里同 loop 的其它协程推进 0 次（见 test_the_port_probe_must_not_block_the_engine_loop），
+        # 也就是说 GUI 的每次改值、每条报文都会被一次启动冻住。
+        await asyncio.to_thread(check_port_is_free, self.channel.host, self.port,
+                               self.channel_name)
         configure_library_logging()
         devices = build_sim_devices(Project(channels=[self.channel]))
         server = ModbusTcpServer(

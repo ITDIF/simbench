@@ -6,9 +6,13 @@
 """
 
 import asyncio
+import contextlib
 import logging
+import os
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 
@@ -16,8 +20,9 @@ import pytest
 from pymodbus.client import ModbusTcpClient
 
 from modslave.backend.modbus_tcp import (
-    _DropDatastoreNoise, ModbusTcpBackend, PortInUseError, check_port_is_free,
-    configure_library_logging, parse_packet,
+    _DropDatastoreNoise, ModbusTcpBackend, PortInUseError, _bind_probe,
+    _connect_probe, _is_being_served, check_port_is_free, configure_library_logging,
+    parse_packet,
 )
 from modslave.codec.point_codec import encode
 from modslave.project.model import Device, Point, Project, TcpChannel
@@ -463,20 +468,22 @@ def test_engine_calls_after_stop_are_a_domain_error(open_backend):
 
 def test_open_backend_fixture_adds_no_threads_and_frees_the_port(open_backend,
                                                                 engine_runner):
-    """起停一个 backend 不留线程、端口能重新 bind。
+    """起停一个 backend 不留引擎线程、端口能重新 bind。
 
-    `EngineRunner` 是会话级共享的（loop + pump 两条线程横跨整个会话），所以这里断言的不是
-    "线程消失"，而是"这条用例没让线程数长"。按 ident 比不按名字比：名字集合差会被别的模块
-    留下的同名线程撑住，共享 runner 下必然假失败。
+    只点名 `modslave*` 线程：探针用的 `asyncio.to_thread` 工作线程本来就有生有灭，拿
+    "全部线程数不变"去判会把一次正常启动误判成泄漏。共享 runner 自己那两条 loop/pump
+    线程横跨整个会话，属于预期内，所以比的是"集合没多出新的"。
     """
-    before = {t.ident for t in threading.enumerate()}
+    def engine_threads():
+        return {t.name for t in threading.enumerate() if t.name.startswith("modslave")}
+
+    before = engine_threads()
     port = free_port()
     with open_backend(tunnel_project(port).channels[0]):
-        assert {t.ident for t in threading.enumerate()} == before
         client = connect(port)
         client.read_holding_registers(4, count=1, device_id=11)
         client.close()
-    assert {t.ident for t in threading.enumerate()} == before
+    assert engine_threads() == before, "起停一个 backend 多出了引擎线程"
     check_port_is_free("127.0.0.1", port)                           # 端口已释放
 
 
@@ -557,3 +564,240 @@ def test_parse_packet_handles_short_and_exception_frames():
         (77, 3, "unit 77 fc 3 EXCEPTION 4")
     assert parse_packet(b"\x00\x01\x00\x00\x00\x06\x0b\x03\x00\x00\x00\x02") == \
         (11, 3, "unit 11 fc 3 4B 00 00 00 02")
+
+
+def test_the_port_probe_must_not_block_the_engine_loop(monkeypatch):
+    """端口探针是阻塞式 socket 调用，不许在引擎 loop 线程上原地跑。
+
+    卡住 loop 的后果不是"这一次启动慢一点"：GUI 的每次改值、每条报文投递都排在这条
+    loop 上，探针堵多久界面就冻多久；两个通道一起启动时后一个还得等前一个探完。
+    判据：探针故意做慢（0.3s），这段时间同一 loop 上的另一个协程必须照常推进。
+    """
+    import modslave.backend.modbus_tcp as mbt
+    from modslave.engine.runner import EngineRunner
+
+    inside_probe = threading.Event()
+
+    def slow_probe(host, port, channel_name=None):
+        inside_probe.set()
+        time.sleep(0.3)                      # 模拟 connect 探针的阻塞窗口
+
+    monkeypatch.setattr(mbt, "check_port_is_free", slow_probe)
+    runner = EngineRunner(name="modslave-probe-loop")
+    runner.start()
+    ticks: list[int] = []
+
+    async def ticker():
+        for _ in range(30):
+            await asyncio.sleep(0.02)
+            ticks.append(1)
+
+    async def start_and_stop(channel):
+        backend = ModbusTcpBackend(channel)
+        await backend.start()
+        await backend.stop()
+
+    port = free_port()
+    channel = tunnel_project(port).channels[0]
+    tick_future = runner.submit(ticker)
+    start_future = runner.submit(lambda: start_and_stop(channel))
+    try:
+        assert inside_probe.wait(5.0), "start() 没走到端口探针"
+        seen_during_probe = 0
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            seen_during_probe = max(seen_during_probe, len(ticks))
+            time.sleep(0.01)
+        assert seen_during_probe >= 3, (
+            f"探针期间 loop 只推进了 {seen_during_probe} 次：探针把引擎线程整段占住了")
+        start_future.result(10)
+        tick_future.result(10)
+    finally:
+        runner.stop()
+
+
+def test_the_bind_probe_lets_a_loopback_listener_through_and_the_connect_probe_refuses(
+
+        ):
+
+    """A–I 表 H 行挂的那笔账：bind 探针看不见"对方绑 127.0.0.1、我们绑 0.0.0.0"。
+
+
+
+    先用 `_bind_probe` 单独证明**洞确实存在**（它放行），再证明 `check_port_is_free`
+
+    拒得下来。少了前一半，这条用例就只是在测"探针会不会报错"，看不出它补的是哪个洞，
+
+    以后有人把 connect 探针当冗余删掉时也没人拦得住。
+
+    """
+
+    with socket.socket() as hog:
+
+        hog.bind(("127.0.0.1", 0))
+
+        port = hog.getsockname()[1]
+
+        hog.listen(128)               # backlog 给足：满队列会让握手包被丢掉，探针看不见对方
+
+        _bind_probe("0.0.0.0", port, None)          # 洞：裸 bind 在这里放行
+
+        with pytest.raises(PortInUseError) as excinfo:
+
+            check_port_is_free("0.0.0.0", port, "tcp")
+
+        message = str(excinfo.value)
+
+        assert str(port) in message
+
+        assert "connect probe" in message            # 说清是哪一级探针拦的
+
+        assert "previous simulator instance" in message
+
+
+
+
+
+
+
+def test_the_connect_probe_also_catches_a_wildcard_owner_when_we_bind_loopback(
+
+        open_backend):
+
+    """反方向的同一个洞：别人绑 `0.0.0.0:P` 在服务，我们绑 `127.0.0.1:P` 也起得来。
+
+
+
+    用的是**真 backend**而不是裸 socket——现场就是这个形状（上一个模拟器实例）。
+
+    """
+
+    port = free_port()
+
+    wildcard = tunnel_project(port)
+
+    wildcard.channels[0].host = "0.0.0.0"
+
+    with open_backend(wildcard.channels[0]):
+
+        _bind_probe("127.0.0.1", port, None)         # 洞：仍然放行
+
+        with pytest.raises(PortInUseError) as excinfo:
+
+            check_port_is_free("127.0.0.1", port, "tcp")
+
+        assert "connect probe" in str(excinfo.value)
+
+        assert str(port) in str(excinfo.value)
+
+
+
+
+
+
+
+def test_an_accepted_but_hung_up_connection_is_not_counted_as_serving():
+    """连上就被挂断：不许判成"有人在服务"。
+
+    真监听者会把连接留住，而"接了立刻关"的形态（旧实例正在退出、内核还把 SYN 交给它）
+    必须放行——否则"杀掉旧实例立刻起新的"会被误拒，那比原来的双监听更让人怀疑模拟器。
+    accept 只能发生在有人 connect 之后，所以这里让后台线程持续 accept+close，
+    再断言它确实接过探针那一下（否则测的就不是"接了又挂断"）。
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.listen(8)
+    taken = []
+    stop = threading.Event()
+
+    def accept_and_hang_up():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            taken.append(1)
+            conn.close()                     # 挂断：环回上探针的 connect 会"成功"
+
+    thread = threading.Thread(target=accept_and_hang_up, daemon=True)
+    thread.start()
+    try:
+        assert _is_being_served("127.0.0.1", port) is False
+        assert taken, "探针的 connect 根本没被 accept，测的不是\"接了又挂断\""
+    finally:
+        stop.set()
+        listener.close()
+        thread.join(2)
+
+
+
+def test_the_probe_does_not_refuse_a_port_whose_previous_owner_was_killed():
+
+    """"杀掉旧实例、立刻起新的"是现场每天做的事：这一次不许拒（两轮回环）。
+
+
+
+    本机实测：子进程 bind+listen 在 `127.0.0.1:P`、被 kill 之后立刻
+
+      * `bind("0.0.0.0", P)` 4/4 成功，
+
+      * `bind("127.0.0.1", P)` 3/4 撞 WinError 10048（端口还没从内核里退干净），
+
+      * connect 判据 4/4 说"没人在服务"。
+
+    所以这里按 `0.0.0.0` 起，只测 connect 探针那一段；同一地址立刻重启会被 bind 探针
+
+    挡一下是 M1 就有的行为，不归这条管。
+
+    """
+
+    for _ in range(2):
+
+        port = free_port()
+
+        child = subprocess.Popen(
+
+            [sys.executable, "-c",
+
+             "import socket, time, os\n"
+
+             "s = socket.socket()\n"
+
+             "s.bind(('127.0.0.1', int(os.environ['MODSLAVE_HOG_PORT'])))\n"
+
+             "s.listen(5)\n"
+
+             "print('READY', flush=True)\n"
+
+             "time.sleep(60)\n"],
+
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+
+            encoding="utf-8", env=dict(os.environ, MODSLAVE_HOG_PORT=str(port)))
+
+        try:
+
+            assert child.stdout.readline().strip() == "READY", "占位进程没起来"
+
+            with contextlib.closing(socket.create_connection(
+
+                    ("127.0.0.1", port), timeout=2)):
+
+                pass                       # 留一条已经建立过的连接，正是残影的来源
+
+            child.kill()
+
+            child.wait(timeout=10)
+
+            check_port_is_free("0.0.0.0", port, "tcp")    # 不许误拒
+
+        finally:
+
+            with contextlib.suppress(Exception):
+
+                child.kill()
+
+            with contextlib.suppress(Exception):
+
+                child.wait(timeout=5)
