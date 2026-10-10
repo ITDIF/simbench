@@ -59,6 +59,28 @@ def free_port() -> int:
     raise RuntimeError("could not find a fresh free port for this session")
 
 
+_leaked = []
+
+
+@pytest.fixture(autouse=True)
+def _no_listener_leak(request):
+    """每个用例结束就检查：它拿过的端口不许还在应答。
+
+    上一个用例的后端没关干净，下一个用例的 client 就会连到它身上 —— 表现是"跨用例串扰"
+    而不是"泄漏"，最难查。这里直接把泄漏者点名。
+    """
+    before = set(_handed_out)
+    del _leaked[:]                    # 只报本条用例造成的泄漏，否则第一个之后条条都红
+    yield
+    for port in sorted(set(_handed_out) - before):
+        with contextlib.closing(socket.socket()) as probe:
+            probe.settimeout(0.2)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                _leaked.append((request.node.nodeid, port))
+    assert not _leaked, f"监听没关干净: {_leaked}"
+
+
+
 @pytest.fixture(scope="session")
 def engine_runner():
     """整个测试会话共用一个引擎线程（loop + pump）。

@@ -76,6 +76,11 @@ def built(qapp, project, engine):
     holder.show()
     qapp.processEvents()
     yield panel, engine, qapp
+    # 通道必须在本条用例结束时就停掉。等"下一条用例 load() 时顺手停"会留出一个
+    # 窗口期：上一个从站还在监听，后面任何用例的 client 都可能连到它身上，
+    # 表现成"跨用例串扰"而不是"泄漏"（实测过一次 test_uint64_big_endian 读到
+    # 别的用例写进去的值）。conftest 的监听泄漏检查器就是为了钉住这件事。
+    engine.stop_all()
     panel.deleteLater()
     holder.deleteLater()
     qapp.processEvents()

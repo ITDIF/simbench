@@ -27,6 +27,19 @@ from ..project.validate import Issue, error_lines, validate_project
 from .packets import PacketStore
 from .runner import EngineRunner
 
+# 等引擎回话的三条上限。**口径**：GUI 能走到的每一条等待都用 `runner.call(...)`，
+# 不用裸 `submit(...).result(...)`——`call` 在超时会把引擎线程当时的栈帧一起写进异常
+# 消息，而裸 TimeoutError 在现场只剩"界面没响应"这一条线索（本项目最防的"看不出是谁卡的"）。
+#   `_START_TIMEOUT` 10s：backend 内部 `_await_listener` 自己 5s 就放弃，10s 严格在它之上，
+#              所以这里等到的必然是"已经报过错了"而不是"还在等"。
+#   `_STOP_TIMEOUT`  10s：实测 `stop()` 里 serve_forever 在 0.2ms 内收尾；10s 的含义是
+#              "根本没关掉"，宁可带上栈帧报错也不许把旧监听静默留着占端口。
+#   `_WRITE_TIMEOUT`  5s：写一个点是内存操作（改 SimRuntime 的寄存器列表），5s 不回
+#              说明引擎线程被别的东西占住了，再继续等下去只会让操作员多点几次同一格。
+_START_TIMEOUT = 10.0
+_STOP_TIMEOUT = 10.0
+_WRITE_TIMEOUT = 5.0
+
 
 @dataclass(frozen=True)
 class Row:
@@ -136,6 +149,16 @@ class Session:
     def mark_dirty(self) -> None:
         self._dirty = True
 
+    def clear_dirty(self) -> None:
+        """把脏标记放回"没改过"。只有一个调用理由：**改动已经落盘了**。
+
+        主窗的"另存为"取消时不许调它——`*` 消失就等于告诉用户"存好了"，而他的改动
+        还在内存里没写过盘。换工程时 `load()` 自己会把标记归零，那是"这些改动已经不
+        存在了"，与这里不是一件事。
+        """
+        with self._lock:
+            self._dirty = False
+
     def issues(self) -> list[Issue]:
         """按**当前**工程现算一次校验，返回完整清单（不只拦住启动的那几条）。
 
@@ -176,8 +199,8 @@ class Session:
                              + " | ".join(errors[:3]))
         backend = ModbusTcpBackend(channel, packet_sink=self._packet_sink(name))
         try:
-            self._runner.call(lambda: backend.start(), 10.0,
-                             f"start channel {name}")
+            self._runner.call(lambda: backend.start(), _START_TIMEOUT,
+                              f"start channel {name}")
         except Exception as exc:                    # noqa: BLE001
             # 运行期失败（真端口被占 10048、保留端口 10013、监听起不来）由 backend 抛出，
             # 原样再抛给调用方，同时落 last_error + 发 error 状态：界面上那一格变红，
@@ -197,21 +220,51 @@ class Session:
         self._publish(ChannelState(name, "stopped", ""))
 
     def start_all(self) -> list[str]:
-        """工具栏"全部启动"：把每个通道的拒绝原因收集起来，不是撞上第一个就抛。"""
+        """工具栏"全部启动"：把每个通道的拒绝原因收集起来，不是撞上第一个就抛。
+
+        收的是**任何**异常而不只是 `ValueError`：端口被占抛的是 `PortInUseError`
+        （RuntimeError 系），只挡 ValueError 的话第一个坏通道会把后面的全部连累——
+        现场接了两路 485 只起得来一路，而界面上没有任何一条说"另一个通道我没试过"。
+        一次报全才是这里的行为契约。`KeyError`（通道名都不存在）在 `_require` 里，
+        那是编程错误，照样外抛。
+        """
         failures: list[str] = []
         for name in self.channel_names():
             try:
                 self.start_channel(name)
-            except ValueError as exc:
-                failures.append(str(exc))
+            except Exception as exc:                # noqa: BLE001
+                # 不带异常类名前缀：两类拒绝消息自己就说清了是哪个通道（"channel tcp-1:
+                # port ..." / "point table has N error(s)..."），再套一层就成重复句。
+                # 消息为空时退回类名，绝不给界面留一条空白的"报过了"。
+                failures.append(str(exc) or f"{type(exc).__name__} (no message)")
         return failures
 
     def stop_all(self) -> None:
+        """停掉所有通道，并**逐个**发 stopped 状态。
+
+        和 `stop_channel` 同一份形状：内部 `_stop_all_locked` 只收后端不发事件（`load()`
+        换工程时要用它，给旧通道发"停了"界面上根本没人听）。少了这几个事件，工具栏
+        "全部停止"之后的设备树就还挂着 `●`——通道已经停了而界面说它还在跑，正是本项目
+        最防的那类演出。
+        """
         with self._lock:
             self._stop_all_locked()
+            names = list(self._channels)
+        for name in names:
+            self._publish(ChannelState(name, "stopped", ""))
 
     def shutdown(self) -> None:
-        self.stop_all()
+        """收尾：停所有通道 → 把自己从 runner 上摘掉 → 断开界面订阅。
+
+        退订这一步**不能省**：runner 通常是共享的（测试里会话级一个，GUI 里几个 Session
+        也可能共用同一个）。没退订的话，一个已经关掉的 Session 会永远留在事件流里，
+        每条报文都再穿过它一遍、再往它那些已经 `deleteLater` 掉的 widget 上投一次——
+        实测加上界面用例之后全量套件从 20 秒涨到 8 分钟，就是这个 O(历史窗口数) 的扇出。
+        """
+        self.stop_all()                       # 先把 stopped 状态发完，界面还听得见
+        self._runner.unsubscribe(self._on_engine_event)
+        with self._lock:
+            self._sinks.clear()
         if self._owns_runner:
             self._runner.stop()
 
@@ -272,14 +325,20 @@ class Session:
         except ValueError as exc:
             return WriteResult(False, str(exc))
         try:
+            # 走 `call` 而不是裸 `submit(...).result()`：超时时 `call` 会把引擎线程当时的
+            # 栈帧带进消息。界面上"点了没反应"和"引擎卡在写 4x5 这一帧"是两种完全不同的
+            # 故障，后者能凭一张截图定位。5 秒的口径见 `_WRITE_TIMEOUT`。
             if area_is_bit(area):
-                ok = self._runner.submit(
+                ok = self._runner.call(
                     lambda: _awrite_bits(runtime.backend, unit_id, area, address,
-                                         bool(registers[0]))).result(5)
+                                         bool(registers[0])),
+                    _WRITE_TIMEOUT, f"write {area} {address} (unit {unit_id}) "
+                                    f"on channel {channel}")
             else:
-                ok = self._runner.submit(
-                    lambda: _awrite(runtime.backend, unit_id, area, address,
-                                    registers)).result(5)
+                ok = self._runner.call(
+                    lambda: _awrite(runtime.backend, unit_id, area, address, registers),
+                    _WRITE_TIMEOUT, f"write {area} {address} (unit {unit_id}) "
+                                    f"on channel {channel}")
         except Exception as exc:                    # noqa: BLE001
             return WriteResult(False, f"engine write failed: {exc}")
         if not ok:
@@ -342,7 +401,8 @@ class Session:
     def _stop_one(self, runtime: ChannelRuntime) -> None:
         if runtime.backend is not None:
             try:
-                self._runner.submit(lambda: runtime.backend.stop()).result(10)
+                self._runner.call(lambda: runtime.backend.stop(), _STOP_TIMEOUT,
+                                  f"stop channel {runtime.name}")
             except Exception as exc:                # noqa: BLE001
                 runtime.last_error = str(exc)
             # 无论 stop 有没有报错，引用都要放开：留着半个 server 让下一发读/写

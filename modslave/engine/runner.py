@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import queue
 import sys
 import threading
@@ -113,7 +114,8 @@ class EngineRunner:
             return future.result(seconds)
         except TimeoutError as exc:
             raise TimeoutError(f"{what}: engine thread did not finish within "
-                               f"{seconds}s (alive={self.alive})"
+                               f"{seconds}s (alive={self.alive}, "
+                               f"threads={threading.active_count()})"
                                f"{self._frames_hint()}") from exc
 
     def _frames_hint(self) -> str:
@@ -131,6 +133,18 @@ class EngineRunner:
 
     def subscribe(self, sink: Callable[[Any], None]) -> None:
         self._sinks.append(sink)
+
+    def unsubscribe(self, sink: Callable[[Any], None]) -> None:
+        """退订一个 sink。没订阅过、重复退订都安全返回。
+
+        为什么必须有：`Session` 把自己订阅在 runner 上，而 runner 常常是**共享**的
+        （测试会话级一个、GUI 可能几个 Session 共用一个）。没有退订口的话，一个已经
+        shutdown 的 Session 会永远留在事件流里，每条报文都要穿过所有历史 Session 一遍——
+        实测加 GUI 用例之后全量从 20s 涨到 8 分钟，就是这个 O(历史窗口数) 的扇出，
+        外加往已经 deleteLater 掉的 widget 上投递的一串异常。
+        """
+        with contextlib.suppress(ValueError):
+            self._sinks.remove(sink)
 
     def drain(self, seconds: float = 2.0) -> bool:
         """等事件队列排空（测试与 GUI 关闭时用）。True=排空，False=超时。

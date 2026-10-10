@@ -31,7 +31,7 @@ from modslave.codec.point_codec import encode
 from modslave.csv_io_entry import load_point_table
 from modslave.engine.runner import EngineRunner
 from modslave.engine.session import Row, Session, WriteResult
-from modslave.project.model import Project
+from modslave.project.model import Device, Point, Project, TcpChannel
 from tests.conftest import free_port
 
 CSV = "examples/covi-tunnel.csv"          # M1 的点表：unit 11 有 CDAB 浮点与只读点
@@ -260,6 +260,88 @@ def test_start_all_collects_refusals_instead_of_raising_the_first_one(session):
     session.load(project)
     assert len(session.start_all()) == 1
     assert not session.channel("tcp-5020").running
+
+
+def another_channel(port: int) -> TcpChannel:
+    """第二条通道：unit 21 不与示例点表里的 11/12 撞，端口另取一个空闲的。"""
+    return TcpChannel(name="tcp-alt", host="127.0.0.1", port=port, devices=[
+        Device(name="照明回路-9", unit_id=21,
+               points=[Point("温度", "hr", 0, "uint16", initial="7")])])
+
+
+def test_start_all_collects_a_refused_port_and_still_starts_the_rest(session):
+    """"全部启动"里一个通道撞端口，不许把下一个通道一起带走。
+
+    运行期失败抛的是 `PortInUseError`（RuntimeError 系）而不是 `ValueError`：只收
+    ValueError 的话第一个坏通道会把 `start_all` 打断——现场接两路只起得来一路，而界面
+    连一句"另一个我没试过"都不说，操作员只会当成模拟器坏了。
+    占位方在 `127.0.0.1`、我们要起的是点表里的 `0.0.0.0`，正是裸 bind 看不见的那一种冲突。
+    """
+    with socket.socket() as hog:
+        hog.bind(("127.0.0.1", 0))
+        hog.listen(128)
+        busy = hog.getsockname()[1]
+        project = loaded(busy)
+        assert project.channels[0].host == "0.0.0.0"
+        project.channels.append(another_channel(free_port()))
+        session.load(project)
+        failures = session.start_all()
+        assert len(failures) == 1, failures
+        assert "may already be in use" in failures[0], failures[0]
+        assert "channel tcp-5020" in failures[0], failures[0]
+        assert not session.channel("tcp-5020").running
+        assert session.channel("tcp-alt").running, "坏通道把后面的通道一起拦停了"
+        session.stop_all()
+
+
+def test_stop_all_publishes_a_stopped_state_for_every_channel(session):
+    """工具栏"全部停止"必须逐个发 stopped：只停后端不发事件，界面上还挂着 ●。
+
+    `stop_channel` 一直会发，`stop_all` 漏了——通道已经停了而界面说它还在跑，正是本项目
+    最防的那类演出，所以这里按"每个通道一条 stopped"钉住，并顺手钉住幂等顺序：
+    已经停着的通道也照样给一条，界面上一次点击全都对上号。
+    """
+    project = loaded(free_port())
+    project.channels.append(another_channel(free_port()))
+    states: list[ChannelState] = []
+    session.subscribe(lambda e: isinstance(e, ChannelState) and states.append(e))
+    session.load(project)
+    session.start_all()
+    assert [session.channel(n).running for n in session.channel_names()] == [True, True]
+    states.clear()
+    session.stop_all()
+    assert sorted(s.state for s in states) == ["stopped", "stopped"]
+    assert sorted(s.channel for s in states) == ["tcp-5020", "tcp-alt"]
+    assert not any(session.channel(n).running for n in session.channel_names())
+
+
+def test_shutdown_unsubscribes_from_a_shared_runner(engine_runner):
+    """关掉的 Session 必须从**共享** runner 上摘掉自己，之后再也收不到引擎事件。
+
+    这条是拿实测代价换来的：runner 共享时只 subscribe 不 unsubscribe，每建一个界面再关掉
+    就永久多留一份订阅，之后每条报文都要穿过所有历史 Session 一遍、还往已经销毁的 widget
+    上投递——加界面用例之后全量从 20 秒涨到 8 分钟，并把真主站用例拖到读超时。
+    """
+    before = list(engine_runner._sinks)
+    gone: list[object] = []
+    session = Session(runner=engine_runner)
+    session.load(loaded(free_port()))
+    session.subscribe(gone.append)
+    assert len(engine_runner._sinks) == len(before) + 1
+    session.shutdown()
+    # shutdown 里 stop_all 会先把 stopped 发完（那是给还开着的界面用的），所以清一次再断言
+    gone.clear()
+    assert engine_runner._sinks == before, "shutdown 没把自己从共享 runner 上摘掉"
+
+    engine_runner.publish(PacketEvent("tcp-x", "rx", bytes([0, 1]), 11, 3, "x", 0.0))
+    engine_runner.drain(2.0)
+    assert gone == [], "已经关掉的 Session 还在收引擎事件"
+
+    survivor = Session(runner=engine_runner)     # 摘干净不许把后面的 Session 一起带走
+    survivor.load(loaded(free_port()))
+    survivor.start_channel("tcp-5020")
+    assert survivor.channel("tcp-5020").running
+    survivor.shutdown()
 
 
 # ---------- 点表读：真主站交叉验证 ----------
@@ -572,6 +654,22 @@ def test_dirty_flag_tracks_edits(session):
     session.mark_dirty()
     assert session.dirty is True
     session.load(loaded(free_port()))            # 换工程 = 重新装载，脏标记归零
+    assert session.dirty is False
+
+
+def test_clear_dirty_resets_the_flag(session):
+    """`clear_dirty()` 只有一件事可做：改动已经落盘了，把标题栏的 `*` 收回去。
+
+    单独钉这条是因为它是**唯一一个会把"未保存"状态抹掉的入口**：主窗在另存为取消时
+    误调它，用户就看到一个存过了的假象（口径 ε 最坏的那种失效）。这里只改标记，
+    不碰寄存器、不碰工程。
+    """
+    session.load(loaded(free_port()))
+    session.mark_dirty()
+    assert session.dirty is True
+    session.clear_dirty()
+    assert session.dirty is False
+    session.clear_dirty()                        # 重复调用必须安全
     assert session.dirty is False
 
 
