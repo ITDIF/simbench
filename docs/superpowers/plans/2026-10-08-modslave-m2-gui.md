@@ -60,6 +60,20 @@
 
 **本计划的 Task 1–4 的参考代码块同样是"裁决前快照"**：与仓库实际不一致时以仓库与本表为准。Task 3 之后每完成一组，就把该组新产生的口径追加进这张表，并把对应代码块前补一行快照提示（措辞沿用 M1 计划里那行）。
 
+## 执行期已裁决的偏离（M2 Task 7–9 落地后确定，优先级高于下面的计划正文）
+
+| # | 计划正文的写法 | 已定口径 | 证据 |
+|---|---|---|---|
+| J | Task 8 `build_app` 里 `Session(runner=EngineRunner(), packet_store=store)` | 写成 **`Session(packet_store=store)`**，runner 交给 Session 自建。归属口径是"谁建的 runner 谁收"（E 行那对线程名就由此而来），显式传进去的话 `shutdown()` 不会停它 | 照抄计划会让用户每次关窗都留下 `modslave-engine` + `modslave-engine-events` 两条僵尸线程；`tests/test_cli.py::test_gui_entry_loads_the_point_table_and_starts_nothing` 里那句 `session.shutdown()` 收的就是这一对 |
+| K | Task 8 Step 2：`--gui` 分支"在 `args = parser.parse_args(argv)` 之后插入" | 实际插在**装载 + 校验闸门之后、`--list`/`--check`/监听之前** | 坏点表时界面那份清单走的是模态 `IssueDialog.exec()`，命令行里弹一个没人点的对话框等于把一次 CI 挂死在这里；而 `_report` 已经把同一份清单一次报全打到 stderr，再开窗口就是两份真相。`test_gui_flag_still_refuses_a_point_table_with_errors` |
+| L | Task 8 Step 3 三条 subprocess 用例（坏点表用 `unit_id=300`） | 改成**进程内 + 打桩** `QApplication.exec` 与 `IssueDialog`，另留一条 subprocess 只验"无点表 + 无 `--gui` 必须报错" | `unit_id=300` 会走 `use_project → _show_issues → IssueDialog.exec()`，离屏下开嵌套事件循环永远回不来（`test_gui_main_window.py` 的 `issue_lists` 桩就是为同一件事打的）；照抄计划这两条用例必挂。`EXAMPLE_CSV` 在本文件里叫 `CSV`，`os` 也不用另加 |
+| M | （计划里没有的新口径）**"停止失败"这一态** | `_stop_one` 返回"端口真的释放了没有"；**关不掉就留住后端、`running` 不动**，`stop_channel` 发 `error` 并抛异常，`stop_all` 像 `start_all` 一样返回失败清单，通道面板让**停止按钮保持可点**（再点一次能真关掉），换工程时关不掉的旧通道落一条 `[error]` 日志 | 旧写法吞掉异常照样 `backend = None`：监听还占着端口而 Session 里再没有句柄，界面显示 `○ 停止` 而外面主站照样读到值，操作员只剩重启一条路。`tests/test_session.py::test_a_failed_stop_keeps_the_handle_so_the_next_stop_can_close_it`、`::test_stop_all_names_the_channel_it_could_not_close_and_still_stops_the_rest`，界面侧见 spec §7 |
+| N | Task 3 的测试夹具 `open_backend` 用裸 `engine_runner.submit(...).result(10)` | 换成 **`engine_runner.call(..., 10, "test open channel ...")`** | 裸 `TimeoutError` 只有"10s 没回"，而 spec §13 那条既发挂死正好要靠引擎栈定位；这也是本项目给产品自己定的口径（GUI 能走到的每条等待都用 `call`） |
+| O | （计划里没有的新口径）**回收只许发生在 GUI 线程** | `gui/app.py` 起来就 `gc.collect() → gc.freeze() → gc.disable()`，破引用环交给 `MainWindow._maybe_collect()`（心跳里每 5s 至多一次）；`tests/conftest.py` 同一口径 + 每条用例结束在主线程 `gc.collect()` | 引擎线程触发一次自动回收，回收链里有界面刚丢弃的 `QWidget` 包装器时，shiboken 会在非 GUI 线程上 `~QWidget → QWindow::close() → 等主线程收窗口事件`，而主线程正卡在 `runner.call` 上等引擎——互等成环。`py-spy --native` 的栈为证，详见 spec §12/§13。用例：`test_the_tick_is_the_only_reclaim_point_and_runs_on_the_gui_thread`、`test_gui_entry_loads_the_point_table_and_starts_nothing`（断入口把自动回收关了） |
+| P | （排查这条挂死时的三次误判，记下来免得照着旧结论改代码） | ① 栈尾落在 `create_server` / `asyncio.to_thread(check_port_is_free)` **不是**根因，那只是"回收触发时正在写哪行"；② `faulthandler` 给主线程标的 `Garbage-collecting` 是它自己 dump 触发的；③ "整会话 0 次回收"是**仪表坏了**——这台机器的 `gc.callbacks` 是 `cb(phase, info)` 两参数，按上游单参数写会每次抛 `TypeError` 并被 "Exception ignored" 静默吃掉 | 三次都被下一条证据推翻：给已知的一次 `gc.collect()` 看回调进不进，才知道回调在抛。修好台账后指着"在飞的那次回收就起在引擎线程"，`--native` 栈再确认销毁 widget 的路径。**先验准仪表再排除假设**，同 spec §13 |
+
+
+
 ---
 
 ## 文件结构（M2 新增部分）
@@ -3136,7 +3150,9 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "feat: 主窗�
 - Modify: `modslave/__main__.py`（加 `--gui`）
 - Test: `tests/test_cli.py` 追加
 
-- [ ] **Step 1: `gui/app.py`**
+> 本 Task 的三个代码块是裁决前快照，与仓库实际有差异（见上方 J、K、L 三行）。以仓库与本表为准，不要照抄。
+
+- [x] **Step 1: `gui/app.py`**
 
 ```python
 # modslave/gui/app.py
@@ -3173,7 +3189,7 @@ def build_app(argv: list[str] | None = None):
     return app, window, session
 ```
 
-- [ ] **Step 2: `__main__.py` 加 `--gui`（不改 CLI 行为）**
+- [x] **Step 2: `__main__.py` 加 `--gui`（不改 CLI 行为）**
 
 在 `main()` 里 `args = parser.parse_args(argv)` 之后插入：
 
@@ -3198,7 +3214,14 @@ def build_app(argv: list[str] | None = None):
 `point_table` 参数改成 `nargs="?"`，同时保留一条校验：**不带 `--gui` 且没给点表路径**时
 `parser.error("point table is required")`。`tests/test_cli.py` 必须仍全绿。
 
-- [ ] **Step 3: 测试**
+- [x] **Step 3: 测试**
+
+> **实际落地的三条与上面的快照不一样**（J、K、L 行）：`use_project` 会走一次模态
+> `IssueDialog.exec()`，`app.exec()` 更是永不返回——两条 subprocess 用例照抄必挂。所以：
+> 入口装载改成进程内用例（`qapp` 夹具 + `build_app`，直接断"点表进界面而一个通道都没起"）；
+> 坏点表那条改走 `cli.main([... , "--gui"])`，断的是**闸门**（返回 2、清单进 stderr、不开窗口）；
+> 再加一条 `cli.main([])` 断 `parser.error("point table is required")`。
+> 无头路径不重复钉：`test_check_passes_on_the_example_point_table` 已经在管这件事。
 
 追加到 `tests/test_cli.py`：
 
@@ -3257,7 +3280,7 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "feat: GUI 入
 
 ## Task 9: 冒烟与人工验收清单（需要你亲手做一次）
 
-- [ ] **Step 1: offscreen 冒烟（脚本级，可重复）**
+- [x] **Step 1: offscreen 冒烟（脚本级，可重复）**
 
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -c "
@@ -3271,6 +3294,10 @@ s.shutdown()
 "
 ```
 Expected: 打印行数列数、`running ['tcp-5020']`、树里有 `tcp-5020`。
+
+> 2026-10-10 本机跑过（`.venv` = Python 3.13.9 / pymodbus 3.15.0 / PySide6 6.9.2）：
+> `rows 9 cols 10` → `running ['tcp-5020']` → `tree ['tcp-5020']` →
+> `s.shutdown()` 之后 `running []`（端口归零，`--gui` 那条路真的收得到线程与监听）。
 
 - [ ] **Step 2: 真界面冒烟（你要做的部分，一）**
 
@@ -3331,15 +3358,20 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "docs: 回写 
 
 ## M2 完成检查表
 
-- [ ] `.venv/Scripts/python.exe -m pytest -q` 全绿，无 skip / xfail（用例数只增不减，基线 576）
-- [ ] `tests/test_architecture.py` 通过：pymodbus/serial 只在 `backend/`，**PySide6 只在 `gui/`**，
+- [x] `.venv/Scripts/python.exe -m pytest -q` 全绿，无 skip / xfail（用例数只增不减，基线 576）
+      **2026-10-10 达成**：`773 passed in 63.27s`，串行连跑 4 轮全 exit=0。此前那条"整轮挂死"
+      不是端口/监听的问题，而是**自动 GC 在非 GUI 线程销毁界面丢弃的 `QWidget`**，与正等引擎
+      回话的主线程互锁（根因、三次误判与修法见 spec §12/§13 与本表 O、P 两行）。
+- [x] `tests/test_architecture.py` 通过：pymodbus/serial 只在 `backend/`，**PySide6 只在 `gui/`**，
       且每条守卫都有"防空跑"断言；变异检查（往 `gui/` 外塞 `import PySide6`）确实变红
-- [ ] `tests/test_gui_layout_invariant.py` 通过：stopped/running/error 三态几何完全一致，
-      且没有任何控件在状态变化时消失
-- [ ] 报文过滤是 4 个平铺标签（无下拉），默认"全部"
-- [ ] GUI 改值经真主站读回一致；非法输入被拒且消息带点位名
-- [ ] 主站写入在 2 个心跳（≤200ms）内出现在表里
-- [ ] 未保存改动有 `*` 且关闭时提示；`--check`/无头 CLI 行为未退化
+      （`--gui` 那条延迟 import 走的是相对导入，扫描器按 `level > 0` 跳过，不算泄漏）
+- [x] `tests/test_gui_layout_invariant.py` 通过：stopped/running/error 三态几何完全一致，
+      且没有任何控件在状态变化时消失（M 行新增的"停止失败保持可点"只改 `enabled`，不改几何）
+- [x] 报文过滤是 4 个平铺标签（无下拉），默认"全部"
+- [x] GUI 改值经真主站读回一致；非法输入被拒且消息带点位名
+- [x] 主站写入在 2 个心跳（≤200ms）内出现在表里
+- [x] 未保存改动有 `*` 且关闭时提示；`--check`/无头 CLI 行为未退化
+      （`--gui` 落地后 `test_cli.py` 里原有 27 条一条没动，另加 3 条见 L 行）
 - [ ] Task 9 Step 2、Step 3 的人工清单由用户当面跑过（自动化替不了）
 - [ ] `git status --short` 为空
 

@@ -255,6 +255,19 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 
 - 通道可独立启停（现场常常只接了一路 485）
 - 报文窗：环形缓冲 5000 条 + 暂停滚动按钮
+- **已实现口径（M2，别再按布局图猜）**：报文过滤是 **4 个平铺可勾选标签**
+  `全部/请求/响应/异常`（`gui/packet_view.py` 里**一个 `QComboBox` 都不许有**，换个地方塞下拉
+  等于没改），默认 **"全部"**；三态（`○ 停止`/`● 运行`/`▲ 失败`）只换文字与颜色，
+  控件矩形与 `isVisible()` 序列逐项恒定（`tests/test_gui_layout_invariant.py`、
+  `tests/test_gui_packet_view.py` 各钉一份）；可伸缩区块不写死高度。
+- **停止失败这一态**：`▲ 失败` 且**停止按钮保持可点**。`runner.call` 超时意味着引擎线程没回话，
+  监听大概率还在应答，此时界面若显示 `○ 停止` 就是"说停了其实还在服务"——那是本项目最防的
+  一类演出。口径：后端句柄留住、`running` 不动、再点一次"停止"能真的关掉
+  （`tests/test_session.py::test_a_failed_stop_keeps_the_handle_so_the_next_stop_can_close_it`）。
+- **回收（GC）归 GUI 线程**：入口关掉自动回收，破引用环只由主线程心跳按点做（每 5s 至多一次）。
+  界面 + 引擎线程并存的工具里，让引擎线程去回收等于让它销毁界面丢弃的 widget，而它等的主线程
+  正在等它回话——整个软件冻死（实测根因与证据在 §12）。这条不改任何可见行为，但决定了
+  "点一下启动之后界面卡住"这类现象会不会再出现。
 - **值归属规则（v1 唯一一条）**：每个点位有 `source = waveform | manual`。GUI 手动改值、
   或主站用 FC05/06/15/16 写入，都把该点切成 `manual`，波形引擎**不再覆盖**它，
   点位表波形列显示 `已停`，右键"恢复波形"可切回。这样测平台下发命令时不会出现
@@ -324,7 +337,14 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
    （无 skip、无 xfail），其中 `tests/test_integration_tcp.py` 是真主站互测（八个功能码 +
    异常码 + 字序 + 多 unit + 总线扫描日志），`tests/test_cli.py` 是命令行入口验收。
    **还等人的只有人工那一条**：QModMaster 手连一遍计划 Task 12 Step 8 的 6 项。
-2. **M2 GUI 最小可用**：设备树 + 点位表 + 双击改值 + 通道启停。
+2. **M2 GUI 最小可用（代码已全部落地，人工那两条清单还没跑）**：设备树 + 点位表 + 双击改值 +
+   通道启停，外加报文监视窗与多通道独立启停（原本排在 M3 的两项一起做掉了，因为界面一次装齐
+   比拆两次更省返工）。落地在计划 `docs/superpowers/plans/2026-10-08-modslave-m2-gui.md`，
+   入口 `modslave/gui/app.py` + `python -m modslave <点表> --gui`。全量
+   `.venv/Scripts/python.exe -m pytest` **773 passed in 63.27s**（无 skip、无 xfail，串行连跑 4 轮
+   全绿）。此前那条"整轮挂死"的根因与修法见 §12/§13：自动 GC 在非 GUI 线程销毁界面丢弃的
+   `QWidget`，与正等引擎回话的主线程互锁；现已定口径**回收只许发生在 GUI 线程**。
+   等人的还是人工那两条：计划 Task 9 Step 2（真界面 6 项）与 Step 3（真界面 + 真主站）。
 3. **M3 CSV 导入导出 + 报文监视窗 + 多通道独立启停**。
 4. **M4 波形引擎**（const/ramp/sine/random/step）+ 点位属性面板 —— 纯逻辑、可全自动测，
    不依赖硬件，所以排在串口之前。
@@ -379,6 +399,36 @@ M1 内必须确认（**已全部清零，下列结论都有对应用例钉住，
   `tests/test_integration_tcp.py::test_unknown_unit_id_answers_exception_4_and_server_survives`、
   `::test_bus_scan_does_not_flood_the_log`、`tests/test_simdev.py::test_no_id_zero_device`。
 
+M2 内确认（**已全部清零**，探针 `m2-probe/qt_spike.py`，结论都有用例钉住）：
+
+- **已实测：PySide6 6.9.2 在 venv 里可用，`QT_QPA_PLATFORM=offscreen` 下 `show()` +
+  `processEvents()` 之后控件几何是真的**（900 宽、工具栏 27 高）。→ "状态变化不许挪布局"
+  能写成断言，不需要真显示器，也不需要 pytest-qt。证据：
+  `tests/test_gui_layout_invariant.py`、`tests/test_gui_packet_view.py::test_geometry_is_stable_across_filter_and_pause`。
+- **已实测：跨线程 Qt signal 直接可用，不需要 qasync**——工作线程 `emit` 200 次，主线程收到
+  200 次、顺序严格单调、`received on wrong thread: 0`。→ 引擎线程只往 `gui/bridge.py` 这一个
+  "住在主线程的 QObject" 上 emit，投递交给 Qt 的 queued connection。
+- **已实测：10Hz 全表刷新的成本不是瓶颈**——200/1000/5000 行模型上每次覆盖 200 行发
+  `dataChanged`，最坏 **0.34ms**。→ 刻意不做虚拟滚动与增量 diff（YAGNI），刷新走**拉模型**
+  （GUI 每秒问 10 次），不给 backend 加"主站写入"回调。
+- **已实测：自动垃圾回收能把整个软件锁死**（本机 `py-spy --native` 抓到的栈，非推断）——
+  引擎线程在分配时触发一次回收，回收链里有一个 GUI 线程刚丢弃的 `QWidget` 包装器，shiboken
+  于是在**非 GUI 线程**上走 `~QWidget → QWindow::close() → flushWindowSystemEvents() →
+  QWaitCondition::wait` 等主线程来收窗口事件；而主线程此刻正卡在 `runner.call(...)` 的
+  `future.result(10)` 里等引擎回话。两边互等成环，症状不是"一条用例挂了"，而是整条 loop
+  不再回 `_run_once`：心跳停、后面每条起停连片 10s 超时、`runner.stop()` 也失败
+  （`loop.stop` 自己就是排进回调的）。
+  → **口径：回收只许发生在 GUI 线程。** `gui/app.py` 起来就 `gc.collect(); gc.freeze();
+  gc.disable()`，破引用环交给 `MainWindow._maybe_collect()`（心跳 10Hz，每 5s 至多一次）；
+  测试侧同一口径（`tests/conftest.py` 关自动回收 + 每条用例结束在主线程 `gc.collect()`）。
+  无头 CLI 不碰 Qt，不受影响。证据：`packet_view + integration_tcp` 这一对在回收开着时
+  3/3 挂死，关掉后 3/3 跑完；`tests/test_gui_main_window.py::test_the_tick_is_the_only_reclaim_point_and_runs_on_the_gui_thread`
+  钉"唯一回收口在 GUI 线程、且不是每跳一收"。
+- **已实测：同进程攒多个 asyncio loop 会互相饿死**（每用例各建一对线程时攒到 24 个，表现为偶发
+  `.result(10)` 与 `join(5)` 超时）。→ 测试会话共用一条 `EngineRunner`，全量从 45s 降到 21s；
+  代价是"上一个用例的后端没关干净"会串到下一个，所以 `tests/conftest.py` 里那条
+  监听泄漏检查器是必需的，不是可选的清洁工。
+
 M5 内确认：
 
 - `ModbusSerialServer` 的 `trace_packet` 是否同样生效（源码看是继承自 base，但需实测）；
@@ -392,5 +442,13 @@ M5 内确认：
 - **模拟器自身 bug 会被当成平台 bug 调试**。缓解：M1 的第三方主站互测是硬门禁，
   不通过不进 M2。
 - Windows 防火墙会拦截首次监听 502 端口（需放行或改用高位端口）。
+- **（已修）GUI 用例之后起从站会整轮冻死**：根因与修法见 §12 那条"已实测：自动垃圾回收能把
+  整个软件锁死"。留这一条是为了记住**排查过程中错在哪**，别再照着旧结论改代码：
+  ① 栈尾两次落在 `loop.create_server` / `asyncio.to_thread(check_port_is_free)`，看着像探针
+  或监听建立慢，实际那只是"回收触发时它正在写哪行"；② `faulthandler` 给主线程标的
+  `Garbage-collecting` 是它自己 dump 时触发的一次回收，不是证据；③ 我一度用"整会话 0 次回收"
+  排除了 GC——那是**仪表坏了**：这台机器的 `gc.callbacks` 是 `cb(phase, info)` 两参数签名，
+  按上游的单参数写，回调每次抛 `TypeError` 被解释器 "Exception ignored" 静默吃掉。
+  教训：仪表先拿一次已知事件验准（`gc.collect()` 一次看回调进不进），再谈排除。
 - 打包（PyInstaller onefile + pyserial/pymodbus hidden imports）推迟到 v1 功能稳定后，
   但 v1 不验证打包会留一个尾巴，届时单列里程碑。
