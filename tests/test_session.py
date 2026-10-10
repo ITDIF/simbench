@@ -187,6 +187,74 @@ def test_restart_the_same_channel_immediately_reclaims_the_port(session):
         client.close()
 
 
+def test_a_failed_stop_keeps_the_handle_so_the_next_stop_can_close_it(
+        session, monkeypatch):
+    """引擎不回话时"停止"不许假装成功：句柄留住、状态是 error、再点一次真关掉。
+
+    旧写法把异常吞掉照样 `backend = None`，于是监听还占着端口而 Session 里再没有句柄——
+    界面上写着 ○ 停止、外面真主站照样读到值，操作员只剩重启进程一条路。留住句柄才有
+    第二次尝试，而第二次是真能成功的（卡住的只是那一次 `call`）。
+    """
+    port = free_port()
+    states: list[ChannelState] = []
+    session.subscribe(lambda e: isinstance(e, ChannelState) and states.append(e))
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    monkeypatch.setattr(session._runner, "call",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            TimeoutError("engine wedged")))
+    with pytest.raises(RuntimeError) as exc:
+        session.stop_channel("tcp-5020")
+    monkeypatch.undo()
+    assert "engine wedged" in str(exc.value)
+    runtime = session.channel("tcp-5020")
+    assert runtime.backend is not None, "关不掉就该留住句柄，否则第二次停止没东西可关"
+    assert runtime.running and "engine wedged" in runtime.last_error
+    assert states[-1].state == "error", "端口还在应答，界面不许发 stopped"
+    with pytest.raises(PortInUseError):
+        check_port_is_free("127.0.0.1", port)     # 端口确实还被它占着，与界面一致
+
+    session.stop_channel("tcp-5020")              # 第二下真的关掉
+    assert not runtime.running and runtime.backend is None
+    check_port_is_free("127.0.0.1", port)
+
+
+def test_stop_all_names_the_channel_it_could_not_close_and_still_stops_the_rest(
+        session, monkeypatch):
+    """"全部停止"关不掉一个通道：不连累别的通道，也不许给它跟着发 stopped。
+
+    与 `start_all` 同一条姿态——一次报全、逐个交代。只发一句"停止了"而端口还在应答，
+    操作员会照着"已停"去接下一路 485。
+    """
+    port_a, port_b = free_port(), free_port()
+    project = loaded(port_a)
+    project.channels.append(another_channel(port_b))
+    session.load(project)
+    assert session.start_all() == []
+    states: list[ChannelState] = []
+    session.subscribe(lambda e: isinstance(e, ChannelState) and states.append(e))
+    real_call = session._runner.call
+
+    def wedged(factory, seconds, what):
+        if "tcp-5020" in what:
+            raise TimeoutError("engine wedged")
+        return real_call(factory, seconds, what)
+
+    monkeypatch.setattr(session._runner, "call", wedged)
+    failures = session.stop_all()
+    monkeypatch.undo()
+    assert len(failures) == 1 and "tcp-5020" in failures[0], failures
+    assert "engine wedged" in failures[0]
+    assert {s.channel: s.state for s in states} == {"tcp-5020": "error",
+                                                    "tcp-alt": "stopped"}
+    assert session.channel("tcp-alt").running is False
+    assert session.channel("tcp-5020").running
+
+    assert session.stop_all() == []               # 再点一次，剩下的那个也关掉
+    assert not session.channel("tcp-5020").running
+    check_port_is_free("127.0.0.1", port_a)
+
+
 def test_start_is_idempotent_and_stop_all_covers_every_channel(session):
     session.load(loaded(free_port()))
     session.start_channel("tcp-5020")

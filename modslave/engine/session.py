@@ -123,7 +123,7 @@ class Session:
     def load(self, project: Project) -> list[Issue]:
         """换一份工程。有 error 也照样装（让人能改完再启动），但把清单原样返回。"""
         with self._lock:
-            self._stop_all_locked()
+            stuck = self._stop_all_locked()
             self._project = project
             self._channels = {ch.name: ChannelRuntime(ch.name) for ch in project.channels}
             # 索引一次建好：渲染路径（10Hz）只查表，不遍历工程对象树。
@@ -136,6 +136,14 @@ class Session:
                         bucket[(p.area, p.address)] = p
                         self._rows_meta[ch.name].append((dev.unit_id, dev.name, p))
             self._dirty = False
+            # 旧通道没关掉就得在这里留一句话：它的句柄随 `_channels` 一起换掉了，再没有
+            # 第二次"停止"能摸到它，端口会一直占到进程结束。只发日志不发 ChannelState——
+            # 通道对象马上是新的了，给一个还没起的通道标红是本末倒置。
+            for runtime in stuck:
+                self.publish_log("error",
+                                 f"channel {runtime.name} did not close "
+                                 f"while loading the point table; its port is still held: "
+                                 f"{runtime.last_error}")
         return validate_project(project)
 
     @property
@@ -216,8 +224,13 @@ class Session:
 
     def stop_channel(self, name: str) -> None:
         runtime, _ = self._require(name)
-        self._stop_one(runtime)
-        self._publish(ChannelState(name, "stopped", ""))
+        if self._stop_one(runtime):
+            self._publish(ChannelState(name, "stopped", ""))
+            return
+        # 没关掉就不许发 stopped：界面说停了、端口还在应答，下一路 485 会撞上"端口被占"
+        # 而没人知道是谁占的。状态给 error 并把异常抛给调用方，与 `start_channel` 同姿态。
+        self._publish(ChannelState(name, "error", runtime.last_error))
+        raise RuntimeError(f"stop channel {name} failed: {runtime.last_error}")
 
     def start_all(self) -> list[str]:
         """工具栏"全部启动"：把每个通道的拒绝原因收集起来，不是撞上第一个就抛。
@@ -239,19 +252,25 @@ class Session:
                 failures.append(str(exc) or f"{type(exc).__name__} (no message)")
         return failures
 
-    def stop_all(self) -> None:
-        """停掉所有通道，并**逐个**发 stopped 状态。
+    def stop_all(self) -> list[str]:
+        """工具栏"全部停止"：逐个关后端并**逐个**发状态，关不掉的把原因收集起来返回。
 
         和 `stop_channel` 同一份形状：内部 `_stop_all_locked` 只收后端不发事件（`load()`
         换工程时要用它，给旧通道发"停了"界面上根本没人听）。少了这几个事件，工具栏
         "全部停止"之后的设备树就还挂着 `●`——通道已经停了而界面说它还在跑，正是本项目
-        最防的那类演出。
+        最防的那类演出；反过来"还在跑而界面说停了"同样要防，所以没关掉的通道发 `error`
+        而不是跟着发 `stopped`。和 `start_all` 一样一个失败不连累后面的。
         """
         with self._lock:
-            self._stop_all_locked()
-            names = list(self._channels)
-        for name in names:
-            self._publish(ChannelState(name, "stopped", ""))
+            runtimes = list(self._channels.values())
+            stuck = {id(runtime) for runtime in self._stop_all_locked()}
+        for runtime in runtimes:
+            failed = id(runtime) in stuck
+            self._publish(ChannelState(runtime.name,
+                                       "error" if failed else "stopped",
+                                       runtime.last_error if failed else ""))
+        return [f"stop channel {runtime.name}: {runtime.last_error}"
+                for runtime in runtimes if id(runtime) in stuck]
 
     def shutdown(self) -> None:
         """收尾：停所有通道 → 把自己从 runner 上摘掉 → 断开界面订阅。
@@ -398,22 +417,33 @@ class Session:
             channel = next(c for c in self._project.channels if c.name == name)
             return runtime, channel
 
-    def _stop_one(self, runtime: ChannelRuntime) -> None:
-        if runtime.backend is not None:
-            try:
-                self._runner.call(lambda: runtime.backend.stop(), _STOP_TIMEOUT,
-                                  f"stop channel {runtime.name}")
-            except Exception as exc:                # noqa: BLE001
-                runtime.last_error = str(exc)
-            # 无论 stop 有没有报错，引用都要放开：留着半个 server 让下一发读/写
-            # 打到一个已经不在监听的后端上，症状是"值读不到"而不是"通道已停"。
-            runtime.backend = None
+    def _stop_one(self, runtime: ChannelRuntime) -> bool:
+        """关掉一个通道的后端，返回"端口真的释放了没有"。
+
+        关不掉时**引用留住、running 不动**：`call` 超时说明引擎线程没回话，监听大概率还
+        在应答。放开引用就再没人能关它——界面上写着 ○ 停止、外面主站照样读到值，操作员
+        只剩重启进程一条路；留着句柄，他再点一次"停止"还能真的关掉。
+        """
+        if runtime.backend is None:
+            runtime.running = False
+            runtime.detail = ""
+            return True
+        try:
+            self._runner.call(lambda: runtime.backend.stop(), _STOP_TIMEOUT,
+                              f"stop channel {runtime.name}")
+        except Exception as exc:                # noqa: BLE001
+            runtime.last_error = str(exc)
+            return False
+        runtime.backend = None
         runtime.running = False
         runtime.detail = ""
+        runtime.last_error = ""
+        return True
 
-    def _stop_all_locked(self) -> None:
-        for runtime in self._channels.values():
-            self._stop_one(runtime)
+    def _stop_all_locked(self) -> list[ChannelRuntime]:
+        """逐个关，返回**没关掉**的那些（调用方决定怎么报，这里不碰状态机）。"""
+        return [runtime for runtime in self._channels.values()
+                if not self._stop_one(runtime)]
 
     def _read_back(self, runtime: ChannelRuntime | None, pt: Point,
                    unit_id: int) -> tuple[list[int] | None, bool]:

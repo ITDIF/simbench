@@ -91,7 +91,12 @@ class ChannelPanel(QtWidgets.QWidget):
         palette = row.status.palette()
         palette.setColor(QtGui.QPalette.WindowText, STATUS_COLORS[state])
         row.status.setPalette(palette)
-        self._set_enabled(channel, running=state == "running")
+        # `error` 有两种，端口占没占是唯一分界：起不来（没占，只能再点启动）和关不掉
+        # （还占着，必须让他再点一次停止，否则那一格成了"停不掉的运行中"）。
+        runtime = self._session.channel(channel)
+        holding = state == "running" or (state == "error" and runtime is not None
+                                        and runtime.running)
+        self._set_enabled(channel, running=holding)
 
     def on_event(self, event) -> None:
         """主窗/桥把 Session 的 `ChannelState` 送进来（面板自己不订阅，避免跨线程摸 widget）。"""
