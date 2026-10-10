@@ -141,3 +141,55 @@ def test_drain_only_reports_true_when_the_queue_is_really_empty():
         assert runner.drain(2.0) is True, "队列明明空了却报没排空"
     finally:
         runner.stop()
+
+
+def test_stop_raises_when_a_thread_refuses_to_die(monkeypatch):
+    """join 超时后静默返回会留下看不见的僵尸线程：端口与 loop 都还在它手里。
+
+    现场形状是"下一次启动报端口被占用，而占用者查不到"。这里把两条线程的 join 都改成
+    空转，`stop()` 必须抛出线程名而不是悄悄成功；两条都要试完再抛，只抛第一条会把另一条
+    永久留在原地。收尾把它们真收掉——留着会污染同一会话里后面用例的线程断言。
+    """
+    runner = EngineRunner()
+    runner.start()
+    loop_thread, pump_thread = runner._thread, runner._pump
+    monkeypatch.setattr(loop_thread, "join", lambda *_a, **_k: None)
+    monkeypatch.setattr(pump_thread, "join", lambda *_a, **_k: None)
+    try:
+        with pytest.raises(RuntimeError, match="did not stop") as caught:
+            runner.stop()
+        assert "modslave-engine" in str(caught.value)
+        assert "modslave-engine-events" in str(caught.value)
+    finally:
+        monkeypatch.undo()
+        pump_thread.join(5)
+        loop_thread.join(5)
+        assert not pump_thread.is_alive(), "pump 没收干净"
+        assert not loop_thread.is_alive(), "loop 没收干净"
+
+
+def test_call_reports_where_the_engine_thread_is_stuck():
+    """超时消息必须带引擎线程当时的栈。
+
+    裸 `TimeoutError` 在现场等于"引擎没响应但不知道卡在哪"，只能靠复现碰运气。
+    """
+    runner = EngineRunner()
+    gate = threading.Event()
+
+    async def stuck():
+        gate.wait(5)
+        return "never"
+
+    runner.start()
+    try:
+        with pytest.raises(TimeoutError) as caught:
+            runner.call(lambda: stuck(), 0.3, "start channel tcp-1")
+        message = str(caught.value)
+        assert "start channel tcp-1" in message
+        assert "did not finish within 0.3s" in message
+        assert "alive=True" in message
+        assert "test_call_reports_where_the_engine_thread_is_stuck" in message or \
+            "stuck" in message, message
+    finally:
+        gate.set()
+        runner.stop()

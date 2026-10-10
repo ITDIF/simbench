@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import queue
+import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from typing import Any
@@ -58,14 +60,26 @@ class EngineRunner:
 
     def stop(self) -> None:
         loop, thread = self._loop, self._thread
+        stuck: list[threading.Thread] = []
         if loop is not None and thread is not None and thread.is_alive():
             asyncio.run_coroutine_threadsafe(_noop(), loop)  # 唤醒一次，确保 stop 排队有序
             loop.call_soon_threadsafe(loop.stop)
             thread.join(_MAX_JOIN_SECONDS)
+            if thread.is_alive():
+                stuck.append(thread)
         if self._pump is not None:
             self._pump_stop.set()
             self._pump.join(_MAX_JOIN_SECONDS)
+            if self._pump.is_alive():
+                stuck.append(self._pump)
         self._loop, self._thread, self._pump = None, None, None
+        if stuck:
+            # 两条都试完才抛：第一条就抛会把 pump 留在原地，那个没人收的僵尸线程
+            # 会让后面每条用例的线程断言都错。
+            names = ", ".join(repr(t.name) for t in stuck)
+            raise RuntimeError(f"engine thread(s) {names} did not stop within "
+                               f"{_MAX_JOIN_SECONDS}s; they still hold the loop "
+                               f"and any bound port")
 
     @property
     def alive(self) -> bool:
@@ -87,6 +101,31 @@ class EngineRunner:
         if loop is None or not self.alive:
             raise RuntimeError("engine runner is not running")
         return asyncio.run_coroutine_threadsafe(coro_factory(), loop)
+
+    def call(self, coro_factory, seconds: float, what: str):
+        """`submit(...).result(seconds)`，但超时把引擎线程当时卡在哪一起报出来。
+
+        裸 `TimeoutError` 在现场等于"引擎没响应，但不知道卡在哪一步"，只能靠复现碰运气；
+        带上前 3 帧之后，一张截图就能定位。
+        """
+        future = self.submit(coro_factory)
+        try:
+            return future.result(seconds)
+        except TimeoutError as exc:
+            raise TimeoutError(f"{what}: engine thread did not finish within "
+                               f"{seconds}s (alive={self.alive})"
+                               f"{self._frames_hint()}") from exc
+
+    def _frames_hint(self) -> str:
+        thread = self._thread
+        if thread is None:
+            return ""
+        frame = sys._current_frames().get(thread.ident)
+        if frame is None:
+            return "; engine frame not available"
+        tail = "".join(f"  | {line.rstrip()}\n"
+                       for line in traceback.format_stack(frame)[-3:])
+        return f"; engine stack tail:\n{tail}"
 
     # ---------- 事件外发 ----------
 

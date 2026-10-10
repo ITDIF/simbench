@@ -176,7 +176,8 @@ class Session:
                              + " | ".join(errors[:3]))
         backend = ModbusTcpBackend(channel, packet_sink=self._packet_sink(name))
         try:
-            self._runner.submit(lambda: backend.start()).result(10)
+            self._runner.call(lambda: backend.start(), 10.0,
+                             f"start channel {name}")
         except Exception as exc:                    # noqa: BLE001
             # 运行期失败（真端口被占 10048、保留端口 10013、监听起不来）由 backend 抛出，
             # 原样再抛给调用方，同时落 last_error + 发 error 状态：界面上那一格变红，
