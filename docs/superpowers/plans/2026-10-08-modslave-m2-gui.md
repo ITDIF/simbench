@@ -2866,7 +2866,7 @@ def _open_with_path(parent):
     return open_project(parent)          # dialogs.open_project 返回 (project, path)
 ```
 
-上面两处必须按下列口径落地，**不许自选**：
+上面三处必须按下列口径落地，**不许自选**：
 
 - `Session` 需要 `clear_dirty()`（保存成功后清 `*`）：在 `session.py` 加
   `def clear_dirty(self) -> None:\n        with self._lock:\n            self._dirty = False`，
