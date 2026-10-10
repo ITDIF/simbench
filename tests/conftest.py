@@ -38,16 +38,25 @@ def qapp():
     # 不 quit：QApplication 退出后无法再建，同一次会话里还要给后面的用例用
 
 
-def free_port() -> int:
-    """挑一个当前空闲的端口。`port=0` 不支持（Task 5 的 validate 已拦），测试自己占位。
+_handed_out: set[int] = set()
 
-    bind(0) 拿到号就立刻 close，所以理论上存在"被别人抢先占用"的窗口；真撞上了表现为
-    `start()` 抛 `RuntimeError: Could not start listen`（见 modbus_tcp 的 start），
-    是一条能读懂的失败，不是"端口没起来但测试继续跑"。
+
+def free_port() -> int:
+    """挑一个本会话内**没发过**的空闲端口。
+
+    只 bind(0) 再 close 是不够的：Windows 会把刚释放的临时端口立刻再发一次，于是
+    A 用例的从站还在监听 P，B 用例又拿到 P —— 第二个 backend 的 connect 探针如实报
+    "有人在服务"，测试随机红（本机实测三条不同用例轮着失败过）。生产上端口是写死的
+    5020 之类，不会撞上这个形状，所以修在测试侧，不动产品判定。
     """
-    with contextlib.closing(socket.socket()) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    for _ in range(500):
+        with contextlib.closing(socket.socket()) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        if port not in _handed_out:
+            _handed_out.add(port)
+            return port
+    raise RuntimeError("could not find a fresh free port for this session")
 
 
 @pytest.fixture(scope="session")
