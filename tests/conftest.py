@@ -50,36 +50,43 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+@pytest.fixture(scope="session")
+def engine_runner():
+    """整个测试会话共用一个引擎线程（loop + pump）。
+
+    每用例各起一个 asyncio loop 时，同进程能攒到 24 个：它们互相饿死，表现为偶发的
+    `.result(10)` 超时与 `stop()` join 超时（不是 backend 坏了）。共用之后全量从 45s
+    降到 21s 且连跑不红。被停掉的 backend 会把它的 listener 协程留在共享 loop 上，
+    这正是我们要测的东西留在内存里，不影响端口。
+    """
+    runner = EngineRunner(name="modslave-engine")
+    runner.start()
+    try:
+        yield runner
+    finally:
+        runner.stop()
+
+
 @pytest.fixture
-def open_backend():
+def open_backend(engine_runner):
     """`with open_backend(channel, packet_sink=..., on_connection=...) as backend:`。
 
     loop 由 `EngineRunner` 持有（生产同一个类），协程一律经 `submit(工厂)` 投回引擎线程。
     `packet_sink`/`on_connection` 仍然直接交给 backend：它们在 **loop 线程**被调用，与 M1
     完全一致——不绕 `runner.publish()` 的 pump 线程，否则用例里"发完报文立刻断言"的时序
-    会多一次跨线程交接，M1 那 27 条真主站用例钉的就是 backend 直调的形状。
+    会多一次跨线程交接，M1 那批真主站用例钉的就是 backend 直调的形状。
 
-    `finally` 里先停 backend 再停 runner：顺序反了的话 `shutdown()` 协程没机会跑完，
-    监听套接字还挂在 loop 上，下一个用例的 `free_port()` 就会撞车。backend 还没建出来
-    （start 自己就炸）时也必须把线程收掉，所以 `runner.stop()` 单独占一层 `finally`。
-    runner 起两个线程（`modslave-engine` loop + `-events` pump），`stop()` 两个都 join，
-    所以退出 with 之后端口能重新 bind、`threading.enumerate()` 不残留。
+    `finally` 里只停 backend，不停 runner（runner 是会话级的）；backend 没建出来也要把
+    已经起到的 listener 收干净，所以 `backend.stop()` 单独包一层。
     """
     @contextlib.contextmanager
     def _open(channel, packet_sink=None, on_connection=None):
-        runner = EngineRunner()
-        runner.start()
-        backend = None
+        backend = ModbusTcpBackend(channel, packet_sink=packet_sink,
+                                   on_connection=on_connection)
         try:
-            backend = ModbusTcpBackend(channel, packet_sink=packet_sink,
-                                       on_connection=on_connection)
-            runner.submit(lambda: backend.start()).result(_CALL_TIMEOUT)
+            engine_runner.submit(lambda: backend.start()).result(_CALL_TIMEOUT)
             yield backend
         finally:
-            try:
-                if backend is not None:
-                    runner.submit(lambda: backend.stop()).result(_CALL_TIMEOUT)
-            finally:
-                runner.stop()
+            engine_runner.submit(lambda: backend.stop()).result(_CALL_TIMEOUT)
 
     yield _open

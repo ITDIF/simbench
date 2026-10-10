@@ -461,22 +461,22 @@ def test_engine_calls_after_stop_are_a_domain_error(open_backend):
             call()
 
 
-def test_open_backend_fixture_leaves_no_thread_and_frees_the_port(open_backend):
-    """夹具的关停路径必须干净：runner 的两个线程收掉、端口能重新 bind。
+def test_open_backend_fixture_adds_no_threads_and_frees_the_port(open_backend,
+                                                                engine_runner):
+    """起停一个 backend 不留线程、端口能重新 bind。
 
-    夹具现在跑生产件 `EngineRunner`：一个 loop 线程 `modslave-engine` + 一个事件 pump 线程
-    `modslave-engine-events`。`stop()` 少 join 掉一个，另一个就以 daemon 身份活到进程结束；
-    而后面的用例靠 `free_port()` 挑端口，这里留一个活监听就会让后面的测试偶发红。
+    `EngineRunner` 是会话级共享的（loop + pump 两条线程横跨整个会话），所以这里断言的不是
+    "线程消失"，而是"这条用例没让线程数长"。按 ident 比不按名字比：名字集合差会被别的模块
+    留下的同名线程撑住，共享 runner 下必然假失败。
     """
-    before = {t.name for t in threading.enumerate()}
+    before = {t.ident for t in threading.enumerate()}
     port = free_port()
     with open_backend(tunnel_project(port).channels[0]):
+        assert {t.ident for t in threading.enumerate()} == before
         client = connect(port)
         client.read_holding_registers(4, count=1, device_id=11)
         client.close()
-        assert {t.name for t in threading.enumerate()} - before == {
-            "modslave-engine", "modslave-engine-events"}          # 两个引擎线程都在跑
-    assert {t.name for t in threading.enumerate()} == before
+    assert {t.ident for t in threading.enumerate()} == before
     check_port_is_free("127.0.0.1", port)                           # 端口已释放
 
 
