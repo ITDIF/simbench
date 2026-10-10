@@ -19,7 +19,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..backend.events import ChannelState, PacketEvent
+from ..backend.events import ChannelState, LogLine, PacketEvent
 from ..backend.modbus_tcp import ModbusTcpBackend
 from ..codec.point_codec import decode, encode
 from ..project.model import Point, Project, area_is_bit
@@ -135,6 +135,23 @@ class Session:
 
     def mark_dirty(self) -> None:
         self._dirty = True
+
+    def issues(self) -> list[Issue]:
+        """按**当前**工程现算一次校验，返回完整清单（不只拦住启动的那几条）。
+
+        存在的理由只有一个：GUI 改完 host/port 要立刻问同一份判定，而不是在界面层
+        再抄一套端口范围/主机名规则。两份判定迟早漂移，漂了的表现是"面板放行的配置
+        启动时被拦下"或反之，现场只会当成模拟器 bug。
+        """
+        return validate_project(self._project)
+
+    def publish_log(self, level: str, text: str) -> None:
+        """往事件流发一条 `LogLine`：界面上的拒绝理由要让状态栏/日志窗也听见。
+
+        只发一句话、不改任何状态，所以给 widget 用是安全的；`_publish` 会吞掉订阅者
+        自己的异常，不会把通道带停。
+        """
+        self._publish(LogLine(level, text))
 
     # ---------- 启停 ----------
 

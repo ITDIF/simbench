@@ -601,6 +601,20 @@ def test_write_is_the_pair_the_point_table_model_calls(session):
     assert ok is False and "not in the point table" in error
 
 
+def test_issues_re_reads_the_live_project(session):
+    """`issues()` 现算，不是 `load()` 那份清单的缓存。
+
+    通道面板改完 host/port 要立刻问"这一改动让工程变坏了没有"，缓存的那一份回答的是
+    装载时的老问题——两个答案不一样时，界面会放行一个启动时被拦下的配置。
+    """
+    session.load(loaded(free_port()))
+    assert session.issues() == []
+    session.project.tick_ms = 5                       # 界面能改到的工程字段
+    codes = [i.code for i in session.issues()]
+    assert codes == ["tick_ms"]
+    assert [i.level for i in session.issues()] == ["error"]
+
+
 # ---------- 事件 ----------
 
 def test_packet_events_carry_the_channel_name(session):

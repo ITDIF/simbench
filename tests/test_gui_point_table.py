@@ -54,11 +54,15 @@ def model(qapp, engine):
 
 @pytest.fixture
 def live_session():
-    """真 Session + 真起通道：给"替身与真相一致"那两条用例用。"""
+    """真 Session + 真起通道：给"替身与真相一致"那两条用例用。
+
+    runner 是这里自己建的，所以 `shutdown()` 之后还要 `runner.stop()`：换成外部传进来
+    的 runner 就只能停通道——替别人收线程会把同一条 runner 上别的用例直接打断。
+    """
     runner = EngineRunner()
     s = Session(runner=runner)
     yield s
-    s.shutdown()
+    s.shutdown()                       # 只停自己的通道：runner 不归它
     runner.stop()
 
 
