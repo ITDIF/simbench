@@ -1257,6 +1257,15 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "test: 真主�
 | 曲线图（点位历史画成折线） | v2 | 明确不做，接口留在 `PacketStore` 之外另建再说 |
 | 坏 CRC / 延迟 / 异常码注入 | v2 的缝 | spec §9 已留（`SimDevice.action` / `custom_pdu`），混进 M4 会让"全绿"无从判定 |
 
+**final review 那一轮捞出来、判给"人定"而没有顺手改掉的三条**（都在 2026-10-11 的复审里被标为
+out-of-scope：不是本轮引入，也不属于 A1/A2/A3 那条修复线，动它们各需一次独立决策）：
+
+| 内容 | 现状 | 要定的是什么 |
+|---|---|---|
+| `SourceStore.cleared()`（按**地址**数接管）没有任何生产调用方 | 状态栏用的是 `Session.manual_count`（按点、只问基础格），`cleared()` 只有测试在用；D17 已把三处冒充它的措辞改真 | 删掉，还是留着当"按地址"那一维的诊断口（位区一个位一个 key，两个口径本来就不同数） |
+| string 点**改短**时旧尾字节留着（`铭牌` 从 `PUMP07` 改成 `AB` 读回 `ABMP07`） | `_awrite` 只写 `len(registers)` 格；A2 的闸门只管"变长"，不管"变短"，所以这不是本轮的回归 | 要不要在写之前把这一整段 `pt.span` 补零（那会改变"缩短"的语义，也要补用例） |
+| spec §4 的线程模型几句（"命令队列"、`packet_event / point_changed / …` 这几个 signal 名）仍是设计意图 | 落地形状是 `EngineRunner.call` + `Session.subscribe(sink)` + 界面侧的 Qt bridge，名字与机制都不完全一样；§4 的关键接口已在 D17 那轮换成真实形状，这几句没动 | 是把 §4 补成落地形状，还是显式标成"目标形状，M5 前不动" |
+
 ---
 
 ## 自审（写完这份计划后按 spec 逐条对过）
