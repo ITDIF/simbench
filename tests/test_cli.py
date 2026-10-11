@@ -41,10 +41,10 @@ def run_cli(*args, timeout: int = 60) -> subprocess.CompletedProcess:
                           errors="replace", cwd=str(ROOT), timeout=timeout)
 
 
-def start_server(port: int):
+def start_server(port: int, table: str = CSV):
     """真起一个 CLI 子进程（`--quiet`）；起来没有只靠"主站读得通"判，不猜延迟。"""
     return subprocess.Popen(
-        [sys.executable, "-m", "modslave", CSV, "--host", "127.0.0.1",
+        [sys.executable, "-m", "modslave", table, "--host", "127.0.0.1",
          "--port", str(port), "--quiet"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace", cwd=str(ROOT))
@@ -71,6 +71,95 @@ def terminate(proc) -> tuple[str, str]:
         with contextlib.suppress(Exception):
             proc.wait(timeout=10)
     return drain(proc)
+
+
+def wave_project(tmp_path, value: str = "424242", lamp_value: str = "") -> str:
+    """一份带真波形的工程文件（CSV 没有 `tick_ms` 列，工程 json 才有）。
+
+    `水位` 是 uint32 两格，正让 `wait_until_answering` 那句 `count=2` 读得通；初值 7 与
+    曲线的值刻意不同，"tick 真写了"第一次读到就能判。`灯` 填 `lamp_value` 时是一个越界的
+    `const`（uint16 收不下 70000，每拍都要钳位并报告一句），不填时是空 `const`（W4：
+    压根不参与写入），留作"曲线没把不该动的点也刷一遍"的对照。
+    """
+    path = tmp_path / "wave.json"
+    path.write_text(json.dumps({
+        "version": 1, "tick_ms": 20,
+        "channels": [{"name": "tcp-1", "type": "tcp", "host": "0.0.0.0", "port": 5020,
+                      "devices": [{"name": "D", "unit_id": 11, "points": [
+                          {"name": "水位", "area": "hr", "address": 0,
+                           "datatype": "uint32", "word_order": "ABCD", "initial": "7",
+                           "waveform": "const", "wave_param": {"value": value},
+                           "readonly": False},
+                          {"name": "灯", "area": "hr", "address": 2,
+                           "datatype": "uint16", "word_order": "ABCD", "initial": "5",
+                           "waveform": "const",
+                           "wave_param": {} if not lamp_value else {"value": lamp_value},
+                           "readonly": False}]}]}]}), encoding="utf-8")
+    return str(path)
+
+
+def test_the_headless_path_drives_the_waveforms(tmp_path):
+    """M4 的曲线在命令行这一路也要动：`python -m modslave x.csv` 与 `--gui` 起的是同一个
+    工程，读到的是同一批点位，不该一个有波形一个没有。
+
+    tick 之所以住在 `backend/` 而不是 `Session` 里，就是为了这一刻（无头路径不建 Session）。
+    没接上 `tick_ms` 时这里永远回初值 `[0, 7]`，而界面上曲线在跑——两条路只有端口与点表
+    一样，行为不一样。等值只等**有限**几轮：`const` 落一次就再也不变，所以这不是靠睡赢。
+    """
+    port = free_port()
+    proc = start_server(port, wave_project(tmp_path))
+    expected = encode(424242, "uint32", "ABCD")
+    try:
+        client = wait_until_answering(proc, port)
+        try:
+            seen = None
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                seen = client.read_holding_registers(0, count=2,
+                                                     device_id=11).registers
+                if seen == expected:
+                    break
+                time.sleep(0.05)
+            assert seen == expected, f"tick 没写曲线，读回的一直是初值 {seen}"
+            # 对照：空 const 的点（W4）一个字节都不该被 tick 动过
+            assert client.read_holding_registers(2, count=1,
+                                                 device_id=11).registers == [5]
+        finally:
+            client.close()
+    finally:
+        out, err = terminate(proc)
+    assert "Traceback" not in err, (out, err)
+
+
+def test_the_headless_path_reports_a_runtime_waveform_fault_on_stderr(tmp_path):
+    """命令行没有日志窗，运行期那一句 `[warning]`/`[error]` 是操作员唯一的线索。
+
+    它**不**受 `--quiet` 管：那是报文开关，报错不是报文。越界的 `const` 每拍都会钳位，
+    `LogDedupe` 只留一句，所以这里断言"出现了"而不是"只有一条"。
+    """
+    port = free_port()
+    proc = start_server(port, wave_project(tmp_path, value="1", lamp_value="70000"))
+    try:
+        client = wait_until_answering(proc, port)
+        try:
+            # 等到那句真的打印出去：`_report_clamp` 在写寄存器**之前**调 sink，所以读到
+            # 钳位后的 65535 就说明那一行已经进 stderr 了，不用靠睡赢这一步。
+            clamped = None
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                clamped = client.read_holding_registers(2, count=1,
+                                                        device_id=11).registers
+                if clamped == [65535]:
+                    break
+                time.sleep(0.05)
+            assert clamped == [65535], f"曲线没被钳位，读到 {clamped}"
+        finally:
+            client.close()
+    finally:
+        out, err = terminate(proc)
+    assert "[warning]" in err, (out, err)
+    assert "灯" in err and "clamped" in err, err
+    assert "Traceback" not in err, err
 
 
 def master_still_answering(port: int) -> bool:

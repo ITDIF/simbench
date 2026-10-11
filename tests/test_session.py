@@ -740,11 +740,100 @@ def test_set_point_after_stop_says_not_running_instead_of_none_attribute(session
     assert value_of(session, "风机状态") == "11"
 
 
+def oversized_string_project(port: int) -> Project:
+    """把 `铭牌` 排在两个邻居**前面**，初值 "AB" 只撑出 1 格跨度——A2 的形状。
+
+    `Point.span` 是初值算出来的（`model.register_span`：string 取 ceil(len/2)），所以把它
+    改成更长的文本会编出 4 格，多出的 3 格正踩在 `状态字`(hr 1) 与 `累计电量`(hr 2..5) 上：
+    照写就是"一次编辑接管三个点"，而 `restore_waveform` 只还得回 `pt.span` 的那 1 格。
+    """
+    dev = Device(name="风机-1", unit_id=11, points=[
+        Point("铭牌", "hr", 0, "string", initial="AB"),
+        Point("状态字", "hr", 1, "uint16", initial="11"),
+        Point("累计电量", "hr", 2, "uint64", initial="72623859790382856"),
+        Point("启动", "co", 0, "bool", initial="false")])
+    return Project(channels=[TcpChannel(name="tcp", host="127.0.0.1", port=port,
+                                        devices=[dev])])
+
+
+def test_a_longer_string_edit_is_refused_before_it_reaches_the_engine(session):
+    """超跨度编辑在 `encode` 之后、引擎之前就拒掉：不写寄存器、不标接管、不动 Row。
+
+    消息得带上点位名和**那两个数**（这个点几格、这个值要几格），并且把该改的地方指到点表
+    的初值上——操作员在编辑框里删短文本是治不了的，跨度不在这一格里。
+    """
+    port = free_port()
+    session.load(oversized_string_project(port))
+    session.start_channel("tcp")
+    res = session.set_point("tcp", 11, "hr", 0, "ABCDEFGH")    # 4 格 > span 1
+    assert not res.ok, res
+    assert "铭牌" in res.error, res.error
+    assert "1 register(s)" in res.error and "needs 4" in res.error, res.error
+    assert "初值" in res.error, res.error
+    assert res.value_text == "" and res.registers == (), res
+
+
+def test_a_refused_oversized_edit_leaves_the_neighbours_and_the_count_alone(session):
+    """被拒的那一次编辑**一个字节都没写**、也一个点都没接管：邻居的寄存器还是初值，
+    接管计数还是 0。少了这一半断言，"先写后判"的写法照样能让上一条绿。"""
+    port = free_port()
+    session.load(oversized_string_project(port))
+    session.start_channel("tcp")
+    backend = session.channel("tcp").backend
+    assert not session.set_point("tcp", 11, "hr", 0, "ABCDEFGH").ok
+    expected = (encode("AB", "string", "ABCD") + encode(11, "uint16", "ABCD")
+                + encode(72623859790382856, "uint64", "ABCD"))
+    client = connect(port)
+    try:
+        assert client.read_holding_registers(0, count=6, device_id=11).registers == expected
+    finally:
+        client.close()
+    assert session.manual_count("tcp") == 0, "被拒的编辑还是把点接管了"
+    assert backend._sources.cleared() == 0
+    assert [r.source for r in session.rows("tcp")] == ["waveform"] * 4
+
+
+def test_a_same_or_shorter_string_edit_still_lands(session):
+    """闸门是 `>` 不是 `!=`：示例点表的 `铭牌` 初值 "FAN-01" 撑出 3 格跨度，等长（6 字符）
+    与更短的文本都还在这个点自己那三格里，照旧要写得成——判成 `!=` 会把缩短一起拒掉。"""
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    assert len(encode("PUMP07", "string", "ABCD")) == 3      # 前提：真的与 span 等长
+    same = session.set_point("tcp-5020", 11, "hr", 9, "PUMP07")
+    assert same.ok, same.error
+    assert same.value_text == "PUMP07"
+    assert session.restore_waveform("tcp-5020", 11, "hr", 9) is True
+    shorter = session.set_point("tcp-5020", 11, "hr", 9, "AB")
+    assert shorter.ok, shorter.error
+    assert session.manual_count("tcp-5020") == 1
+
+
+def test_a_bit_point_still_takes_exactly_one_address(session):
+    """新闸门比的是 `len(registers)` 与 `pt.span`，位区两者恒为 1：开关量编辑照旧只占一格
+    （把它写成 `>=` 就是把所有开关量的界面编辑一起拒了，同时上面那条等长用例也红）。"""
+    port = free_port()
+    session.load(oversized_string_project(port))
+    session.start_channel("tcp")
+    backend = session.channel("tcp").backend
+    res = session.set_point("tcp", 11, "co", 0, "true")
+    assert res.ok, res.error
+    assert res.registers == (1,)
+    assert backend._sources.cleared() == 1
+    assert session.manual_count("tcp") == 1
+    client = connect(port)
+    try:
+        assert client.read_coils(0, count=1, device_id=11).bits[0] is True
+    finally:
+        client.close()
+
+
 # ---------- 值归属：接管与恢复（M4 spec §7） ----------
 
-def test_only_the_session_turns_the_tick_on(session):
-    """`tick_ms` 只从 `Session.start_channel` 交下去（决策 8）：backend 自己默认 0，
-    无头 CLI 那条路不建 Session，形状一个字都没变。界面起的通道才该自己动。
+def test_the_session_hands_the_project_tick_ms_to_the_backend(session):
+    """界面这一路把工程的 `tick_ms` 交给 backend（决策 8）：backend 自己默认 0，所以
+    "起了通道"和"起了通道并且要它自己动"是两件事，起任务的一方必须是被交代了节拍的那一方
+    （另一条是无头 CLI 的 `__main__._serve`，它把同一个工程值交下去）。
 
     停通道时任务要一起收掉，而且顺序在 `server.shutdown()` 之前——`stop()` 后面会把
     `_writer` 置 None，晚一步取消就是"停通道时崩一次"。
@@ -835,10 +924,10 @@ def test_a_write_the_backend_refused_does_not_take_the_point_over(session, monke
 
 def test_restore_waveform_hands_the_whole_point_back(session):
     """`Session.restore_waveform` 的签名只有基础地址，跨度得自己算（决策 6）：
-    uint64 占 4 格，少传跨度就留 3 格在 manual 上，接管计数永远回不了零。
+    uint64 占 4 格，少传跨度就留 3 格在 manual 上，那三格地址此后再没有任何东西去动它们。
 
-    这里先用界面写一个 4 格的点（`mark_manual` 的 count 也必须跟着寄存器数走，否则
-    `cleared()` 那一句"有 N 处被接管"当场说谎），再整点交还波形，并要求日志点名恢复的是
+    这里先用界面写一个 4 格的点（`mark_manual` 的 count 也必须跟着寄存器数走，否则按地址数
+    的 `cleared()` 当场少报几格），再整点交还波形，并要求日志点名恢复的是
     哪个点——静默把值交还波形等于操作员看不见发生了什么。
     """
     port = free_port()

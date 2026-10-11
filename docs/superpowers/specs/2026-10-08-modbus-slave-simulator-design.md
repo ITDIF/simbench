@@ -121,15 +121,20 @@ project/    数据模型（Project/Channel/Device/Point）+ project.json + CSV �
 - `SlaveEngine.start(project) / stop() / set_point(ch, unit, area, addr, value) / snapshot()`
 - `Backend.build(devices: list[SimDevice]) -> context` / `serve()` / `stop()`
 - `PointCodec.encode(value) -> list[int]` / `decode(registers: list[int]) -> value`
-- `Waveform.next(t: float) -> value`（纯函数式，可注入时间戳做确定性测试），注册表按名字装配
+- 波形（`codec/waveform.py`）：`waveform_value(name, params, t) -> value` 纯函数（可注入时间戳
+  做确定性测试），注册表 `WAVE_BUILDERS` 按名字装配；`clamp_to_datatype(value, datatype) ->
+  (value, clamped)` 负责把值钳进类型区间
 
 数据流：
 
 - 录入：CSV/GUI → `project` 模型 → `validate()` → 生成 `SimDevice` 列表 → `Backend`
-- 运行：引擎 tick（默认 100ms）→ `Waveform` 算值 → `PointCodec.encode` →
+- 运行：backend 的 tick（默认 100ms，`backend/modbus_tcp.py` 的 `_tick_loop`/`_tick_once`；
+  不在 `engine/`，为的是无头 CLI 也驱动曲线）→ `waveform_value` 算值 → `clamp_to_datatype`
+  钳位 → `PointCodec.encode` →
   **直接改 `SimRuntime.block[..][2]` 的寄存器列表**（`backend/raw_writer.py`；已实测不能用
   `SimCore.async_setValues`，它把 `readonly` 点上的引擎自写一起拒，见 §8/§12）→
-  主站读时 pymodbus 直接出寄存器，不等 GUI
+  归 `manual` 的点整轮跳过（值归属表在 `backend/ownership.py`：`SourceStore`/`write_targets`/
+  `LogDedupe`，见 §7）→ 主站读时 pymodbus 直接出寄存器，不等 GUI
 - 监视：`trace_packet(is_outgoing, bytes)` → `PacketEvent` → 环形缓冲（5000 条）→ 报文窗
 
 ## 5. 数据模型与 CSV
@@ -275,7 +280,7 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
   列宽列序不动）。两条实测边界：**主站写只读点被协议拒绝（异常码 2）时不切 manual**——
   一次没成功的写不该把曲线停了，而引擎自己的 `raw_writer` 写得进只读点，混起来更难查；
   **右键"恢复波形"按点位跨度整段放行**——占 4 格的 uint64 只恢复基础格时那 3 格会永远标着
-  manual，状态栏那句"有 N 处被接管"也就只增不减。
+  manual，状态栏那句"有 N 处被接管"（按**点位**计，`Session.manual_count`）也就永远回不了零。
   这样测平台下发命令时不会出现"值被波形顶掉、误判下发没生效"。证据：
   `tests/test_integration_tcp.py::test_a_master_write_survives_the_waveform_tick`、
   `::test_a_master_write_of_a_coil_survives_the_waveform_tick`（FC05 那条走 `write_bits`，

@@ -822,9 +822,10 @@ def test_the_tick_cancel_runs_before_the_shutdown_not_after(engine_runner,
 
 
 def test_a_backend_that_was_not_handed_a_tick_ms_has_no_tick_task(open_backend):
-    """`tick_ms=0` 是默认，也就是**不起任务**：无头 CLI（M1 那条验收入口）不建 `Session`，
-    它起的从站形状因此一个字都没变。只有 `Session.start_channel` 会把工程里的 `tick_ms`
-    交下来（决策 8）——这里钉住"没交就没有"，否则默认起任务会把现有全部用例的形状换掉。
+    """`tick_ms=0` 是默认，也就是**不起任务**：自己把 backend 建起来的一方（用例、以及没被
+    交代工程的调用方）形状因此一个字都没变。把工程的 `tick_ms` 交下来的有两条路——
+    `Session.start_channel` 与无头 CLI 的 `__main__._serve`（决策 8）——这里钉住"没交就没有"，
+    否则默认起任务会把现有全部用例的形状换掉。
     """
     port = free_port()
     with open_backend(tunnel_project(port).channels[0]) as backend:
@@ -872,8 +873,9 @@ def test_one_bad_point_does_not_stop_the_rest_of_the_tick(open_backend):
     其余点位一起冻住（决策 2）。
 
     `铭牌`（string）那一行钉的是 `encode` 那条：波形只产数值，字符串点位编不出寄存器，
-    这种点每轮都该被跳过而不是把整轮带走。`启动`（co）那条钉住位区走 `write_bits`：
-    误用 `write_registers` 会回 True 而点亮的是**线圈 1**（引擎想关风机、写成开）。
+    这种点每轮都该被跳过而不是把整轮带走。`启动`（co）那条钉住位区走 `write_bits`：寄存器
+    入口对位区现在直接抛 `ValueError`（`co is a bit area; use write_bits`），两边的"地址 0"
+    含义不同，混用的实测后果是把 0x0002 点成**线圈 1**。
     """
     port = free_port()
     project = tunnel_project(port)
@@ -1482,6 +1484,38 @@ def test_a_chunk_whose_length_field_lies_does_not_take_over_anything(open_backen
         finally:
             client.close()
         assert not backend.source_is_waveform(11, "hr", 4), "上一台的垃圾把这一台带瞎了"
+
+
+def test_a_chunk_whose_quantity_field_lies_does_not_take_over_anything(open_backend):
+    """上一条的兄弟：MBAP 的 length 规规矩矩、**数量字段**写 65535 的那条 FC16。
+
+    253 字节的 PDU 装不下 65535 个寄存器（上限 123），协议这一步就把帧拒了，一个寄存器都没
+    落到寄存器上；照数量去摊点表等于"一帧坏报文把整条通道的曲线静默停掉、日志一个字没有"
+    （实测：unit 11 的 hr 区 10 个地址一次全成 manual）。
+    后半段钉"上限内的写照旧要认"——只删不判的话这一条也绿。
+    """
+    port = free_port()
+    seen: list[bytes] = []
+    lying = (b"\x00\xfe\x00\x00\x00\x0b" + bytes([11])          # length=11 = unit + 10B PDU
+             + b"\x10" + (0).to_bytes(2, "big")
+             + (65535).to_bytes(2, "big") + b"\x04" + b"\x00\x01\x00\x02")
+    with open_backend(tunnel_project(port).channels[0],
+                      packet_sink=rx_chunks(seen)) as backend:
+        sock = raw_master(port)
+        try:
+            sock.sendall(lying)
+            wait_for(lambda: len(seen) == 1, timeout=5.0,
+                     what="the lying-quantity frame reaches the sink")
+            assert backend._sources.cleared() == 0, "撒谎的数量把整表标了接管"
+            assert backend.source_is_waveform(11, "hr", 4), "曲线被一帧坏报文停了"
+        finally:
+            sock.close()
+        client = connect(port)
+        try:
+            assert client.write_register(4, 0x0058, device_id=11).registers == [88]
+        finally:
+            client.close()
+        assert not backend.source_is_waveform(11, "hr", 4), "合法数量的写也不认了"
 
 
 # ---- M4 的三条真主站验收：曲线要主站看得见，下发要活过 tick ----

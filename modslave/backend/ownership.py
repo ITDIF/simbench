@@ -49,8 +49,8 @@ class SourceStore:
         `count` 要与当初 `own` 给的那一段一致（默认 1，单寄存器点照旧一个参数就够）。
         跨度必须由调用方传：spec §7 的归属单位是**点位**，而本模块只认地址（点表在调用方
         手里），所以"整点放行"只能靠它把 `pt.span` 递进来。少了这一层就会留尾巴——占 4 个
-        寄存器的 uint64 只恢复基础地址时，6/7/8 永远标着 manual：`cleared()`（状态栏那句
-        "有 N 处被接管"）只增不减，`is_waveform(6)` 也会对着波形正在刷的地址说"仍被接管"。
+        寄存器的 uint64 只恢复基础地址时，6/7/8 永远标着 manual，`is_waveform(6)` 也会对着
+        波形正在刷的地址说"仍被接管"。
         一段里一个都没接管过时返回 False，调用方才好在日志里说"没恢复过什么"。
         `count <= 0` 与 `own` 同样钳到 1。
         """
@@ -61,10 +61,11 @@ class SourceStore:
         return bool(handed_back)
 
     def cleared(self) -> int:
-        """当前被接管的**地址**数（给状态栏/日志一句人话用）。
+        """当前被接管的**地址**数（不是点数）。
 
-        按地址计数而不是按点位：一个 uint64 点被接管会算 4。这里不折算成点数，是因为
-        折算需要点表跨度，而本模块不持有点位对象（见 `write_targets` 只给裸协议地址）。
+        一个 uint64 点被接管在这里算 4；折成点数需要点表跨度，而本模块不持有点位对象
+        （见 `write_targets` 只给裸协议地址）。状态栏那句"有 N 处被接管"用的是按点的
+        `Session.manual_count`，本函数没有生产调用方，只有测试。
         """
         return len(self._manual)
 
@@ -109,6 +110,9 @@ class LogDedupe:
 
 
 _WRITE_FC_AREA = {5: "co", 15: "co", 6: "hr", 16: "hr"}
+# Modbus 给 15/16 的数量字段划了上限（253 字节的 PDU 装不下更多）：FC16 一帧最多 123 个
+# 寄存器、FC15 最多 1968 位。超出只能是撒谎的数量。
+_WRITE_MAX_COUNT = {15: 1968, 16: 123}
 
 
 def write_targets(packet: PacketEvent) -> list[tuple[int, str, int, int]] | None:
@@ -128,13 +132,13 @@ def write_targets(packet: PacketEvent) -> list[tuple[int, str, int, int]] | None
     fc+地址+数量，按内容分辨不出来；而异常响应被 `parse_packet` 脱掉了 `0x80`（M1 钉的
     契约），单看 `function_code` 会把"从站回了异常码 2"当成一次写。
 
-    count 直接采信报文，不核对"数量是否真有那么些数据字节"：sink 收到的是**到达的字节块**
-    而不是组好的帧（实测半个 FC16 帧也会进 sink），够长就按数量标。宁可早标一次也不要漏标——
-    重复标在 set 里是同一个 key，无害；漏标才是 spec §7 那条"值被波形顶回去"的事故。
-    所以这里只有**一处**长度判定 `len(body) < 5`：5 正好是这几个功能码的固定 PDU
-    （05/06 = fc+地址+值，15/16 = fc+地址+数量），够长才认为字段读得出来。它**不是**在验帧
-    完整——MBAP 的 length、byte count、数量 × 2 都不参与判定，本函数也不管一个字节块里挤了
-    几条报文（切帧是调用方的事）。
+    15/16 的 count 采信报文，但**超过协议上限（FC16 123 寄存器、FC15 1968 位）就当不是写**：
+    装不下的数量来自撒谎的字段，那次写一个寄存器都没落下去，照数量标等于让一帧坏报文静默
+    停掉整条通道的曲线（与 `_own_write_frame` 拒撒谎 `length` 同一个理由）。
+    **不**核对"数量是否真有那么些数据字节"：sink 收到的是**到达的字节块**而不是组好的帧
+    （实测半个 FC16 帧也会进 sink），够长就按数量标；重复标在 set 里是同一个 key，无害，
+    漏标才是 spec §7 那条"值被波形顶回去"的事故。长度判定仍只有 `len(body) < 5` 一处（固定
+    PDU 的字节数）：MBAP 的 length、byte count 都不参与，一块里挤几条报文也不管（切帧是调用方的事）。
     """
     if packet.direction != "rx":
         return None
@@ -148,6 +152,8 @@ def write_targets(packet: PacketEvent) -> list[tuple[int, str, int, int]] | None
     count = 1
     if packet.function_code in (15, 16):
         count = int.from_bytes(body[3:5], "big")
+        if count > _WRITE_MAX_COUNT[packet.function_code]:
+            return None                 # 撒谎的数量：这一帧压根没写成，不替它标接管
     if count <= 0:
         return None
     return [(packet.unit_id, area, address, count)]

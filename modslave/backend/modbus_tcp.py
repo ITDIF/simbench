@@ -254,8 +254,8 @@ class ModbusTcpBackend:
         # 这里不去摸 transport 里的实际端口（pymodbus 版本一变就碎）
         self.port = channel.port
         self.started_at = 0.0
-        # 默认 0 = **不起 tick 任务**：无头 CLI 与 M1/M2 的既有全部用例形状因此一个字没变，
-        # 只有 `Session.start_channel` 会把工程里的 `tick_ms` 交下来。
+        # 默认 0 = **不起 tick 任务**：M1/M2 的既有全部用例形状因此一个字没变，只有
+        # `Session.start_channel` 与无头 CLI（`__main__._serve`）会把工程的 `tick_ms` 交下来。
         self.tick_ms = tick_ms
         self._packet_sink = packet_sink
         self._on_connection = on_connection
@@ -500,8 +500,8 @@ class ModbusTcpBackend:
                 stage = "encode"
                 registers = encode(value, pt.datatype, pt.word_order)
                 if area_is_bit(pt.area):
-                    # 两个写入口不许混用：`write_registers` 写 co 会回 True 而点亮的是
-                    # **线圈 1**（寄存器 0 的第 0 位）——"引擎想关风机、写成开"就来自这里。
+                    # 两边的"地址 0"含义不同（位区误用 `write_registers` 现在直接抛
+                    # ValueError；实测它曾把 0x0002 点成**线圈 1**），所以两个入口不许混用。
                     wrote = writer.write_bits(unit_id, pt.area, pt.address,
                                               bool(registers[0]))
                 else:
@@ -524,9 +524,9 @@ class ModbusTcpBackend:
               now: float) -> None:
         """运行期报错的唯一出口：没接 sink 就一个字都不发，接了也同点同类 60s 一条。
 
-        没接 sink 是**常态**而不是错误：无头 CLI（`python -m modslave`，M1 的验收入口）与
-        M1/M2 的绝大多数用例都不看运行期日志，这里既不查去重表也不发回调，它们的形状因此
-        一个字没变（`test_a_backend_nobody_listens_to_keeps_no_dedupe_book` 钉这一支）。
+        没接 sink 是**常态**而不是错误：M1/M2 的绝大多数用例只起 backend、不看运行期日志，
+        这里既不查去重表也不发回调，它们的形状因此一个字没变
+        （`test_a_backend_nobody_listens_to_keeps_no_dedupe_book` 钉这一支）。
 
         `key` 是这次故障的身份：一个点给 `(unit_id, area, address)`，整轮的失败没有点可指
         就给 `()`（本 backend 一份表，通道已经隐含在里面了）。

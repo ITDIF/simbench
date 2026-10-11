@@ -93,7 +93,8 @@ def test_takeover_of_a_bit_area_marks_one_key_per_coil():
 
 
 def test_cleared_counts_the_addresses_under_takeover():
-    """状态栏那句"有 N 处被接管"要数得动，也要恢复得回去。"""
+    """按**地址**的接管计数要数得动，也要恢复得回去（状态栏那句"有 N 处被接管"按点计数，
+    用的是 `Session.manual_count`，不是这里）。"""
     store = SourceStore()
     assert store.cleared() == 0
     store.own("tcp-5020", 11, "hr", 4, count=1, who="gui")
@@ -125,8 +126,8 @@ def test_restoring_a_multi_register_point_clears_the_whole_span():
     """spec §7 的归属单位是**点位**：4 个寄存器的 uint64 按基础地址 + `count=4` 恢复，
     整段都得回到波形手上，`cleared()` 也要回得去 0。
 
-    留尾巴的代价是看得见的两处：状态栏那句"有 N 处被接管"只增不减（`cleared()` 数的是
-    地址），`is_waveform(6)` 还会对着波形正在刷的地址说"仍被接管"。本模块没有点表，
+    留尾巴的代价是看得见的两处：`cleared()` 永远回不了 0（它数的是地址），`is_waveform(6)`
+    还会对着波形正在刷的地址说"仍被接管"。本模块没有点表，
     所以跨度由调用方传（`own`/`restore` 同一条要求）。
     """
     store = SourceStore()
@@ -293,6 +294,27 @@ def test_a_quantity_of_zero_is_not_a_write():
         bytes.fromhex("000300000006" "0B060004" "0000"))) == [(11, "hr", 4, 1)]
 
 
+def test_a_quantity_beyond_the_protocol_maximum_is_not_a_write():
+    """MBAP 长度合规、数量字段撒谎（FC16 `qty=65535`）：这一帧协议压根收不下，一个寄存器
+    都没落下去，照数量标就等于让一帧坏报文静默停掉整条通道的曲线——实测点表 10 个地址一次
+    全成 manual、日志一个字没有。上限因此必须在这里判死：FC16 123 寄存器、FC15 1968 位。
+
+    两头都钉，因为差一个在这里看不见：上限本身照收，+1 才拒。不给数据字节是故意的——
+    本函数**不**核对数量与数据字节数（理由见 docstring 与
+    `test_a_split_rx_chunk_is_read_never_later_than_the_full_frame`）。
+    """
+    assert write_targets(through_the_sink(
+        bytes.fromhex("000100000006" "0B" "10" "0005" "007C"))) is None      # qty=124
+    assert write_targets(through_the_sink(
+        bytes.fromhex("000100000006" "0B" "10" "0005" "FFFF"))) is None      # qty=65535
+    assert write_targets(through_the_sink(
+        bytes.fromhex("000100000006" "0B" "0F" "0003" "07B1"))) is None      # qty=1969
+    assert write_targets(through_the_sink(
+        bytes.fromhex("000100000006" "0B" "10" "0005" "007B"))) == [(11, "hr", 5, 123)]
+    assert write_targets(through_the_sink(
+        bytes.fromhex("000100000006" "0B" "0F" "0003" "07B0"))) == [(11, "co", 3, 1968)]
+
+
 def test_a_split_rx_chunk_is_read_never_later_than_the_full_frame():
     """sink 收到的是**到达的字节块**而不是组好的帧：TCP 分片时这里会先进来半个帧。
 
@@ -357,8 +379,8 @@ def test_different_kinds_on_the_same_point_do_not_share_a_window():
 
 
 def test_the_window_is_a_knob_and_not_a_hardcoded_sixty_seconds():
-    """`window` 必须真参与判定：把 60 写死在比较里时，上面那两条照样全绿（`now` 本来就是
-    按 60 的量级给的），而集成用例与 Task 7 全靠这个旋钮——写死就等于逼测试 sleep 一分钟。
+    """`window` 必须真参与判定：把 60 写死在比较里时，上面那两条照样全绿。传非默认值的只有
+    本用例——backend 恒用默认 60s，集成用例靠 `_tick_once(now=...)` 灌固定时间戳来验。
 
     两头都钉：`0` 一条都不压（窗口内没有"上一条"），`3600` 把 61s 那条也按住。只钉一头时
     把常数换成另一头的值还能过。

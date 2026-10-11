@@ -245,13 +245,12 @@ class Session:
         # 与 `packet_sink` 同一个口径（见 `_packet_sink`），这里不投递也不排队——
         # `publish_log` 只做"往事件流发一条 LogLine"，而 `_publish` 已经吞掉订阅者的异常，
         # 所以界面那一侧坏了也不会把曲线带停（backend 的 `_emit` 还有同一道兜底）。
-        # 这条线一断，spec §8 的"运行期拒绝带点位名"就只活在测试里，操作员仍然什么都看不见。
+        # 这条线一断，§8 要的"运行期故障留一条日志"就只剩测试看得见（带点位名是 M4 计划的口径）。
         backend = ModbusTcpBackend(channel, packet_sink=self._packet_sink(name),
                                    tick_ms=self._project.tick_ms,
                                    log_sink=self.publish_log)
-        # 只有这一条路把 `tick_ms` 交给 backend：无头 CLI（`python -m modslave`，M1 的
-        # 验收入口）不建 Session，它默认的 `tick_ms=0` 就是不起 tick 任务，M1/M2 的
-        # 既有用例形状一个字都没变。
+        # `tick_ms` 只有两个来源：这里的界面路径，和无头 CLI（`__main__._serve` 把同一个
+        # 工程值交下去）；backend 自己默认 0，M1/M2 的既有用例形状一个字都没变。
         try:
             self._runner.call(lambda: backend.start(), _START_TIMEOUT,
                               f"start channel {name}")
@@ -440,7 +439,7 @@ class Session:
 
     def set_point(self, channel: str, unit_id: int, area: str, address: int,
                   text: str) -> WriteResult:
-        """改一个点的值。类型不符/越界一律拒绝且不落寄存器。
+        """改一个点的值。类型不符/越界/超出点位跨度一律拒绝且不落寄存器。
 
         引擎写只读点是允许的（M1 定的口径：readonly 是"挡主站"的墙），
         所以从界面改只读量不会被拒——界面上要另外标注它是只读量。
@@ -461,6 +460,16 @@ class Session:
             registers = encode(text, pt.datatype, pt.word_order)
         except ValueError as exc:
             return WriteResult(False, str(exc))
+        if len(registers) > pt.span:
+            # `Point.span` 是**初值**撑出来的跨度（`model.register_span`：string 按
+            # ceil(len/2)），所以把 string 点改成更长的文本时，编出来的寄存器比这个点占的
+            # 格子多——照写就踩到邻居的格子上，而 `_awrite` 按 `len(registers)` 标接管，
+            # `restore_waveform` 只还得回 `pt.span` 那一段：邻居从此永久 manual。
+            # 跨度真正的入口是点表的初值，所以那句得指到那里去，不是指这个编辑框。
+            return WriteResult(
+                False, f"point {pt.name} at {area} {address} is {pt.span} register(s), "
+                       f"this value needs {len(registers)}; widen it via the point's "
+                       f"初值 and restart the channel")
         try:
             # 走 `call` 而不是裸 `submit(...).result()`：超时时 `call` 会把引擎线程当时的
             # 栈帧带进消息。界面上"点了没反应"和"引擎卡在写 4x5 这一帧"是两种完全不同的
@@ -652,9 +661,8 @@ def _render(pt: Point, regs: list[int] | None) -> tuple[str, tuple[int, ...]]:
 async def _awrite(backend, unit_id, area, address, registers):
     """寄存器写 + 人工接管，一次投递做完（两步都只在 loop 线程发生）。
 
-    `count=len(registers)`：接管按这次真写下去的跨度记，和 `restore_waveform` 那边的
-    `pt.span` 是同一段（span ≥ 这次写的格数，所以恢复一定清得干净）。只标基础格的话
-    `SourceStore.cleared()`（状态栏按地址数的那一句）就会少报几格。
+    接管按这次真写下去的跨度记：`set_point` 已经挡掉 `len(registers) > pt.span` 的编辑，
+    所以 `restore_waveform` 交还的 `pt.span` 恒是它的超集，恢复不会留尾巴。
     """
     ok = backend.write_registers(unit_id, area, address, registers)
     if ok:

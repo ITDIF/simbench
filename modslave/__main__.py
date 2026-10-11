@@ -64,6 +64,16 @@ def _report(notes, issues) -> list[str]:
     return error_lines(issues)
 
 
+def _runtime_log(level: str, text: str) -> None:
+    """运行期报错（波形算不出/钳位）一帧一行进 stderr，与 `_report` 同句式。
+
+    命令行没有日志窗，这里不发出去操作员就只剩"曲线不动"一个现象可看；而 `LogDedupe`
+    已经保证同点同类 60s 一条，刷屏的问题不归这一层。不受 `--quiet` 管：那是报文开关，
+    报错不是报文。
+    """
+    print(f"[{level}] {text}", file=sys.stderr, flush=True)
+
+
 def _apply_overrides(project, host: str | None, port: int | None) -> bool:
     """`--host`/`--port` 覆盖所有通道；给了参数就返回 True，调用方据此重跑校验。
 
@@ -80,8 +90,11 @@ def _apply_overrides(project, host: str | None, port: int | None) -> bool:
     return True
 
 
-async def _serve(channel, quiet: bool) -> None:
-    backend = ModbusTcpBackend(channel, packet_sink=None if quiet else _line)
+async def _serve(channel, quiet: bool, tick_ms: int = 0) -> None:
+    """起一路无头从站。`tick_ms > 0` 时波形按节拍自己动（M4）——命令行与 GUI 起的是同一个
+    工程，读到同一批点表，就不该一个有曲线一个没有。"""
+    backend = ModbusTcpBackend(channel, packet_sink=None if quiet else _line,
+                               tick_ms=tick_ms, log_sink=_runtime_log)
     await backend.start()
     print(f"[modslave] listening on {channel.host}:{backend.port} "
           f"unit ids {_units(channel)}", flush=True)
@@ -164,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{project.channels[0].name}", file=sys.stderr)
 
     try:
-        asyncio.run(_serve(project.channels[0], args.quiet))
+        asyncio.run(_serve(project.channels[0], args.quiet, project.tick_ms))
     except KeyboardInterrupt:
         print("\n[modslave] stopped", flush=True)
     except PortInUseError as exc:
