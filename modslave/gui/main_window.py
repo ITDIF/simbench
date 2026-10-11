@@ -105,12 +105,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- 组装 ----------
 
-    @property
-    def table(self) -> PointTableView:
-        """`table` 与 `point_table` 是同一块视图的两个门牌：布局探针
-        （`test_gui_layout_invariant.py`）按旧名量几何，本轮改动不动那个文件。"""
-        return self.point_table
-
     def _build_table(self) -> PointTableView:
         table = PointTableView()
         table.setModel(self.point_model)

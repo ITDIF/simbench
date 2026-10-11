@@ -74,7 +74,7 @@ def snapshot(window) -> dict:
     刻意不含**内容**（行数、帧数、状态文字）：那些本来就该随状态变，混进来等于往恒等
     断言里塞一个注定不等的量，下一次改布局就没人看得懂这条失败。
     """
-    table, tree = window.table, window.tree
+    table, tree = window.point_table, window.tree
     return {
         "window": (window.width(), window.height()),
         "splitter": window.splitter.sizes(),
@@ -201,7 +201,7 @@ def test_the_packet_panel_does_not_get_a_written_height(window, qapp):
     window._tick()
     assert window.packet_panel.row_count() == store.capacity
     assert snapshot(window) == before, _diff(before, snapshot(window), "报文满了布局挪了")
-    assert window.tree.isVisible() and window.table.isVisible()
+    assert window.tree.isVisible() and window.point_table.isVisible()
 
 
 def _flood(store, count: int) -> None:

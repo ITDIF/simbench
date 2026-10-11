@@ -238,7 +238,7 @@ class PointTableView(QtWidgets.QTableView):
         # 没起的通道给不出 manual 行（`_source_of`），真点了而通道恰好停了，
         # 拒绝由 `Session.restore_waveform` 点名，界面不重复造第二套判定。
         action.setEnabled(found.source == "manual")
-        key = self.row_key(row)
+        key = found.key
         action.triggered.connect(lambda _checked=False: self.restore_requested.emit(key))
         return menu
 
