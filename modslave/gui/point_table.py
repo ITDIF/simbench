@@ -7,6 +7,8 @@
 条目数没变绝不 `beginResetModel()`——reset 会把选中行、滚动位置和展开状态一起丢掉，
 那属于"状态变化动了既有可见状态"。灰显（`stale`）走自定义角色，不改显示文字：
 把"没读到"改成显示 0 或空串，界面就等于演了一出"设备报了这个值"。
+接管（`source == "manual"`）反过来走文字：`已停` 就占在"波形"那一列原来的位置，
+不加宽、不截断、不挪列（spec §7 的界面口径）。
 """
 
 from __future__ import annotations
@@ -182,5 +184,9 @@ def _display(row: Row, header: str) -> str:
         "4x": conventional(row.area, row.address), "类型": row.datatype,
         "字序": row.word_order, VALUE_HEADER: row.value_text,
         "原始寄存器": " ".join(f"{r:04X}" for r in row.registers),
-        "波形": row.waveform, "只读": "是" if row.readonly else "",
+        # spec §7：被人工接管的点，波形列显示"已停"而不是波形名——"曲线还在跑"和
+        # "这格的值是人/主站写进去的"在排查下发问题时是两个完全不同的答案。
+        # 文案占原来那一列，列宽与列序一个都不动（界面口径：装不下改文案，不加宽不截断）。
+        "波形": "已停" if row.source == "manual" else row.waveform,
+        "只读": "是" if row.readonly else "",
     }[header]

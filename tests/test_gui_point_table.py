@@ -18,6 +18,8 @@
    演成"设备报了这个值"。
 """
 
+import dataclasses
+
 import pytest
 from PySide6 import QtCore
 
@@ -248,9 +250,54 @@ class TwoRowSource:
         return (False, "source refuses everything")
 
 
-def _row(name: str, text: str, stale: bool = False) -> Row:
+def _row(name: str, text: str, stale: bool = False, waveform: str = "const",
+         source: str = "waveform") -> Row:
     return Row("tcp-5020", "COVI-1", 11, name, "hr", 0, "uint16", "ABCD",
-               text, (int(text),), False, "const", stale)
+               text, (int(text),), False, waveform, stale, source)
+
+
+def test_the_takeover_shows_up_in_the_wave_column_without_moving_the_table(qapp):
+    """spec §7：被人工接管的点，"波形"那一列显示 `已停`；没人动过的显示波形名。
+
+    列序与列宽一起钉：界面口径是"槽位装不下就改文案，不加宽、不截成省略号"，
+    所以 `已停` 必须落在原来那一列里，`只读` 不能因为多了个状态就往后挪一位。
+    """
+    m = PointTableModel()
+    m.attach(TwoRowSource([_row("曲线在跑", "1", waveform="sine"),
+                           _row("人工改过", "2", source="manual")]))
+    wave = [c.header for c in COLUMNS].index("波形")
+    assert COLUMNS[wave].width == 96, "为两个字的文案加宽 = 动了既有布局"
+    assert m.index(0, wave).data() == "sine"
+    assert m.index(1, wave).data() == "已停"
+    assert m.index(1, wave + 1).data() == "", "波形列右边已经不是只读列了"
+
+
+def test_the_stale_and_wave_columns_do_not_share_a_value(model):
+    """`stale`（没读到）走角色、`已停`（被接管）走文字：两个状态挤在同一列就会互相顶掉。
+
+    现场这两种情形是叠加的（通道在跑、值被人工接管、某次回读还失败了），界面必须同时
+    说得出这两件事，所以这里拿真替身钉住"改文案不动角色"。
+    """
+    r = row_of(model, "CO浓度")
+    assert model.index(r, 8).data() == "const"
+    assert model.index(r, 6).data() == "12.5"
+    assert model.data(model.index(r, 6), model.stale_role()) is False
+
+
+def test_the_fake_keeps_every_field_it_does_not_edit(engine):
+    """替身换"当前值"时是**重建**一个 Row，所以 `Row` 每加一列都得跟着带过去。
+
+    `source` 是这次新加的、第一屏两边又都是 `waveform`——正是最容易在重建时悄悄丢掉的那
+    一列：丢了界面用例照样全绿，而现场（真 Session）改完值之后那一格会自己从"已停"跳回
+    波形名，等于界面在撤销一次没人点过的"恢复波形"。
+    """
+    engine._rows = [dataclasses.replace(row, source="manual") for row in engine._rows]
+    assert {r.source for r in engine.rows("tcp-5020")} == {"manual"}
+    engine.values[("tcp-5020", 11, "hr", 4)] = "12"        # 走 rows() 的重建路径
+    edited = next(r for r in engine.rows("tcp-5020") if r.address == 4)
+    assert (edited.value_text, edited.registers) == ("12", (12,))
+    assert edited.source == "manual", "重建 Row 时把归属丢了"
+    assert edited.readonly is False and edited.waveform == "const", "串列：位置参数顺序错了"
 
 
 def test_stale_rows_report_their_role(qapp):
@@ -334,3 +381,6 @@ def test_the_fake_engine_and_a_real_session_render_the_same_first_screen(qapp,
         [(r.name, r.value_text, r.registers) for r in fake_rows], \
         "value_text/registers 分叉：界面用例钉的是替身而不是现场"
     assert [r.stale for r in real_rows] == [r.stale for r in fake_rows]
+    # 归属也同一个口径：谁都没写过值时，整列都是波形在跑（`已停` 一个都不许有）
+    assert [r.source for r in real_rows] == [r.source for r in fake_rows] == \
+        ["waveform"] * len(real_rows)

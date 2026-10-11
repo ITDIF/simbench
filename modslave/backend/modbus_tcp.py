@@ -1,6 +1,11 @@
-"""pymodbus Modbus TCP 从站的封装：起停、报文钩子、日志降噪。
+"""pymodbus Modbus TCP 从站的封装：起停、报文钩子、日志降噪、波形 tick。
 
 pymodbus 的 import 只允许出现在 backend/（tests/test_architecture.py 守这条线）。
+
+波形住在这一层而不是 `engine/`：无头 CLI（`python -m modslave x.csv`，M1 的验收入口）
+直接建 `ModbusTcpBackend`、**不建 `Session`**，tick 放在 `Session` 里就等于"命令行起的
+从站没有波形"。算值本身是 `codec/waveform.py` 的纯函数，这里只负责"什么时候算、算出来
+写进哪一格、谁说了算（`ownership.SourceStore`）"。
 """
 
 from __future__ import annotations
@@ -15,7 +20,11 @@ import time
 from pymodbus import FramerType
 from pymodbus.server import ModbusTcpServer
 
-from ..project.model import Project
+from ..codec.point_codec import encode
+from ..codec.waveform import clamp_to_datatype, waveform_value
+from ..project.model import Point, Project, area_is_bit
+from .events import PacketEvent
+from .ownership import SourceStore, write_targets
 from .raw_writer import RawRegisterWriter
 from .simdev import build_sim_devices
 
@@ -34,6 +43,11 @@ _POLL = 0.005
 _CONNECT_TIMEOUT = 0.05
 _CONNECT_HOLD = 0.05
 _LOOPBACK = "127.0.0.1"
+# MBAP 的 length 字段说的是"unit id + PDU"的字节数，Modbus TCP 的 PDU 最长 253 字节，
+# 所以 length > 254（整帧 > 260 字节）**不可能**是真帧。切帧时见到这种字段就整块停手：
+# 猜"下一帧大概从这里开始"会把后面的真报文一条条切歪，宁可这一段一个都不认——真出这种
+# 字节块时 `pymodbus` 自己的组帧也一样卡住，那次写压根落不到寄存器上（`_note_master_writes`）。
+_MAX_MBAP_LENGTH = 254
 
 
 class _DropDatastoreNoise(logging.Filter):
@@ -232,21 +246,33 @@ def parse_packet(raw: bytes) -> tuple[int | None, int | None, str]:
 class ModbusTcpBackend:
     """一个 TCP 通道 = 一个 ModbusTcpServer = 一个 loop 线程里的监听。"""
 
-    def __init__(self, channel, packet_sink=None, on_connection=None) -> None:
+    def __init__(self, channel, packet_sink=None, on_connection=None,
+                 tick_ms: int = 0) -> None:
         self.channel = channel
         self.channel_name = channel.name
         # port=0（"随便给一个"）不支持：Task 5 的 validate 已把它判成 error，
         # 这里不去摸 transport 里的实际端口（pymodbus 版本一变就碎）
         self.port = channel.port
         self.started_at = 0.0
+        # 默认 0 = **不起 tick 任务**：无头 CLI 与 M1/M2 的既有全部用例形状因此一个字没变，
+        # 只有 `Session.start_channel` 会把工程里的 `tick_ms` 交下来。
+        self.tick_ms = tick_ms
         self._packet_sink = packet_sink
         self._on_connection = on_connection
         self._server: ModbusTcpServer | None = None
         self._writer: RawRegisterWriter | None = None
         self._task: asyncio.Task | None = None
+        self._tick_task: asyncio.Task | None = None
+        self._tick_started = 0.0
+        # 值归属只在 loop 线程写（`Session` 把 GUI 的命令用 runner.call 投回来）；
+        # 读（`source_is_waveform`）给主线程的 10Hz 刷新用，与 `_read_back` 同口径。
+        self._sources = SourceStore()
+        # 摊平的点位表（`[(unit_id, Point)]`）：每次 tick / 每条写报文都只遍历这一份，
+        # 不再爬 project 对象树——与 `Session.load()` 一次建索引同一个理由。
+        self._wave_points: list[tuple[int, Point]] = []
 
     async def start(self) -> None:
-        """建 SimDevice -> 起监听。重复调用是安全的（已经在跑就直接返回）。"""
+        """建 SimDevice -> 起监听 -> 起 tick。重复调用是安全的（已经在跑就直接返回）。"""
         if self._server is not None:
             return
         # 端口归属先自己确认：pymodbus 证明不了这件事（见 check_port_is_free 的实测说明），
@@ -257,6 +283,10 @@ class ModbusTcpBackend:
         await asyncio.to_thread(check_port_is_free, self.channel.host, self.port,
                                self.channel_name)
         configure_library_logging()
+        # 摊平要在监听起来**之前**：`_await_listener` 里有 await，其间到的第一条写报文
+        # 就会对着空表判"这一点不归我管"，接管漏判漏得没有声音。
+        self._wave_points = [(dev.unit_id, pt) for dev in self.channel.devices
+                             for pt in dev.points]
         devices = build_sim_devices(Project(channels=[self.channel]))
         server = ModbusTcpServer(
             devices,
@@ -281,6 +311,11 @@ class ModbusTcpBackend:
         self._writer = RawRegisterWriter(server.context)
         self._task = task
         self.started_at = time.monotonic()
+        # 曲线的 0 相位与监听同时起（spec §5：`t` 是引擎启动后的单调秒，不是系统时间）。
+        self._tick_started = self.started_at
+        if self.tick_ms > 0:
+            self._tick_task = asyncio.create_task(
+                self._tick_loop(self.tick_ms / 1000.0))
 
     async def _await_listener(self, server, task) -> None:
         """等端口真在听了再返回；起不来就把真实异常抛出去，不许"start 成功但连不上"。
@@ -316,6 +351,12 @@ class ModbusTcpBackend:
         task 最终仍是"正常结束"（`cancelled()` 为 False），状态反而更难读；所以这里只等它
         结束，等不到才算错（TimeoutError 会带着端口名抛出去，比留下一个活 task 好查）。
         """
+        # tick 任务排在**第一件事**：本方法后面会把 `_writer` 置 None，而 `_tick_once` 要
+        # 用它。顺序一反就变成"停通道时崩一次"（任务里未捕获的异常没人接），而且崩完
+        # 通道还在跑——主站读到的是已经不该再存在的模拟量，比报错更难查。
+        if self._tick_task is not None:
+            self._tick_task.cancel()
+            self._tick_task = None
         server, task = self._server, self._task
         self._server = None
         self._writer = None
@@ -333,18 +374,139 @@ class ModbusTcpBackend:
         `events.PacketEvent` 去掉 channel 后的字段顺序一致，Task 11 与 M3 的报文窗都按
         这个位置消费。sink 里抛的异常原样冒出去：静默丢一包会让报文窗"看起来没流量"，
         比炸出来更难查。
+
+        rx 那一路还要顺手认一次"主站在写哪个点"（`_note_master_writes`）：归属状态必须
+        和报文同线程、同一次到达落地，晚一步就是"平台下发了、波形又顶回去"。
         """
+        raw = bytes(payload)
+        if not is_outgoing:
+            self._note_master_writes(raw)
         if self._packet_sink is not None:
-            raw = bytes(payload)
             unit, function, summary = parse_packet(raw)
             self._packet_sink("tx" if is_outgoing else "rx", raw, unit, function,
                               summary, time.monotonic() - self.started_at)
         return payload
 
+    def _note_master_writes(self, raw: bytes) -> None:
+        """一次到达的 rx 字节块 -> 切成帧 -> 逐帧把落在点表上的点标成 manual。
+
+        为什么要自己切帧：pymodbus 在**组帧之前**就 trace，一个块里可能挤了两条写请求
+        （实测 24 字节一次到达），而 `write_targets` 按契约只解**第一条**，剩下那条就白写
+        不接管——而且漏得没有声音（spec §7 正是防"下发没生效"这类误判的）。
+
+        为什么不给自己留"切不完的余量"（trace 的实测形状决定，别照直觉改回去）：
+        `trace_packet` 拿到的是 transport 那一侧**累计**的缓冲，半个帧会在下一次连同新到的
+        字节**整段重放**（先到 10 字节、再到 2 字节 → 第二次给的是完整的 12 字节）。所以
+        每次都从第 0 字节切才对；自己再留一份余量拼回去，等于把已经见过的字节数两遍，
+        之后每一条真帧都会对错偏移。
+
+        `length` 不在 2..254 之内就不是 Modbus TCP 帧（PDU 最长 253 + unit id 1）：整块到此
+        为止，不猜下一帧从哪儿开始——撒谎的长度字段同样会把 pymodbus 自己的组帧卡住，
+        那次写压根落不到寄存器上，这里不替它标接管。
+        """
+        offset = 0
+        while len(raw) - offset >= 8:              # 8 = MBAP(7) + 功能码(1)，再短读不出长度
+            length = int.from_bytes(raw[offset + 4:offset + 6], "big")
+            if not 2 <= length <= _MAX_MBAP_LENGTH:
+                return                             # 不是帧头：这一段一个都不认
+            if 6 + length > len(raw) - offset:
+                return                             # 帧还没到齐：重放的那一次会带上余量
+            self._own_write_frame(raw[offset:offset + 6 + length])
+            offset += 6 + length
+
+    def _own_write_frame(self, frame: bytes) -> None:
+        """一整帧 rx 报文 -> 命中的点整段切成 manual（点表里没有的格子一律不理）。"""
+        unit, function, summary = parse_packet(frame)
+        event = PacketEvent(self.channel_name, "rx", frame, unit, function, summary,
+                            time.monotonic() - self.started_at)
+        for unit_id, area, address, count in write_targets(event) or ():
+            for point_unit, pt in self._wave_points:
+                # `readonly` 的点跳过：主站写它会被协议拒（异常码 2），但 rx 照样解成"写"，
+                # 不过滤就变成"一次没成功的写把曲线停了"——而引擎侧的 raw_writer 写得进
+                # 只读点，症状比"主站压根写不到"更难查。
+                if point_unit != unit_id or pt.area != area or pt.readonly:
+                    continue
+                # 区间**重叠**判定，不是"点的基础格落在写区间内"：主站从 4 格 uint64 的中间
+                # 那一格写起时（FC16 addr=6 qty=2 打占 5..8 的点），按基础地址判一个点都命中
+                # 不了，5 还留在波形手上，下一 tick 就把主站刚写的 6/7 一起顶掉。
+                if pt.address < address + count and address < pt.address + pt.span:
+                    self._sources.own(self.channel_name, unit_id, area, pt.address,
+                                      count=pt.span, who="master")
+
     def _trace_connect(self, is_new: bool) -> None:
         """连接建立/断开回调：实测一次"连上→读→关"正好是 ("open", "close") 两次。"""
         if self._on_connection is not None:
             self._on_connection("open" if is_new else "close")
+
+    async def _tick_loop(self, interval: float) -> None:
+        """引擎 loop 上的波形节拍。异常一律在 `_tick_once` 里按点兜住，这里不加 try：
+        真出了没预料到的异常，任务死掉比每轮把异常咽进无声的 `pass` 更容易被发现。
+        """
+        while True:
+            await asyncio.sleep(interval)
+            self._tick_once(time.monotonic())
+
+    def _tick_once(self, now: float) -> int:
+        """把"还在波形手上"的点算一遍值写进寄存器，返回真写掉的点数。
+
+        `t = now - self._tick_started`：重新起通道曲线就从 0 相位开始，改系统时间
+        影响不到它（spec §5）。`now` 由调用方给，测试才注得进固定时间戳。
+        """
+        writer = self._require_writer()
+        written = 0
+        t = now - self._tick_started
+        for unit_id, pt in self._wave_points:
+            if not self._sources.is_waveform(self.channel_name, unit_id, pt.area,
+                                             pt.address):
+                continue                                  # spec §7：被接管就一个字都不写
+            if pt.waveform in ("", "const") and not pt.wave_param:
+                continue                                  # W4：空 const 不参与
+            try:
+                value = waveform_value(pt.waveform, pt.wave_param, t)
+                # 钳位报告（`_report_clamp` + 60s 去重日志）是 Task 4 的活：这一层先把值
+                # 钳进 datatype 的区间再编码——写一个被 `& 0xFFFF` 截过的错值比不报日志严重。
+                value, _clamped = clamp_to_datatype(value, pt.datatype)
+                registers = encode(value, pt.datatype, pt.word_order)
+                if area_is_bit(pt.area):
+                    # 两个写入口不许混用：`write_registers` 写 co 会回 True 而点亮的是
+                    # **线圈 1**（寄存器 0 的第 0 位）——"引擎想关风机、写成开"就来自这里。
+                    wrote = writer.write_bits(unit_id, pt.area, pt.address,
+                                              bool(registers[0]))
+                else:
+                    wrote = writer.write_registers(unit_id, pt.area, pt.address,
+                                                   list(registers))
+            except (KeyError, ZeroDivisionError, ValueError):
+                # 逐点兜：未知波形名是 KeyError、`period=0`/`speed=0` 是 ZeroDivisionError、
+                # 参数与编码是 ValueError（Task 1 实测三种都会到这里来）。只跳过这一个点——
+                # 异常冒进 asyncio 任务就是"波形停了而通道还在跑"，而整轮中断还会让同通道
+                # 其余点位一起冻住。日志归 Task 4。
+                continue
+            if not wrote:
+                continue          # 地址不在块内（点表与 SimDevice 不一致）：静默跳下一个点
+            written += 1
+        return written
+
+    def mark_manual(self, unit_id: int, area: str, address: int,
+                    count: int = 1, who: str = "gui") -> None:
+        """把一段地址标成"人工接管"。**只能在 loop 线程调**（`Session` 经 runner.call）。"""
+        self._sources.own(self.channel_name, unit_id, area, address, count=count,
+                          who=who)
+
+    def restore_waveform(self, unit_id: int, area: str, address: int,
+                         count: int = 1) -> bool:
+        """把 `[address, address+count)` 交还波形；这一段里原本有 manual 才返回 True。
+
+        跨度由调用方给（`Session` 手里才有点位的 `span`），这一层不认点只认地址。
+        """
+        return self._sources.restore(self.channel_name, unit_id, area, address,
+                                     count=count)
+
+    def source_is_waveform(self, unit_id: int, area: str, address: int) -> bool:
+        """这一格当前还归波形驱动吗（`Session.rows()` 的 `source` 列读它）。
+
+        只给"调用方要的那个点"的答案，不外泄整表快照（Task 2 复审的口径）。
+        """
+        return self._sources.is_waveform(self.channel_name, unit_id, area, address)
 
     def _require_writer(self) -> RawRegisterWriter:
         """没起（或已经停了）就调读写接口：一句带通道名的话，不要 `AttributeError`。

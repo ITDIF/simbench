@@ -18,6 +18,7 @@
 平台那边真读得到"，mock 只能证明代码自洽，证明不了它能跟真网关说话。
 """
 
+import dataclasses
 import socket
 import threading
 import time
@@ -25,7 +26,7 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
-from modslave.backend.events import ChannelState, PacketEvent
+from modslave.backend.events import ChannelState, LogLine, PacketEvent
 from modslave.backend.modbus_tcp import PortInUseError, check_port_is_free
 from modslave.codec.point_codec import encode
 from modslave.csv_io_entry import load_point_table
@@ -106,16 +107,40 @@ def test_rows_are_unreadable_before_start_so_the_csv_initial_shows(session):
 def test_row_field_order_is_the_positional_contract_task_5_builds_on():
     """`FakeEngine` 按**位置**构造 Row，字段顺序就是契约，改动要先过这里。
 
-    `stale` 必须留在末尾并带默认值：前面 12 个位置参数的顺序一旦变，
+    `stale`/`source` 必须留在末尾并带默认值：前面 12 个位置参数的顺序一旦变，
     `point_source.FakeEngine` 构造出来的行会**静默串列**（把 waveform 当 readonly 之类），
     界面上是一格看着合法的错值——比崩掉难查得多。
     """
     assert tuple(Row.__dataclass_fields__) == (
         "channel", "device", "unit_id", "name", "area", "address", "datatype",
-        "word_order", "value_text", "registers", "readonly", "waveform", "stale")
+        "word_order", "value_text", "registers", "readonly", "waveform", "stale",
+        "source")
     default = Row("tcp-5020", "COVI-1", 11, "CO浓度", "hr", 0, "float32", "CDAB",
                   "12.5", (0x0000, 0x4148), True, "const")
     assert default.stale is False, "stale 要有默认值，否则现有构造点全得跟着改"
+    # 这两句才是"没串列"的证据：位置构造少给一个参数时，串进去的值看着完全合法
+    assert default.readonly is True and default.waveform == "const"
+
+
+def test_row_source_is_a_trailing_default_not_an_inserted_field():
+    """`source` 加在最后且有默认值：老的位置构造不会把它接到 `waveform` 上。"""
+    fields = list(dataclasses.fields(Row))
+    assert fields[-1].name in ("source",)
+    assert fields[-1].default == "waveform"
+
+
+def test_rows_carry_the_ownership_of_a_running_channel(session):
+    """ζ：没起通道时那一列只能是 `waveform`——那时显示的是点表初值，标"已停"是界面在
+    演一出没发生的接管。起之后默认也还是 `waveform`（谁都没动过值）。
+    """
+    session.load(loaded(free_port()))
+    assert [r.source for r in session.rows("tcp-5020")] == ["waveform"] * 9
+    session.start_channel("tcp-5020")
+    rows = session.rows("tcp-5020")
+    assert len(rows) == 9
+    assert [r.source for r in rows] == ["waveform"] * 9, "刚起来的通道不该有任何一格是 manual"
+    assert session.manual_count("tcp-5020") == 0
+
 
 
 # ---------- 启动门槛 ----------
@@ -713,6 +738,146 @@ def test_set_point_after_stop_says_not_running_instead_of_none_attribute(session
     # **不会**带过去。这条钉死它，免得将来有人把"重启还留着上次改的值"当成默认行为改上去。
     session.start_channel("tcp-5020")
     assert value_of(session, "风机状态") == "11"
+
+
+# ---------- 值归属：接管与恢复（M4 spec §7） ----------
+
+def test_only_the_session_turns_the_tick_on(session):
+    """`tick_ms` 只从 `Session.start_channel` 交下去（决策 8）：backend 自己默认 0，
+    无头 CLI 那条路不建 Session，形状一个字都没变。界面起的通道才该自己动。
+
+    停通道时任务要一起收掉，而且顺序在 `server.shutdown()` 之前——`stop()` 后面会把
+    `_writer` 置 None，晚一步取消就是"停通道时崩一次"。
+    """
+    port = free_port()
+    project = loaded(port)
+    project.tick_ms = 25
+    session.load(project)
+    session.start_channel("tcp-5020")
+    backend = session.channel("tcp-5020").backend
+    assert backend.tick_ms == 25, "工程的 tick_ms 没传给 backend：界面上的曲线不会自己动"
+    assert backend._tick_task is not None and not backend._tick_task.done()
+    session.stop_channel("tcp-5020")
+    assert backend._tick_task is None, "通道停了还留着 tick 任务：值还在自己动"
+
+
+def test_a_gui_edit_hands_the_point_over_and_the_row_says_so(session):
+    """spec §7：界面改过的点切成 `manual`，波形列显示"已停"，接管计数跟着加一。
+
+    按**点**计而不是按地址计：一个 uint64 点被接管在 `SourceStore.cleared()` 里是 4 格，
+    而操作员改的是"一个点"——状态栏那句"有 N 处被接管"数错了单位，人就不信那个数了。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    backend = session.channel("tcp-5020").backend
+    assert session.set_point("tcp-5020", 11, "hr", 4, "37").ok
+    rows = session.rows("tcp-5020")
+    assert [r.source for r in rows if r.name == "风机状态"] == ["manual"]
+    assert [r.source for r in rows if r.name != "风机状态"] == ["waveform"] * 8
+    assert session.manual_count("tcp-5020") == 1
+    assert backend._sources.cleared() == 1
+
+
+def test_the_takeover_is_recorded_on_the_engine_thread_not_the_gui_one(session,
+                                                                        monkeypatch):
+    """`SourceStore` 是 loop 线程的可变状态：GUI 直接往里插一脚就是跨线程共享（spec §13
+    那条 GC 死锁的同族）。`set_point` 的寄存器写本来就投在 loop 线程，接管必须跟着
+    **同一个** lambda 做完，所以这里比的是线程 ident 而不是"值对不对"。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    backend = session.channel("tcp-5020").backend
+    real = backend.mark_manual
+    seen: list[int] = []
+
+    def record(*args, **kwargs):
+        seen.append(threading.get_ident())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "mark_manual", record)
+    assert session.set_point("tcp-5020", 11, "hr", 4, "37").ok
+    assert seen == [session._runner.thread_ident], (
+        f"接管是在 {seen} 线程上写的，引擎线程是 {session._runner.thread_ident}")
+
+
+def test_a_refused_gui_edit_does_not_take_the_point_over(session):
+    """写都没写成，状态不许跟着翻：那等于"一次失败的编辑把波形停了"，
+    和主站写只读点被拒是同一类误判（决策 1 的②）。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    assert not session.set_point("tcp-5020", 11, "hr", 4, "abc").ok
+    assert session.manual_count("tcp-5020") == 0
+    assert [r.source for r in session.rows("tcp-5020")] == ["waveform"] * 9
+
+
+def test_a_write_the_backend_refused_does_not_take_the_point_over(session, monkeypatch):
+    """比上面深一层：寄存器写**投进引擎之后**回 `False`（点表与 datastore 对不上——
+    Task 6 改完区/地址而通道没重启就是这个形状），那次写压根没落到寄存器上，
+    状态同样一个字都不许动。
+
+    接管写在同一个 lambda 里，所以"没写成也标 manual"这条变异只有从这一层才照得出来：
+    上面那条在 codec 就被挡住了，压根没走到 `_awrite`。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    monkeypatch.setattr(session.channel("tcp-5020").backend, "write_registers",
+                        lambda *_a, **_k: False)
+    res = session.set_point("tcp-5020", 11, "hr", 4, "37")
+    assert not res.ok and "outside the point table" in res.error, res
+    assert session.manual_count("tcp-5020") == 0
+    assert [r.source for r in session.rows("tcp-5020")] == ["waveform"] * 9
+
+
+def test_restore_waveform_hands_the_whole_point_back(session):
+    """`Session.restore_waveform` 的签名只有基础地址，跨度得自己算（决策 6）：
+    uint64 占 4 格，少传跨度就留 3 格在 manual 上，接管计数永远回不了零。
+
+    这里先用界面写一个 4 格的点（`mark_manual` 的 count 也必须跟着寄存器数走，否则
+    `cleared()` 那一句"有 N 处被接管"当场说谎），再整点交还波形，并要求日志点名恢复的是
+    哪个点——静默把值交还波形等于操作员看不见发生了什么。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    backend = session.channel("tcp-5020").backend
+    assert session.set_point("tcp-5020", 11, "hr", 5, "12346789").ok   # 累计电量 uint64
+    assert backend._sources.cleared() == 4, "接管只标了基础格：跨度没跟着寄存器数走"
+    assert session.manual_count("tcp-5020") == 1                        # 按点数是 1
+    logs: list[LogLine] = []
+    session.subscribe(lambda e: isinstance(e, LogLine) and logs.append(e))
+    assert session.restore_waveform("tcp-5020", 11, "hr", 5) is True
+    assert backend._sources.cleared() == 0, "恢复留下了尾巴"
+    assert session.manual_count("tcp-5020") == 0
+    assert [r.source for r in session.rows("tcp-5020") if r.name == "累计电量"] == \
+        ["waveform"]
+    assert any("累计电量" in line.text for line in logs), logs
+    # 本来就在波形手上：没恢复过任何东西，不许谎报成功
+    assert session.restore_waveform("tcp-5020", 11, "hr", 5) is False
+
+
+def test_restore_waveform_refuses_without_raising(session):
+    """两条拒绝都要是一句带点位名的话，不许从 Qt 槽位里逃出 `AttributeError`：
+    通道没在跑 / 地址根本不在点表，是操作员每天撞到的两件事（决策 6 与 M1 的
+    `_require_writer` 同形问题）。没起的通道谈不上接管，所以 `manual_count` 回 0。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    logs: list[LogLine] = []
+    session.subscribe(lambda e: isinstance(e, LogLine) and logs.append(e))
+    assert session.restore_waveform("tcp-5020", 11, "hr", 30) is False
+    assert any("not in the point table" in line.text for line in logs), logs
+    logs.clear()
+    session.stop_channel("tcp-5020")
+    assert session.restore_waveform("tcp-5020", 11, "hr", 4) is False
+    assert any("not running" in line.text and "风机状态" in line.text
+               for line in logs), logs
+    assert session.manual_count("tcp-5020") == 0
 
 
 def test_dirty_flag_tracks_edits(session):

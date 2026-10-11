@@ -8,6 +8,12 @@ Qt-free（不 import PySide6），所以 M1/M2 的内核测试不需要事件循
 只有 `packet_sink` / `on_connection` 两个钩子，多一个钩子就多一条跨线程改 UI 的路，
 而 10Hz 全表刷新实测最坏 0.34ms，不值得为它换推送。
 
+M4 的值归属沿同一个口径：`Row.source` 是 `rows()` 现问 backend 的
+（`source_is_waveform`，无 await 的纯内存读，和 `_read_back` 同类），而**写侧**的接管与
+恢复全部经 `runner.call(...)` 投回 loop 线程——运行态只有一条线程碰（spec §13）。
+"主站写了什么"由 backend 在 rx 钩子里自己记账，Session 不接回调，界面上才有唯一一条
+拉取路径。
+
 回读失败时那一格**仍然**显示 CSV 初值，但会带上 `Row.stale`：不带着它，"通道在跑却没
 读到"和"设备报了这个值"在界面上就是同一个样子（本项目最防的那类演出）；而"还没启动"
 不是异常，不标灰。
@@ -52,6 +58,11 @@ class Row:
     `stale` 只在**通道在跑且回读失败**时为真。"没启动"不是异常（那时显示 CSV 初值
     是正确行为），"启动了却没读到"才是——两者回落的是同一份初值文字，界面上分不出来，
     而把"没读到"演成"设备报了这个值"正是本项目最防的那类假象，所以这里必须带出来。
+
+    `source` 是 spec §7 那唯一一条值归属：`waveform` = 曲线还在驱动这个点，`manual` =
+    被界面或主站接管过、波形一个字都不再写。它**只能放在最后一位且带默认值**：
+    `FakeEngine`/本文件的 `rows()` 都按位置构造，插进 `waveform` 前面会把 `readonly`
+    与 `waveform` 串成一列看着合法的错值——那种错测试全绿、现场读错。
     """
 
     channel: str
@@ -67,6 +78,7 @@ class Row:
     readonly: bool
     waveform: str
     stale: bool = False
+    source: str = "waveform"
 
     @property
     def key(self) -> tuple[str, int, str, int]:
@@ -205,7 +217,11 @@ class Session:
         if errors:
             raise ValueError(f"point table has {len(errors)} error(s); refusing to start: "
                              + " | ".join(errors[:3]))
-        backend = ModbusTcpBackend(channel, packet_sink=self._packet_sink(name))
+        backend = ModbusTcpBackend(channel, packet_sink=self._packet_sink(name),
+                                   tick_ms=self._project.tick_ms)
+        # 只有这一条路把 `tick_ms` 交给 backend：无头 CLI（`python -m modslave`，M1 的
+        # 验收入口）不建 Session，它默认的 `tick_ms=0` 就是不起 tick 任务，M1/M2 的
+        # 既有用例形状一个字都没变。
         try:
             self._runner.call(lambda: backend.start(), _START_TIMEOUT,
                               f"start channel {name}")
@@ -295,19 +311,91 @@ class Session:
         `stale` 的判据是"通道在跑 **且** 这一行回读失败"：没跑的时候显示初值是
         正确行为（ζ：一个通道都没起时表格照样可读），把它一起标灰就等于界面在
         演出一个没发生的故障。
+
+        `source` 同一条口径：没起通道时一律 `waveform`，起之后现问 backend 那一份归属
+        状态——`source_is_waveform` 是无 await 的纯内存集合判定，与 `_read_back` 的直读
+        同一个口径；写侧（接管/恢复/tick）全部只在 loop 线程发生。
         """
         with self._lock:
             runtime = self._channels.get(channel)
             meta = list(self._rows_meta.get(channel, ()))
         running = bool(runtime and runtime.running)
+        backend = runtime.backend if running else None
         out: list[Row] = []
         for unit_id, device, pt in meta:
             regs, failed = self._read_back(runtime, pt, unit_id)
             value_text, registers = _render(pt, regs)
             out.append(Row(channel, device, unit_id, pt.name, pt.area, pt.address,
                            pt.datatype, pt.word_order, value_text, registers,
-                           pt.readonly, pt.waveform, stale=failed and running))
+                           pt.readonly, pt.waveform, stale=failed and running,
+                           source=_source_of(backend, unit_id, pt)))
         return out
+
+    def manual_count(self, channel: str) -> int:
+        """当前被人工接管的**点位**数（状态栏那句"有 N 处被接管"用）。
+
+        按点位数而不是按地址数：`SourceStore.cleared()` 数的是地址，一个 uint64 点被接管
+        在那里是 4，而操作员改的是"一个点"——单位对不上，那个数就没法对着看。这里手里
+        就有点表，所以逐个点问归属，不要求 backend 交出整表快照（Task 2 复审的口径）。
+        通道没起时是 0：没起就谈不上接管。
+        """
+        with self._lock:
+            runtime = self._channels.get(channel)
+            meta = list(self._rows_meta.get(channel, ()))
+        if runtime is None or not runtime.running or runtime.backend is None:
+            return 0
+        backend = runtime.backend
+        return sum(1 for unit_id, _device, pt in meta
+                   if not backend.source_is_waveform(unit_id, pt.area, pt.address))
+
+    def restore_waveform(self, channel: str, unit_id: int, area: str,
+                         address: int) -> bool:
+        """把一个人工接管的点交还给波形，返回"真还回去过东西没有"。
+
+        签名里只有**基础地址**，跨度在这里自己算：`Session` 手里有摊平的点表，取出该点的
+        `pt.span` 再投给 backend。少传跨度就会让一个 4 格的 uint64 恢复之后仍留 3 格是
+        `manual`——接管计数永远回不了零，而那三格地址此后再没有任何东西会去动它们
+        （`is_waveform` 判的是基础格，尾巴上的格子却还留在状态里）。
+
+        两条拒绝（不在点表 / 通道没在跑）都是日志一句话 + `False`，不许从 Qt 槽位里逃出
+        `AttributeError`（M1 的 `_require_writer` 钉过同形问题）。恢复了什么要点名，
+        静默把值交还波形等于操作员看不见发生了什么。
+        """
+        runtime, _ = self._require(channel)
+        pt = self._points.get((channel, unit_id), {}).get((area, address))
+        if pt is None:
+            self.publish_log("warning",
+                             f"{area} address {address} (unit {unit_id}) on channel "
+                             f"{channel} is not in the point table; nothing was "
+                             f"handed back to the waveform")
+            return False
+        if not runtime.running or runtime.backend is None:
+            self.publish_log("warning",
+                             f"point {pt.name} ({area} {address}, unit {unit_id}) on "
+                             f"channel {channel} is not running; the waveform was not "
+                             f"resumed")
+            return False
+        try:
+            restored = self._runner.call(
+                lambda: _arestore(runtime.backend, unit_id, area, address, pt.span),
+                _WRITE_TIMEOUT,
+                f"restore waveform {area} {address} (unit {unit_id})")
+        except Exception as exc:                    # noqa: BLE001
+            self.publish_log("error",
+                             f"restore waveform for point {pt.name} ({area} {address}, "
+                             f"unit {unit_id}) failed: {exc}")
+            return False
+        if restored:
+            self.publish_log("info",
+                             f"point {pt.name} ({area} {address}, unit {unit_id}) on "
+                             f"channel {channel} handed back to the waveform; "
+                             f"{pt.span} register(s) released")
+        else:
+            # 没在 manual 上就别谎报"恢复了"：那句日志会是操作员唯一能看见的证据
+            self.publish_log("info",
+                             f"point {pt.name} ({area} {address}, unit {unit_id}) on "
+                             f"channel {channel} was already driven by the waveform")
+        return bool(restored)
 
     def write(self, channel: str, unit_id: int, area: str, address: int,
               text: str) -> tuple[bool, str]:
@@ -347,6 +435,11 @@ class Session:
             # 走 `call` 而不是裸 `submit(...).result()`：超时时 `call` 会把引擎线程当时的
             # 栈帧带进消息。界面上"点了没反应"和"引擎卡在写 4x5 这一帧"是两种完全不同的
             # 故障，后者能凭一张截图定位。5 秒的口径见 `_WRITE_TIMEOUT`。
+            #
+            # 接管状态在**同一个 lambda 里、写成功之后**记（spec §7）：`SourceStore` 是
+            # loop 线程的可变状态，主线程往它插一脚就是跨线程共享。写成 False（地址不在块内、
+            # 引擎拒绝）时一个状态都不动——"一次没写成的编辑把曲线停了"和主站写只读点被拒
+            # 是同一类误判。
             if area_is_bit(area):
                 ok = self._runner.call(
                     lambda: _awrite_bits(runtime.backend, unit_id, area, address,
@@ -475,6 +568,18 @@ class Session:
         return list(regs), False
 
 
+def _source_of(backend, unit_id: int, pt: Point) -> str:
+    """这一行的值当前归谁驱动：`waveform` / `manual`。
+
+    `backend` 为空（通道没起）一律回 `waveform`：那时那一格显示的是点表初值，标"已停"
+    是界面在演一出没发生的接管（ζ，与 `stale` 同一条判据）。
+    """
+    if backend is None:
+        return "waveform"
+    return "waveform" if backend.source_is_waveform(unit_id, pt.area, pt.address) \
+        else "manual"
+
+
 def _render(pt: Point, regs: list[int] | None) -> tuple[str, tuple[int, ...]]:
     """寄存器 -> 界面文案。回读失败（regs 为 None/空）时回落 CSV 初值。
 
@@ -500,8 +605,28 @@ def _render(pt: Point, regs: list[int] | None) -> tuple[str, tuple[int, ...]]:
 
 
 async def _awrite(backend, unit_id, area, address, registers):
-    return backend.write_registers(unit_id, area, address, registers)
+    """寄存器写 + 人工接管，一次投递做完（两步都只在 loop 线程发生）。
+
+    `count=len(registers)`：接管按这次真写下去的跨度记，和 `restore_waveform` 那边的
+    `pt.span` 是同一段（span ≥ 这次写的格数，所以恢复一定清得干净）。只标基础格的话
+    `SourceStore.cleared()`（状态栏按地址数的那一句）就会少报几格。
+    """
+    ok = backend.write_registers(unit_id, area, address, registers)
+    if ok:
+        backend.mark_manual(unit_id, area, address, count=len(registers), who="gui")
+    return ok
 
 
 async def _awrite_bits(backend, unit_id, area, address, value):
-    return backend.write_bits(unit_id, area, address, value)
+    """位区写：一个线圈/离散输入就是一个点，跨度天然是 1。"""
+    ok = backend.write_bits(unit_id, area, address, value)
+    if ok:
+        backend.mark_manual(unit_id, area, address, count=1, who="gui")
+    return ok
+
+
+async def _arestore(backend, unit_id, area, address, count):
+    """把整点的跨度交还波形。`runner.call` 只收协程，所以和上面两个同一个形状；
+    状态改动仍然全部发生在 loop 线程，主线程只是等一句"还真回去没有"。
+    """
+    return backend.restore_waveform(unit_id, area, address, count=count)

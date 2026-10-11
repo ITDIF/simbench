@@ -38,6 +38,10 @@ class FakeEngine:
     它**没有**通道启停概念：所有行都用 CSV 初值（`stale` 恒 False），因为"没起"在这里
     不是异常。"起了却没读到"那条路只有真 Session 能演，由 `test_session.py` 的 stale
     用例钉住，不在替身里造假——替身里造出来的灰显会骗过界面用例。
+
+    `source` 同样留在默认的 `waveform`：这里既没有 tick 在写寄存器，也没有真主站往总线上
+    发写报文，替身自己"接管"就是把界面用例钉在替身的行为上（同上那条理由）。界面写成功
+    要不要算接管，由拿着真点表的 `Session` 说，不由这里猜。
     """
 
     def __init__(self, project) -> None:
@@ -50,6 +54,7 @@ class FakeEngine:
                 for pt in dev.points:
                     # 位置参数顺序就是 Row 的契约（tests/test_session.py 钉着）：
                     # 换序会静默把 waveform 当 readonly 之类串成一列看着合法的错值。
+                    # `stale`/`source` 都有默认值，所以这里给到 `waveform` 就停住。
                     self._rows.append(Row(ch.name, dev.name, dev.unit_id, pt.name,
                                           pt.area, pt.address, pt.datatype,
                                           pt.word_order, str(pt.initial),
@@ -96,6 +101,12 @@ def _registers(point_or_row, value: str | None = None) -> tuple[int, ...]:
 
 
 def _with_value(row: Row, text: str) -> Row:
+    """换掉"当前值"那一格，其余字段**一个都不许丢**。
+
+    `Row` 是按位置重建的，所以每加一列都得在这里跟着带过去：`source` 漏掉的话第一屏
+    看不出问题（两边都是 `waveform`），而界面改完值之后那一格会自己从"已停"跳回波形名，
+    等于替身在撤销一次没人点过的"恢复波形"。
+    """
     return Row(row.channel, row.device, row.unit_id, row.name, row.area, row.address,
                row.datatype, row.word_order, text, _registers(row, text),
-               row.readonly, row.waveform, row.stale)
+               row.readonly, row.waveform, row.stale, row.source)

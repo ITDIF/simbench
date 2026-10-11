@@ -732,11 +732,373 @@ def test_an_accepted_but_hung_up_connection_is_not_counted_as_serving():
 
 
 
+def test_a_tick_writes_the_waveform_value_into_the_registers(open_backend):
+    """一步 tick 之后，**第三方主站**读到的就是算出来的值。
+
+    选 `CO浓度` 是故意的：它是 `readonly=true`。波形必须能写进只读点（走 raw_writer
+    直接改列表），否则"只读的模拟量"这一整类点位（隧道里 CO/VI/照度几乎全是只读）
+    就永远冻在初值上。主站写同一个地址仍回异常码 2，那是另一条用例（M1 已钉）。
+    时钟由 `_tick_once(now=...)` 注入，不靠 `sleep`：这条要证的是"值算对写对"，
+    "定时器会自己响"由下一条钉。
+    """
+    project = tunnel_project(free_port())
+    point = project.channels[0].devices[0].points[0]           # CO浓度 hr0 float32 CDAB
+    point.waveform, point.wave_param = "const", {"value": "44.5"}
+    with open_backend(project.channels[0]) as backend:
+        backend._tick_once(now=0.0)
+        client = connect(project.channels[0].port)
+        try:
+            got = client.read_holding_registers(0, count=2, device_id=11).registers
+            assert cdab_to_float(got) == pytest.approx(44.5), got
+        finally:
+            client.close()
+
+
+def test_the_tick_task_dies_with_the_backend(engine_runner):
+    """stop 之后不许留一个还在写寄存器的任务。
+
+    "通道已经停了、值还在自己动"是这个工具最难查的一类假象：主站读到的是已经不该
+    再存在的模拟量。这里断言任务已取消，而不是断言"过一会儿值不再变"——后者要 sleep
+    且慢测试会假绿。
+    """
+    project = tunnel_project(free_port())
+    project.channels[0].devices[0].points[0].waveform = "sine"
+    project.channels[0].devices[0].points[0].wave_param = {
+        "base": "20", "amp": "15", "period": "60"}
+    backend = ModbusTcpBackend(project.channels[0], tick_ms=20)
+    engine_runner.call(lambda: backend.start(), 10, "test open")
+    try:
+        assert backend._tick_task is not None and not backend._tick_task.done()
+    finally:
+        engine_runner.call(lambda: backend.stop(), 10, "test close")
+    assert backend._tick_task is None, "stop 没把 tick 任务收掉"
+    # 停了之后打一步 tick：要的是"通道没在跑"那句带通道名的话，不是 `'NoneType' object ...`
+    with pytest.raises(RuntimeError, match="tcp .*not started"):
+        backend._tick_once(now=time.monotonic())
+
+
+def test_a_backend_that_was_not_handed_a_tick_ms_has_no_tick_task(open_backend):
+    """`tick_ms=0` 是默认，也就是**不起任务**：无头 CLI（M1 那条验收入口）不建 `Session`，
+    它起的从站形状因此一个字都没变。只有 `Session.start_channel` 会把工程里的 `tick_ms`
+    交下来（决策 8）——这里钉住"没交就没有"，否则默认起任务会把现有全部用例的形状换掉。
+    """
+    port = free_port()
+    with open_backend(tunnel_project(port).channels[0]) as backend:
+        assert backend.tick_ms == 0
+        assert backend._tick_task is None, "tick_ms=0 也起了任务：M1 的冒烟形状变了"
+
+
+async def _one_tick(backend, now: float) -> int:
+    """把一步 tick 投回 loop 线程：它写寄存器、读归属，都是引擎线程的活。"""
+    return backend._tick_once(now=now)
+
+
+def test_a_point_the_master_took_over_gets_not_a_single_word_from_the_tick(
+        engine_runner, open_backend):
+    """spec §7 的另一半：接管之后 tick 一个字都不写，否则"下发没生效"又回来了；
+    同通道**其余**点必须照写，不能因为一个点被接管就连坐。
+
+    接管状态是真主站的 FC06 打出来的（rx 钩子在 loop 线程上标），不是测试手工塞的键——
+    塞进去的键证明不了"报文识别 + 落到点上"这一整条路。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    points = project.channels[0].devices[0].points
+    for pt, value in ((points[0], "44.5"), (points[2], "999")):    # CO浓度 hr0 / 状态字 hr4
+        pt.waveform, pt.wave_param = "const", {"value": value}
+    with open_backend(project.channels[0]) as backend:
+        client = connect(port)
+        try:
+            assert client.write_register(4, 88, device_id=11).registers == [88]
+            written = engine_runner.call(lambda: _one_tick(backend, 0.0), 10,
+                                        "one tick")
+            assert written == 1, f"只该写掉 CO浓度 那一个点，写了 {written} 个"
+            got = client.read_holding_registers(4, count=1, device_id=11).registers
+            assert got == [88], got
+            assert cdab_to_float(client.read_holding_registers(
+                0, count=2, device_id=11).registers) == pytest.approx(44.5)
+        finally:
+            client.close()
+
+
+def test_one_bad_point_does_not_stop_the_rest_of_the_tick(open_backend):
+    """三种坏波形各自只跳过**它自己那个点**：Task 1 实测 `waveform_value` 对未知名字抛
+    `KeyError`、`period=0` 抛 `ZeroDivisionError`，`_num`/`encode` 抛 `ValueError`。
+    计划原文只兜 `ValueError`，那会让第一个坏点以 `KeyError` 把整轮 tick 打断，同通道
+    其余点位一起冻住（决策 2）。
+
+    `铭牌`（string）那一行钉的是 `encode` 那条：波形只产数值，字符串点位编不出寄存器，
+    这种点每轮都该被跳过而不是把整轮带走。`启动`（co）那条钉住位区走 `write_bits`：
+    误用 `write_registers` 会回 True 而点亮的是**线圈 1**（引擎想关风机、写成开）。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    points = project.channels[0].devices[0].points
+    points[0].waveform, points[0].wave_param = "const", {"value": "44.5"}   # 好：hr0
+    points[1].waveform, points[1].wave_param = "spiral", {}   # KeyError
+    points[2].waveform, points[2].wave_param = "sine", {
+        "base": "1", "amp": "1", "period": "0"}   # ZeroDivisionError
+    points[3].waveform, points[3].wave_param = "const", {"value": "abc"}   # _num
+    points[4].waveform, points[4].wave_param = "const", {"value": "7"}   # encode
+    points[5].waveform, points[5].wave_param = "const", {"value": "1"}   # 好：co0
+    with open_backend(project.channels[0]) as backend:
+        assert backend._tick_once(now=1.0) == 2, "两个好点之外的都该被跳过"
+        client = connect(port)
+        try:
+            assert cdab_to_float(client.read_holding_registers(
+                0, count=2, device_id=11).registers) == pytest.approx(44.5)
+            assert client.read_coils(0, count=1, device_id=11).bits[0] is True
+            assert client.read_coils(1, count=1, device_id=11).bits[0] is False, \
+                "线圈 1 亮了：位区走了寄存器写入口"
+            # 四个坏点一个字节都没写进去：还是各自的点表初值
+            for address, initial in [(2, 0x4050), (4, 11), (5, 0x0102), (9, 0x4641)]:
+                got = client.read_holding_registers(address, count=1, device_id=11)
+                assert got.registers == [initial], (address, got.registers)
+        finally:
+            client.close()
+
+
+def test_a_bad_waveform_does_not_kill_the_tick_task(engine_runner):
+    """任务里一个未捕获的异常会把整条曲线静默吃掉，而通道还在跑、界面还在读——
+    "波形停了但通道还在跑"就是这个形状（决策 2 要防的那件事）。
+
+    坏点排在**第一个**：没兜住的话任务在真正写任何值之前就死掉。判据不是"没崩"而是
+    "后面的点连着写进了两个不同的值"，加上任务仍然活着——只看值会漏掉"任务已死但值恰好
+    被谁写过一次"，只看 done() 又证明不了它真的还在往外写。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    points = project.channels[0].devices[0].points
+    points[0].waveform, points[0].wave_param = "spiral", {}        # KeyError，排在好点之前
+    points[2].waveform, points[2].wave_param = "ramp", {
+        "from": "0", "to": "100", "speed": "500"}                 # 状态字 hr4，每 tick 换值
+    backend = ModbusTcpBackend(project.channels[0], tick_ms=20)
+    engine_runner.call(lambda: backend.start(), 10, "test open")
+    seen: set[int] = set()
+    try:
+        deadline = time.monotonic() + 5.0
+        while len(seen) < 2 and time.monotonic() < deadline:
+            # 主线程直读回显，与 `_read_back` 同一个口径
+            regs = backend.read_registers(11, "hr", 4, 1)
+            if regs:
+                seen.add(regs[0])
+            time.sleep(0.01)
+        assert len(seen) >= 2, f"tick 任务没在持续写，只读到 {sorted(seen)}"
+        assert backend._tick_task is not None and not backend._tick_task.done()
+    finally:
+        engine_runner.call(lambda: backend.stop(), 10, "test close")
+
+
+def test_a_point_that_is_not_in_the_datastore_is_skipped_without_breaking_the_round(
+        open_backend):
+    """`write_registers` 回 `False`（地址不在块内）时静默跳下一个点：一个点写不到不许把
+    整轮 tick 打断，那会让同通道其余点位一起冻住（要点 3）。
+
+    这里往摊平的表**头部**塞一个假点（hr 30 是点表的空洞，`build_sim_devices` 早就按真
+    点表建好了块，所以它是真写不进去的地址）：排在前面才证明"跳过它继续往下写"，
+    顺带钉住返回值只数真写掉的点。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    point = project.channels[0].devices[0].points[2]               # 状态字 hr4
+    point.waveform, point.wave_param = "const", {"value": "123"}
+    with open_backend(project.channels[0]) as backend:
+        backend._wave_points.insert(0, (11, Point("空洞", "hr", 30, "uint16",
+                                                  waveform="const",
+                                                  wave_param={"value": "7"})))
+        assert backend._tick_once(now=0.0) == 1, "写不进去的那个点也被算成了「写掉」"
+        client = connect(port)
+        try:
+            got = client.read_holding_registers(4, count=1, device_id=11).registers
+            assert got == [123], got
+        finally:
+            client.close()
+
+
+def raw_master(port: int) -> socket.socket:
+    """裸 socket 当主站：pymodbus 的 client 一定"一问一答"，造不出"两条帧挤在同一段里"
+    和"一条帧被拆成两段"这两种线上形状——而 sink 收到的正是这种字节块。
+    """
+    return socket.create_connection(("127.0.0.1", port), timeout=5)
+
+
+def fc06(address: int, value: int, tid: int = 1, unit: int = 11) -> bytes:
+    """一条 FC06 的线上字节，MBAP 的 length 字段真算出来（`write_targets` 吃的就是这些偏移）。"""
+    body = bytes([unit, 6, address >> 8, address & 0xFF, value >> 8, value & 0xFF])
+    return tid.to_bytes(2, "big") + b"\x00\x00" + len(body).to_bytes(2, "big") + body
+
+
+def _recv_exact(sock: socket.socket, count: int) -> bytes:
+    buf = b""
+    while len(buf) < count:
+        chunk = sock.recv(count - len(buf))
+        if not chunk:
+            raise AssertionError("从站在回应读完之前就挂了连接")
+        buf += chunk
+    return buf
+
+
+def read_adu(sock: socket.socket) -> bytes:
+    """按 MBAP 的 length 收一整条响应：异常响应只有 9 字节，别按固定长度收。"""
+    head = _recv_exact(sock, 6)
+    return head + _recv_exact(sock, int.from_bytes(head[4:6], "big"))
+
+
+def rx_chunks(sink: list[bytes]):
+    """只把 rx 方向的字节块记下来（粘帧/半帧的判据只认主站那一路）。"""
+    def record(direction: str, raw: bytes, *_extra) -> None:
+        if direction == "rx":
+            sink.append(raw)
+    return record
+
+
+def test_a_master_write_at_a_middle_register_takes_the_whole_point_over(master):
+    """主站从 4 格 uint64 的**中间**那一格写起（FC16 addr=6 qty=2 打占 5..8 的那个点）：
+    接管必须按点位整段记。按裸地址记的话，基础格 5 还在波形手上，下一 tick 就把主站刚写的
+    6/7 一起顶掉——Task 2 把这个缺口写成了断言（`test_a_write_that_starts_mid_point_...`），
+    这里钉它真的被补上了。
+    """
+    client, backend = master
+    assert client.write_registers(6, [1, 2], device_id=11) is not None
+    for address in (5, 6, 7, 8):
+        assert not backend.source_is_waveform(11, "hr", address), address
+
+
+def test_a_write_the_protocol_refused_does_not_take_the_waveform_off(master):
+    """只读点被异常码 2 拒了，而 rx 报文照样解成"写"：不过滤就变成"一次没成功的写把曲线
+    停了"——引擎侧的 `raw_writer` 写得进只读点，所以症状更难查（决策 1 的②）。
+    """
+    client, backend = master
+    # CO浓度 hr0 是 readonly=True：协议当场拒绝这次写
+    refused = client.write_registers(0, [1, 2], device_id=11)
+    assert refused.isError() and refused.exception_code == 2
+    assert backend.source_is_waveform(11, "hr", 0)
+    assert backend._sources.cleared() == 0, "被拒的写往状态里塞了键"
+
+
+def test_an_address_that_is_not_a_point_leaves_the_ownership_state_empty(master):
+    """写落在点表的空洞上（hr 30 未定义，异常码 2）：那里没有"点"可以接管，不许把裸地址
+    塞进状态（决策 1 的③）——塞进去的那些键没有任何点位能恢复得回来。
+    """
+    client, backend = master
+    gap = client.write_register(30, 7, device_id=11)
+    assert gap.isError() and gap.exception_code == 2
+    assert backend.source_is_waveform(11, "hr", 30)
+    assert backend._sources.cleared() == 0
+
+
+def test_two_writes_inside_one_tcp_chunk_are_both_taken_over(open_backend):
+    """两条写请求挤进同一个 TCP 段：pymodbus 在**组帧之前**就 trace，所以 sink 一次拿到
+    的是这 24 个字节，而 `write_targets` 只解得出第一条。不按 MBAP 长度自己切，第二条就
+    白写不接管，而且漏得没有声音。
+
+    `wait_for` 那条断言是"这一条测的确实是粘帧"的证据：真要拆成了两段，测的就是下面那条
+    而不是这条（切帧的缓冲区两种形状都得留下余量）。
+    """
+    port = free_port()
+    seen: list[bytes] = []
+    with open_backend(tunnel_project(port).channels[0],
+                      packet_sink=rx_chunks(seen)) as backend:
+        sock = raw_master(port)
+        try:
+            pair = fc06(4, 0x0058, tid=1) + fc06(2, 0x0102, tid=2)
+            sock.sendall(pair)                       # 一次发出：两条帧粘在同一个字节块里
+            wait_for(lambda: len(pair) in {len(chunk) for chunk in seen},
+                     timeout=5.0, what="both frames delivered in one chunk")
+            for address in (2, 3, 4):                # 状态字（1 格）+ VI风速（2 格）
+                assert not backend.source_is_waveform(11, "hr", address), address
+            assert backend.source_is_waveform(11, "hr", 0), "CO浓度 被主站的写接管了"
+        finally:
+            sock.close()
+
+
+def test_a_write_split_across_two_chunks_is_still_taken_over(open_backend):
+    """一条帧被拆成两段（只到地址字段的那 10 个字节先到）：这次写照样得判出接管。
+
+    先等 sink 真的收到那个 10 字节的块，再断言"这会儿还没接管"——没有这一步，两段可能被
+    合并成一段，测的就不是半帧了。补齐那一次 sink 收到的是**整个 12 字节的帧**（trace 的是
+    transport 的累计缓冲，余量连着新字节整段重放），`_note_master_writes` 正是按这个实测
+    形状决定"不留自己的余量"；`write_targets` 对半帧回 None（Task 2 钉的）。
+    """
+    port = free_port()
+    seen: list[bytes] = []
+    frame = fc06(4, 0x0058)
+    with open_backend(tunnel_project(port).channels[0],
+                      packet_sink=rx_chunks(seen)) as backend:
+        sock = raw_master(port)
+        try:
+            sock.sendall(frame[:10])
+            wait_for(lambda: [len(chunk) for chunk in seen] == [10],
+                     timeout=5.0, what="the half frame reaches the sink on its own")
+            assert backend.source_is_waveform(11, "hr", 4), "半个帧就把点接管了"
+            sock.sendall(frame[10:])
+            response = read_adu(sock)
+            assert [len(chunk) for chunk in seen] == [10, 12], \
+                "余量不是整段重放的：backend 那层的切帧判据得跟着改"
+            assert not backend.source_is_waveform(11, "hr", 4), "补齐之后没判出这次写"
+        finally:
+            sock.close()
+    assert response[7] == 6 and int.from_bytes(response[10:12], "big") == 0x0058
+
+
+def test_the_frame_after_a_replayed_half_is_cut_at_the_right_offset(open_backend):
+    """半帧被重放、消费掉之后，下一条帧必须重新从第 0 字节切——这一条钉住"backend 自己
+    不留余量"那个决定：照直觉留一份余量拼回去，见过的那 10 个字节会被数两遍，之后每一条
+    真帧都对错偏移，接管从此条条判不成（而那正是漏得没有声音的那类 bug）。
+
+    形状是实测的：`[10]` → `[12]`（同一帧整段重放，从站答完把它自己的余量清了）→ `[12]`
+    （下一条独立的新帧）。第三条打的是**另一个点**（VI风速 hr2），它被接管才证明偏移没被
+    前一条带歪。
+    """
+    port = free_port()
+    seen: list[bytes] = []
+    first = fc06(4, 0x0058, tid=1)
+    with open_backend(tunnel_project(port).channels[0],
+                      packet_sink=rx_chunks(seen)) as backend:
+        sock = raw_master(port)
+        try:
+            sock.sendall(first[:10])
+            wait_for(lambda: len(seen) == 1, timeout=5.0, what="the half frame arrives")
+            sock.sendall(first[10:])
+            read_adu(sock)                              # 从站答了第一条
+            sock.sendall(fc06(2, 0x4050, tid=2))
+            wait_for(lambda: not backend.source_is_waveform(11, "hr", 2),
+                     timeout=5.0,
+                     what="a whole frame after a replayed half is still framed")
+            assert [len(chunk) for chunk in seen] == [10, 12, 12], seen
+            assert not backend.source_is_waveform(11, "hr", 4)
+        finally:
+            sock.close()
+
+
+def test_a_chunk_whose_length_field_lies_does_not_take_over_anything(open_backend):
+    """长度字段撒谎的字节块（扫描工具、半坏的 485 桥）不许往归属状态里塞任何一个点：它解不出
+    真的写报文，而塞进去的键没有任何点位能恢复回来，界面上就是一堆来路不明的"已停"。
+
+    撒谎的长度同样会把 `pymodbus` 自己的组帧卡住（实测它按字段死等），那条写压根落不到
+    寄存器上，所以"这一段一个都不认"对得上协议现实。换一台主站之后必须照旧认得写：这条
+    把"这一台不认"和"永远瞎掉"分开——垃圾不许跟着下一台连接走。
+    """
+    port = free_port()
+    seen: list[bytes] = []
+    with open_backend(tunnel_project(port).channels[0],
+                      packet_sink=rx_chunks(seen)) as backend:
+        sock = raw_master(port)
+        sock.sendall(b"\x00\xff\x00\x00\xff\xff\x0b\x10")   # length=65535：不可能是帧
+        wait_for(lambda: len(seen) == 1, timeout=5.0,
+                 what="the lying header reaches the sink")
+        assert backend._sources.cleared() == 0, "撒谎的帧头也敢标接管"
+        sock.close()
+        client = connect(port)                          # 下一台主站，同一条通道
+        try:
+            assert client.write_register(4, 0x0058, device_id=11).registers == [0x0058]
+        finally:
+            client.close()
+        assert not backend.source_is_waveform(11, "hr", 4), "上一台的垃圾把这一台带瞎了"
+
+
 def test_the_probe_does_not_refuse_a_port_whose_previous_owner_was_killed():
-
     """"杀掉旧实例、立刻起新的"是现场每天做的事：这一次不许拒（两轮回环）。
-
-
 
     本机实测：子进程 bind+listen 在 `127.0.0.1:P`、被 kill 之后立刻
 
