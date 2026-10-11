@@ -47,6 +47,39 @@ def test_ramp_hold_parks_at_the_edge_before_reversing():
     assert waveform_value("ramp", p, 2.5) == pytest.approx(2.0)   # hold 结束后反向
 
 
+def test_ramp_lower_hold_parks_at_the_low_bound_before_reversing():
+    # leg=span/speed=1 秒、cycle=2×leg+2×hold=4 秒，下停段是 [2×leg+hold, cycle)=[3,4)。
+    # 上一条用例只采了上停和下行，下停段一条都没测到 —— 那段写死的 ratio=0.0 改成任何
+    # 别的值，旧套件都还是绿的（评审意见 3）。
+    p = {"from": "0", "to": "4", "speed": "4", "hold": "1"}
+    for t in (3.0, 3.4, 3.5, 3.75, 3.999):                   # 整个 hold 窗口都钉在下界
+        assert waveform_value("ramp", p, t) == pytest.approx(0.0)
+    assert waveform_value("ramp", p, 4.5) == pytest.approx(2.0)  # 下停结束，重新往上走
+    assert waveform_value("ramp", p, 5.0) == pytest.approx(4.0)  # 又是一个周期顶点
+
+
+def test_ramp_from_above_to_hits_the_low_bound_first():
+    # from>to（10→0）时 span 是负数，方向靠 span 的符号自己带；这里把"先下行"的两个
+    # 边界时刻钉住：t=leg=5 秒撞下界，t=cycle=10 秒回到上界。
+    p = {"from": "10", "to": "0", "speed": "2"}
+    assert waveform_value("ramp", p, 0.0) == pytest.approx(10.0)
+    assert waveform_value("ramp", p, 1.0) == pytest.approx(8.0)    # 每秒走 2
+    assert waveform_value("ramp", p, 2.5) == pytest.approx(5.0)
+    assert waveform_value("ramp", p, 5.0) == pytest.approx(0.0)    # 下界，随即反向
+    assert waveform_value("ramp", p, 6.0) == pytest.approx(2.0)
+    assert waveform_value("ramp", p, 10.0) == pytest.approx(10.0)  # 满一周回到起点的值
+    assert waveform_value("ramp", p, 12.5) == pytest.approx(5.0)   # 第二个周期同一位置
+
+
+def test_ramp_from_equal_to_returns_that_constant():
+    # from==to ⇒ span=0 ⇒ leg=0 ⇒ cycle=0，`t % 0` 会 ZeroDivisionError。validate 会拦这种
+    # 配置，但纯函数被 GUI 直接驱动一次也不能崩，所以实现里有 span==0 的提前返回。
+    for t in (0.0, 1.7, 99.0):
+        assert waveform_value("ramp", {"from": "5", "to": "5", "speed": "2"}, t) == 5.0
+    assert waveform_value("ramp", {"from": "-3", "to": "-3", "speed": "1",
+                                    "hold": "2"}, 123.7) == -3.0   # 带 hold 也一样是常量
+
+
 def test_step_cycles_through_values_by_interval():
     p = {"values": "10,20,30", "interval": "5"}
     assert waveform_value("step", p, 0.0) == 10
@@ -65,8 +98,16 @@ def test_random_is_stable_within_one_interval_and_seeded_is_reproducible():
     a = waveform_value("random", p, 3.0)
     assert 0 <= a <= 100
     assert waveform_value("random", p, 9.9) == a          # 同一区间内不许抖
-    assert waveform_value("random", p, 20.3) == waveform_value(
-        "random", {**p, "seed": "7"}, 20.3)                # 同 seed 同 t 同值
+    # 金标准是**常量**，不是这条断言现算的：seed="7"、interval=10、t=20.3 →
+    # bucket=int(20.3/10)=2，值 = Random("7:2").uniform(0.0, 100.0)。字符串播种只取决于种子
+    # 本身（sha512 派生，不掺 pid / 系统熵 / hash 随机化），所以每个新进程都该读到同一个数。
+    # 上一版写的是 f(p, 20.3) == f({**p, "seed": "7"}, 20.3)，而 p 里本来就有 seed="7"，
+    # 两边是同一个字典 —— 删掉 waveform.py 的 seed 分支、全部走 _RUN_SALT 也照样全绿。
+    assert waveform_value("random", p, 20.3) == 25.14189165270887
+    assert waveform_value("random", p, 23.0) == 25.14189165270887   # 同 bucket 换 t 不换值
+    seed8 = waveform_value("random", {**p, "seed": "8"}, 20.3)      # 同 bucket 换 seed
+    assert seed8 == 43.019678404971884
+    assert seed8 != waveform_value("random", p, 20.3)               # seed 必须真的进种子
 
 
 def test_random_without_seed_still_respects_the_bucket_boundary():

@@ -90,14 +90,11 @@ def _random_wave(params: dict[str, str]):
         bucket = int(t / interval)
         # 填了 seed 就完全可复现（同 seed 同 bucket 同值），没填才掺进本次运行的熵
         key = f"{seed}:{bucket}" if seed else f"{_RUN_SALT}:{bucket}"
-        picked = _random.Random(key).uniform(low, high)
-        return round(picked) if _looks_like_int(low) and _looks_like_int(high) else picked
+        # 恒给 float：要不要收成整数由 `clamp_to_datatype` 按 datatype 一处决定，在这里按
+        # `min`/`max` 的字面写法猜类型，会让 float32 点位莫名其妙丢掉小数（spec §5 说的是均匀分布）。
+        return _random.Random(key).uniform(low, high)
 
     return value
-
-
-def _looks_like_int(text) -> bool:
-    return str(text).lstrip("-").isdigit()
 
 
 WAVE_BUILDERS = {"const": _const, "sine": _sine, "ramp": _ramp,
