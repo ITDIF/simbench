@@ -53,7 +53,9 @@ def conventional(area: str, address: int) -> str:
     """裸 0-based 地址 -> 现场惯例写法（厂商点表常用 40001 那一套）。
 
     只由 area+address 现算，不在 `Row` 里另存一份：存了就会有"改了 CSV 忘了改它"这种
-    漂移，而这一列恰好是现场拿去和点表对号的那一列。未知区名直接抛，不猜一个前缀。
+    漂移，而这一列恰好是现场拿去和点表对号的那一列。未知区名直接抛，不猜一个前缀——
+    两个调用方（本模块 `_display`、属性面板 `_update_convention`）各自把这一抛换成
+    `—`，靠的是"抛"和"给标记"分得开：标记只在显示层出现，判定只在 `validate_project`。
     """
     prefix = _CONVENTION.get(area)
     if prefix is None:
@@ -250,9 +252,19 @@ class PointTableView(QtWidgets.QTableView):
 
 
 def _display(row: Row, header: str) -> str:
+    # `4x` 是一行里唯一算出来的格子，也是唯一可能算不出来的：带着错装载的行（区名写成
+    # `holding`）在这里会抛，而这个 dict 一次构造**整行**，`data()` 又被问哪一列都走它
+    # ——一抛就是 10 个格子全抛，Qt 把那行画成空白，操作员连"改完再启动"要开的这一行
+    # 都找不到。所以显示层给"算不出"的标记，与点位属性面板 `_update_convention` 同一个
+    # 口径；`conventional` 自己继续抛（它同时是面板的判定入口，那里靠异常区分"算不出"）。
+    # 猜一个前缀或把 `holding` 当 `hr` 才是这里真正的风险：现场会照着假地址对点表。
+    try:
+        convention = conventional(row.area, row.address)
+    except ValueError:
+        convention = "—"
     return {
         "名称": row.name, "区": row.area, "地址": str(row.address),
-        "4x": conventional(row.area, row.address), "类型": row.datatype,
+        "4x": convention, "类型": row.datatype,
         "字序": row.word_order, VALUE_HEADER: row.value_text,
         "原始寄存器": " ".join(f"{r:04X}" for r in row.registers),
         # spec §7：被人工接管的点，波形列显示"已停"而不是波形名——"曲线还在跑"和

@@ -150,16 +150,36 @@ class Session:
                                  f"{runtime.last_error}")
         return validate_project(project)
 
-    def reindex(self) -> None:
+    def reindex(self, channel: str) -> None:
         """按当前工程重建读写索引，**不停任何通道**（点位属性面板的结构性改动用它）。
 
         `load()` 同样重建索引，但它第一步就是 `_stop_all_locked()`：改一个已停通道的
-        点地址，会把另一路正给网关服务的从站一起停掉——那是新的现场事故（Task 6 裁决）。
-        这里只摊平引用：`_points`/`_rows_meta` 存的本来就是同一批 `Point` 对象，在跑的
-        SimDevice 拿的也是它们，重建不打扰任何通道；`initial`/`datatype`（算 `span` 用）
-        在通道跑着时改不动，所以跨度键不会因此变陈旧。
+        点地址，会把另一路正给网关服务的从站一起停掉——那是新的现场事故。这里只摊平
+        引用：`_points`/`_rows_meta` 存的本来就是同一批 `Point` 对象，在跑的 SimDevice
+        拿的也是它们，重建不打扰任何通道。
+
+        边界，三条，谁都不许误用这个缝：
+
+        * **`channel` 在跑就直接拒绝**（`ValueError`）。摊平是全工程摊的，`channel`
+          说的就是"这次改动落在哪一路名下"：在跑的那一路被重新建键，等于把 `SimDevice`
+          在 `start_channel` 时烘死的地址表和 `_points` 拆成两份真相——界面上的行还按
+          旧地址显示，按旧地址写被挡在"不在点表里"，按新地址写又被在跑的从站拒收，
+          两头都对不上。调用方（`gui/point_props`）本来就在写回**之前**拒绝了这种改动
+          （那份拒绝的理由要带点位名，所以留在面板里），这里的守卫是给下一个调用方的：
+          忘了拒绝也拿不到一份错索引。会话里根本没有这一路的 runtime 时没有"在跑的
+          从站"可拆台，照建。
+        * **不对账通道集合**。加了/删了通道要走 `load()`：`_channels` 在这里一个字不动，
+          新建的通道没人给它 runtime（`start_channel` 找不到人），删掉的通道则留着一个
+          没人再能停的后端。
+        * **兄弟通道在跑是可以的**，这正是它存在的理由。前提是调用方没动任何在跑通道的
+          点位身份（区/地址/类型/初值）——面板靠上面那条拒绝保证这一点。
         """
         with self._lock:
+            runtime = self._channels.get(channel)
+            if runtime is not None and runtime.running:
+                raise ValueError(
+                    f"channel {channel} is running; reindexing would re-key the point "
+                    f"table under the live slave -- stop it first or use load()")
             self._rebuild_index_locked()
 
     @property

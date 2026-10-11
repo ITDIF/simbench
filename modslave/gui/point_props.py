@@ -10,7 +10,9 @@
   个值，是键盘上的字。
 * 类型与区搭不搭配、地址越界、波形参数缺这少那，全部住在 `validate_project` 那一份里：
   先写回工程 → 整份验一次 → 与改前的 error 清单做差集，只报"新增的那几条"；有新增就
-  整体还原（连输入框一起退回），被拒的改动不进工程、不留 dirty。
+  整体还原（连输入框一起退回），被拒的改动不进工程、不留 dirty。差集比较前先把**本次
+  编辑点的新名**换回旧名（`_restore_name`）：错误消息里本来就带着点位名，不换就会把
+  "同一条错换了个称呼"算成新增，于是带错的行永远改不了名。
 
 生效时机（Task 6 控制器裁决，推翻 brief Step 5 的"apply → `session.load`"）：
 `Session.load()` 第一步是 `_stop_all_locked()`——改一个点的地址就把另一路正给网关服务
@@ -18,13 +20,19 @@
 
 * **结构性字段**（区/地址/类型/字序/初值/只读）烘在 `start_channel` 时建好的 `SimDevice`
   里：所属通道**在跑**时一律整体拒绝并点名"先停通道"（不置灰、不半途应用、不排队）；
-  通道停着时改完，没有任何通道在跑就走 `session.load`（索引与三视图一次对上），兄弟
-  通道还在跑就走 `session.reindex`（只重建读写索引，不打扰任何在跑的通道）。
+  通道停着时改完，没有任何通道在跑就走 `session.load`（索引、通道集合与三视图一次
+  对上），兄弟通道还在跑就走 `session.reindex(那一行的通道)`（只重建读写索引，不打扰
+  任何在跑的通道）。
 * **live 安全字段**（名称/波形/波形参数）原地改共享的 `Point` 对象即可：`_tick_once`
   每轮重读同一批对象（Task 3/4 已证），下一拍生效，**绝不**为此重载会话。
 
+点表是**带着 error 也能装载**的（spec §8：操作员开属性… 往往就是为了修那一行）。所以
+存储值落不在合法选项里时（区 `holding`、类型 `float96`、字序 `ABDC`、波形 `triang`），
+面板把那个值**原样补成一项并选中**——默认到第一个合法值就是在屏幕上编一个看着合法的
+错值（表里写 `holding`、面板写 `hr`）。判定与装载侧一个字都不动，面板只是不崩。
+
 `initial`/`datatype` 在跑着时改不动，这条顺带堵住了跨度键的 stale 形状：`Point.span`
-由这两个字段算出，接管键按跨度记，跨度在通道生命周期内不会变（裁决 4）。
+由这两个字段算出，接管键按跨度记，跨度在通道生命周期内不会变，接管键因此不会陈旧。
 
 界面口径（用户定死的几条，`tests/test_gui_point_props.py` 逐条量真实几何）：区/类型/
 字序/波形是平铺的 checkable 单选按钮，**整个面板没有一个 QComboBox**；字序按
@@ -35,12 +43,14 @@ checked/enabled/文字，一个矩形都不许挪；装不下改文案，不加�
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from PySide6 import QtWidgets
 
 from ..project.csv_io import format_wave_param, parse_wave_param
 from ..project.model import AREAS, DATATYPES, WAVEFORMS, WORD_ORDERS, Point, \
-    word_orders_allowed
+    brief_name, word_orders_allowed
 from ..project.validate import error_lines, validate_project
 from .point_table import conventional
 
@@ -55,6 +65,24 @@ _FIELD_LABELS = {"area": "区", "address": "地址", "datatype": "类型",
 
 _NOTICE_WIDTH = 420
 _ERROR_VIEW_HEIGHT = 64
+# 惯例地址算不出时那一格给什么：地址不是数、或区名根本不在表里（带着错装载的行）都算不出，
+# 半截旧值与前缀猜测都会被读成一个真实地址。
+_NO_CONVENTION = "—"
+
+
+@dataclass
+class _Group:
+    """一组平铺单选的摆位档案：容器、换行列数、被选中时要重算什么。
+
+    `_ensure_option` 给脏值补的那一项必须和内置项共用这份档案，否则"带错装载的那一行"
+    点开的面板里会有一组按钮行为不同（补进去的项不重算惯例显示、不收窄字序）——
+    一个面板两种行为正是这类界面最难查的漂移。
+    """
+
+    box: QtWidgets.QWidget
+    columns: int
+    on_select: Callable[[str], None] | None
+
 
 
 class PointPropertiesDialog(QtWidgets.QDialog):
@@ -74,7 +102,7 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self.applied: dict | None = None
         self._error_lines: list[str] = []
         self._tracked: list[QtWidgets.QWidget] = []
-        self._containers: dict[int, QtWidgets.QWidget] = {}
+        self._groups: dict[int, _Group] = {}      # 按 {选项: 按钮} 那份 dict 的 identity 登记
         self.setWindowTitle(f"点位属性：{self._real.name}")
         self._build()
         self._load_widgets(self._point)
@@ -101,15 +129,12 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self.error_view.setReadOnly(True)
         self.error_view.setFixedSize(_NOTICE_WIDTH, _ERROR_VIEW_HEIGHT)
 
-        self.area_buttons = self._radios(AREAS)
-        self.datatype_buttons = self._radios(DATATYPES, columns=6)
+        self.area_buttons = self._radios(
+            AREAS, on_select=lambda _area: self._update_convention())
+        self.datatype_buttons = self._radios(
+            DATATYPES, columns=6, on_select=self._sync_word_orders)
         self.word_order_buttons = self._radios(WORD_ORDERS)
         self.waveform_buttons = self._radios(WAVEFORMS)
-        for button in self.area_buttons.values():
-            button.toggled.connect(lambda checked: checked and self._update_convention())
-        for name, button in self.datatype_buttons.items():
-            button.toggled.connect(
-                lambda checked, n=name: checked and self._sync_word_orders(n))
         self.address_edit.textChanged.connect(self._update_convention)
 
         rows = [("名称", self.name_edit), ("区", self._box(self.area_buttons)),
@@ -124,12 +149,16 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         grid.addWidget(self.error_view, len(rows) + 1, 0, 1, 2)
         grid.addLayout(self._buttons(), len(rows) + 2, 0, 1, 2)
 
-    def _radios(self, names, columns: int = 0) -> dict:
+    def _radios(self, names, columns: int = 0,
+                on_select: Callable[[str], None] | None = None) -> dict:
         """一组平铺的 checkable 单选按钮，按参数顺序交还 {文字: 按钮}。
 
         互斥联动在 click 与程序化 setChecked 两条路上行为不同（隐藏时 click 又走不到），
         所以勾选一律走 `_select` 显式"选中一个、清掉其余"：不依赖那条差异，
         摆上台面前后、隐藏与显示的行为才完全一致。
+
+        `on_select(选项)` 是这组"被选中时要重算什么"，登记进 `_Group`：
+        `_ensure_option` 后补的那一项走同一份档案，两种行为才不是一个面板两套规矩。
         """
         parent_box = QtWidgets.QWidget()
         layout = (QtWidgets.QHBoxLayout(parent_box) if not columns
@@ -137,20 +166,48 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         buttons: dict[str, QtWidgets.QRadioButton] = {}
         for index, name in enumerate(names):
-            button = QtWidgets.QRadioButton(name, parent_box)
-            if columns:
-                layout.addWidget(button, index // columns, index % columns)
-            else:
-                layout.addWidget(button, index)
-            buttons[name] = button
+            buttons[name] = self._add_option(parent_box, layout, index, columns,
+                                             name, on_select)
         parent_box.setFixedSize(parent_box.sizeHint())   # 组容器定尺：勾选变化不推挤
-        self._tracked.extend(buttons.values())
-        self._containers[id(buttons)] = parent_box
+        self._groups[id(buttons)] = _Group(box=parent_box, columns=columns,
+                                           on_select=on_select)
         return buttons
+
+    def _add_option(self, box, layout, index: int, columns: int, name: str,
+                    on_select) -> QtWidgets.QRadioButton:
+        """往一组的摆位里放一个按钮：内置项和脏值补的项共用这一条路。"""
+        button = QtWidgets.QRadioButton(name, box)
+        if columns:
+            layout.addWidget(button, index // columns, index % columns)
+        else:
+            layout.addWidget(button, index)
+        if on_select is not None:
+            button.toggled.connect(
+                lambda checked, option=name: checked and on_select(option))
+        self._tracked.append(button)
+        return button
+
+    def _ensure_option(self, buttons: dict, value: str) -> None:
+        """点表里存着、合法选项里却没有的那个值，原样补成一项。
+
+        带着错装载的行（spec §8：有 error 也照样装，操作员开的就是这一行去修它）默认到
+        第一个合法值，屏幕上出现的就是点表里根本没有的值——表里写 `holding`、面板写
+        `hr`，正是本项目最防的那类"看着合法的错值"。补成一项看得见真相，
+        `validate_project` 那一份判定一个字不动，它仍然是错。
+        补进来的项**不删**：被拒回滚后本体可能还是那个脏值，留着才显示得出来。
+        """
+        if value in buttons:
+            return
+        group = self._groups[id(buttons)]
+        # 空值也是点表里的一个值：给个占位文字，别让一个没字的按钮看着像界面坏了。
+        button = self._add_option(group.box, group.box.layout(), len(buttons),
+                                  group.columns, value or "(空)", group.on_select)
+        buttons[value] = button
+        group.box.setFixedSize(group.box.sizeHint())   # 多一项要算进容器尺寸
 
     def _box(self, buttons: dict) -> QtWidgets.QWidget:
         """某组单选按钮的摆位容器（`_radios` 建好时按 dict 的 id 登记的）。"""
-        return self._containers[id(buttons)]
+        return self._groups[id(buttons)].box
 
     def _address_row(self) -> QtWidgets.QWidget:
         box = QtWidgets.QWidget()
@@ -258,10 +315,15 @@ class PointPropertiesDialog(QtWidgets.QDialog):
                 f"stop the channel first, then change "
                 f"{'/'.join(_FIELD_LABELS[field] for field in structural)}")
         before = set(self._errors())
+        old_name = self._real.name
         old = {field: getattr(self._real, field) for field in changes}
         for field, value in changes.items():
             setattr(self._real, field, value)
-        new = [line for line in self._errors() if line not in before]
+        # 差集比较先对上"称呼"：`validate` 的消息里本来就有点位名（自己的定位串、别人
+        # 引用它的 `already used by`），不改回来就会把"同一条错换了个名字"算成新增，
+        # 带错的行与它的邻居从此互相锁死、谁也别想改名。给操作员看的还是原样那几条。
+        new = [line for line in self._errors()
+               if _restore_name(line, self._real.name, old_name) not in before]
         if new:
             for field, value in old.items():
                 setattr(self._real, field, value)
@@ -279,11 +341,11 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         if structural:
             # 结构性改动必须让 `Session._points`（按 area+address 建键）跟上，否则启动
             # 之后按新地址写值会被挡在"不在点表里"。没有任何通道在跑 → load（裁决原话，
-            # 顺带把三视图重建到同一份事实上）；兄弟通道在跑 → reindex，绝不为一个已停
-            # 通道的小编辑停掉正在服务网关的那一路。
+            # 顺带把三视图与通道集合重建到同一份事实上）；兄弟通道在跑 → reindex(这一行的
+            # 通道)，绝不为一个已停通道的小编辑停掉正在服务网关的那一路。
             if any(self._channel_running(name)
                    for name in self._session.channel_names()):
-                self._session.reindex()
+                self._session.reindex(self._key[0])
             else:
                 self._session.load(self._project)
         self._session.mark_dirty()
@@ -318,23 +380,38 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         try:
             address = int(text)
         except ValueError:
-            self.convention_label.setText("—")       # 地址不是数：惯例地址无从算，明说
+            self.convention_label.setText(_NO_CONVENTION)   # 地址不是数：算不出，明说
             return
-        self.convention_label.setText(
-            conventional(self._checked(self.area_buttons), address))
+        try:
+            self.convention_label.setText(
+                conventional(self._checked(self.area_buttons), address))
+        except ValueError:
+            # 带着错装载的行，区名可以是 `holding` 这种合法表里没有的东西：`conventional`
+            # 对未知区名直接抛（它不猜前缀）。这一格给"算不出"，不给半截旧值，
+            # 也不在面板里抄第二份区名白名单——那份判定住在 validate_project 里。
+            self.convention_label.setText(_NO_CONVENTION)
 
     def _load_widgets(self, point: Point) -> None:
         # 单选组先摆正，再写地址框：setText 会触发 textChanged → `_update_convention`
         # → `_checked(area)`，组里还没勾任何一项时那条断言就会炸在构造路上。
         self.name_edit.setText(point.name)
-        self._select(self.area_buttons, point.area)
-        self._select(self.datatype_buttons, point.datatype)
-        self._select(self.word_order_buttons, point.word_order)
-        self._select(self.waveform_buttons, point.waveform)
+        self._load_choice(self.area_buttons, point.area)
+        self._load_choice(self.datatype_buttons, point.datatype)
+        self._load_choice(self.word_order_buttons, point.word_order)
+        self._load_choice(self.waveform_buttons, point.waveform)
+        # 补进来的那一项是在"类型"那一步的收窄**之后**才出现的，`_sync_word_orders` 没
+        # 见过它。按当前类型再收窄一次：脏字序与"合法但被收窄"的字序在界面上才是同一个
+        # 形状（勾选 + 置灰），而面板依旧不替操作员重置字序。
+        self._sync_word_orders(point.datatype)
         self.address_edit.setText(str(point.address))
         self.initial_edit.setText(point.initial)
         self.wave_param_edit.setText(format_wave_param(point.wave_param))
         self.readonly_check.setChecked(point.readonly)
+
+    def _load_choice(self, buttons: dict, value: str) -> None:
+        """把这个点位存的值摆进组里：合法选项里没有就先补一项，然后选中它。"""
+        self._ensure_option(buttons, value)
+        self._select(buttons, value)
 
     def _select(self, buttons: dict, name: str) -> None:
         for option, button in buttons.items():
@@ -342,6 +419,12 @@ class PointPropertiesDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _checked(buttons: dict) -> str:
+        """组里当前选中的那一项。
+
+        不许在这里"退回第一个选项"：调用方要的就是界面上选中的那个值，猜一个就等于
+        替操作员做了一个他没做过的决定。`_load_choice` 保证组里永远有一项被选中，
+        包括点表里存的脏值——所以走不到下面这句。
+        """
         for option, button in buttons.items():
             if button.isChecked():
                 return option
@@ -363,6 +446,19 @@ class PointPropertiesDialog(QtWidgets.QDialog):
     def _show_errors(self) -> None:
         # β 口径：拒绝理由要在屏幕上看得见，只把返回值给调用方等于没拒绝。
         self.error_view.setPlainText("\n".join(self._error_lines))
+
+
+def _restore_name(line: str, new_name: str, old_name: str) -> str:
+    """把错误行里"本次编辑点的新名"换回它的旧名——只为和改前那份清单对得上。
+
+    点位名会出现在两类消息里：这一行自己的定位串，和别人的 `already used by X`。
+    两者都由 `brief_name` 渲染（限长口径在同一处），所以这里也按 `brief_name` 的形式换，
+    长名字被截断后照样换得回来。这不是判定、也不改清单：判定与消息全文都只住在
+    `validate_project` 一份里，本函数只服务于"哪些是本次改动新增的"那一次差集比较。
+    """
+    if not new_name or new_name == old_name:
+        return line
+    return line.replace(brief_name(new_name), brief_name(old_name))
 
 
 def _find_point(project, key: tuple) -> Point:

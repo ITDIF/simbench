@@ -30,6 +30,7 @@ from modslave.engine.session import Row, Session
 from modslave.gui.point_table import (COLUMNS, PointTableModel, PointTableView,
                                       conventional)
 from modslave.project.model import Project, TcpChannel
+from modslave.project.validate import validate_project
 from tests.conftest import free_port
 
 CSV = "examples/covi-tunnel.csv"
@@ -117,6 +118,75 @@ def test_readonly_points_are_marked_in_their_own_column(model):
 def test_vertical_header_is_the_one_based_row_number(model):
     assert model.headerData(0, QtCore.Qt.Vertical) == "1"
     assert model.headerData(2, QtCore.Qt.Horizontal) == "地址"
+
+
+# ---------- 带着错装载的行：算不出那一格，但整行必须还在 ----------
+
+DIRTY_CSV = """\
+channel,device,unit_id,name,area,address,datatype,word_order,initial,waveform,wave_param,readonly
+tcp-1,D,1,坏点,holding,0,uint16,ABCD,7,const,,false
+tcp-1,D,1,好点,hr,1,uint16,ABCD,8,const,,false
+"""
+
+
+@pytest.fixture
+def dirty_table(qapp, tmp_path):
+    """一张**带着 error 装载**的真表：`Session.load`/spec §8 允许，操作员要开的就是它。
+
+    走 `load_point_table` 而不是手搓 `Row`：`[area] tcp-1/D/坏点 (line 2)` 这条判定的
+    定位串里有 CSV 行号，只有真读出来的工程才带着它——判定与显示得对同一份事实说话。
+    """
+    path = tmp_path / "dirty.csv"
+    path.write_text(DIRTY_CSV, encoding="utf-8")
+    project, _notes, issues = load_point_table(str(path))
+    table = PointTableModel()
+    table.attach(FakeEngine(project))
+    return table, project, issues
+
+
+def test_a_row_with_an_unknown_area_still_renders_every_column(dirty_table):
+    """`4x` 是一行里唯一**算出来**的格子，它抛就等于整行抛。
+
+    `_display` 一次构造整行，而 `data()` 不管被问哪一列都会把那一行整个算一遍——实测
+    修法之前 10 列全报 `ValueError: unknown area 'holding'`，Qt 只能把那一行画成空白：
+    "改完再启动"这条路断在表格里，而不是断在属性面板里（面板那一侧上一轮已经给了 `—`）。
+    算不出就给 `—`（与 `_update_convention` 同一个标记），一个字都不猜。
+    """
+    table, _project, _issues = dirty_table
+    bad = next(r for r in range(table.rowCount()) if table.row_at(r).area == "holding")
+    shown = {spec.header: table.index(bad, col).data()
+             for col, spec in enumerate(COLUMNS)}      # 每一格都得读得出来，不许抛
+    assert len(shown) == len(COLUMNS)
+    assert all(v is not None for v in shown.values()), \
+        "兜成 None 也是空白行：Qt 画不出来的现场症状和抛异常一模一样"
+    assert shown["4x"] == "—", "未知区名算不出惯例地址：给标记，不许留空也不许猜一个前缀"
+    assert shown["名称"] == "坏点", "整行的其他格子本来就是好的，别一起吞掉"
+    assert shown["区"] == "holding", "脏区名原样显示：显示成 hr 就是把点表里的错洗白了"
+    assert shown["当前值"] == "7" and shown["只读"] == ""
+
+
+def test_the_good_row_of_a_dirty_table_still_renders_as_usual(dirty_table):
+    """放宽只针对算不出的那一格：合法行一个字节都不许变。
+
+    写成"整行 except → 一律给 `—`"这一条就先红——那种修法把 10 列的显示换成了 10 列的
+    自证，好行也跟着说不清自己了。
+    """
+    table, _project, _issues = dirty_table
+    assert [table.index(1, col).data() for col in (0, 1, 3, 6, 7)] == \
+        ["好点", "hr", "4x00002", "8", "0008"]
+
+
+def test_showing_a_dirty_row_does_not_make_it_valid(dirty_table):
+    """显示层容忍 ≠ 判定放宽：那一格能读出来，不代表这一行能启动。
+
+    判定只有 `validate_project` 一份这一条纪律，在"表格里也画得出来"之后最容易被人
+    顺手删掉（画得出来看着就像没病了），所以这里把两条并排钉在一起。
+    """
+    table, project, issues = dirty_table
+    assert table.rowCount() == 2
+    errors = [str(i) for i in validate_project(project) if i.level == "error"]
+    assert errors == ["[area] tcp-1/D/坏点 (line 2): unknown area 'holding'"]
+    assert [str(i) for i in issues] == errors, "装载时与事后各算一遍，两遍必须一样严"
 
 
 # ---------- 可编辑性（α） ----------
