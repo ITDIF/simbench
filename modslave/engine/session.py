@@ -383,8 +383,8 @@ class Session:
 
         签名里只有**基础地址**，跨度在这里自己算：`Session` 手里有摊平的点表，取出该点的
         `pt.span` 再投给 backend。少传跨度就会让一个 4 格的 uint64 恢复之后仍留 3 格是
-        `manual`——接管计数永远回不了零，而那三格地址此后再没有任何东西会去动它们
-        （`is_waveform` 判的是基础格，尾巴上的格子却还留在状态里）。
+        `manual`——按地址数的 `SourceStore.cleared()` 因此永远回不了零，而按点数的那个
+        （`manual_count` 只问基础格）根本看不见这三格，界面上一切正常、地址却再也归不了波形。
 
         两条拒绝（不在点表 / 通道没在跑）都是日志一句话 + `False`，不许从 Qt 槽位里逃出
         `AttributeError`（M1 的 `_require_writer` 钉过同形问题）。恢复了什么要点名，

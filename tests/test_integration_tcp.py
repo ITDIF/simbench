@@ -1180,7 +1180,8 @@ def test_the_same_point_reports_both_failure_stages(open_backend):
 
 
 def test_a_backend_nobody_listens_to_keeps_no_dedupe_book(open_backend):
-    """`log_sink=None` 是无头 CLI 与 M1/M2 绝大多数用例的形状：这里 `_emit` 必须原样不做事。
+    """`log_sink=None` 是 M1/M2 绝大多数用例的形状（无头 CLI 自己接 `_runtime_log`）：
+    这里 `_emit` 必须原样不做事。
 
     留着"照样拼消息、照样往去重表记时间戳、最后把 `None(...)` 的 TypeError 吞掉"那条路，
     等于给每一拍 tick 记一份没人看的账，而表里的时间戳还会替一个不存在的听众把后面同类的
@@ -1273,8 +1274,8 @@ def test_an_unexpected_tick_error_is_reported_and_the_loop_keeps_running(engine_
 
 def test_a_started_channel_routes_waveform_warnings_into_the_session_log(engine_runner):
     """`Session.start_channel` 必须把 `log_sink` 接到 `publish_log`：接不上时 backend 那套
-    去重日志只活在测试里，界面与无头 CLI 一条都收不到，spec §8 承诺的"越界/算不出来要有
-    那一条日志"就还是空的。
+    去重日志只活在测试里，界面一条都收不到（无头 CLI 有自己那一份 `_runtime_log`，接的是
+    同一个 `_emit`），spec §8 承诺的"越界/算不出来要有那一条日志"就还是空的。
 
     走的是生产那一条完整路：`Session` 起通道 → 工程里的 `tick_ms` 交下去 → 真 tick 在引擎
     线程上算出越界值 → 同一线程把 `LogLine` 发进事件流（三个 sink 都在引擎 loop 线程上被调，

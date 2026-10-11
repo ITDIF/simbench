@@ -99,9 +99,9 @@ exe 打包（PyInstaller）不在 v1，风险见 §13。
 
 ```
 gui/        PySide6：设备树 + 点位表 + 报文窗 + 启停控制 + CSV/工程对话框
-engine/     SlaveEngine：唯一对 GUI 暴露的门面（命令队列 + 事件回调）
-backend/    Backend 抽象 + ModbusTcpBackend / ModbusRtuBackend（pymodbus 只出现在这里）
-codec/      PointCodec：点位值 ↔ 原始寄存器序列（数据类型 × 字序）
+engine/     Session：唯一对 GUI 暴露的门面（启停/改值/拉取行 + 事件订阅），线程由 EngineRunner 持有
+backend/    ModbusTcpBackend（pymodbus 只出现在这里）；`Backend` 抽象与 ModbusRtuBackend 是 M5 的缝（§9）
+codec/      point_codec：点位值 ↔ 原始寄存器序列（数据类型 × 字序）
 project/    数据模型（Project/Channel/Device/Point）+ project.json + CSV 读写 + 校验
 ```
 
@@ -118,9 +118,13 @@ project/    数据模型（Project/Channel/Device/Point）+ project.json + CSV �
 
 关键接口：
 
-- `SlaveEngine.start(project) / stop() / set_point(ch, unit, area, addr, value) / snapshot()`
-- `Backend.build(devices: list[SimDevice]) -> context` / `serve()` / `stop()`
-- `PointCodec.encode(value) -> list[int]` / `decode(registers: list[int]) -> value`
+- `Session.load(project) / start_channel(name) / stop_channel(name) / set_point(ch, unit, area,
+  addr, value) / rows(ch) / restore_waveform(...) / subscribe(sink) / shutdown()`
+- `build_sim_devices(project) -> list[SimDevice]`（`backend/simdev.py`）；
+  `ModbusTcpBackend(channel, packet_sink, on_connection, tick_ms, log_sink)` 的
+  `start()` / `stop()` 两个协程
+- `codec/point_codec.encode(value, datatype, word_order) -> list[int]` /
+  `decode(registers, datatype, word_order) -> value`（`PointCodec` 这个类不存在，是一组模块函数）
 - 波形（`codec/waveform.py`）：`waveform_value(name, params, t) -> value` 纯函数（可注入时间戳
   做确定性测试），注册表 `WAVE_BUILDERS` 按名字装配；`clamp_to_datatype(value, datatype) ->
   (value, clamped)` 负责把值钳进类型区间
@@ -279,8 +283,9 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
   到达落地（不是界面侧的"我记得写过"）。点位表"波形"那一列显示 `已停`（占原来那一格的文案位，
   列宽列序不动）。两条实测边界：**主站写只读点被协议拒绝（异常码 2）时不切 manual**——
   一次没成功的写不该把曲线停了，而引擎自己的 `raw_writer` 写得进只读点，混起来更难查；
-  **右键"恢复波形"按点位跨度整段放行**——占 4 格的 uint64 只恢复基础格时那 3 格会永远标着
-  manual，状态栏那句"有 N 处被接管"（按**点位**计，`Session.manual_count`）也就永远回不了零。
+  **右键"恢复波形"按点位跨度整段放行**——占 4 格的 uint64 只恢复基础格时那 3 格地址此后再
+  没有东西去动它们，而按**点位**计的状态栏（`Session.manual_count` 问的是各点的基础格）恰好
+  看不见这件事：那一格会正常回到 0。
   这样测平台下发命令时不会出现"值被波形顶掉、误判下发没生效"。证据：
   `tests/test_integration_tcp.py::test_a_master_write_survives_the_waveform_tick`、
   `::test_a_master_write_of_a_coil_survives_the_waveform_tick`（FC05 那条走 `write_bits`，

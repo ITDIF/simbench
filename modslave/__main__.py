@@ -90,9 +90,12 @@ def _apply_overrides(project, host: str | None, port: int | None) -> bool:
     return True
 
 
-async def _serve(channel, quiet: bool, tick_ms: int = 0) -> None:
+async def _serve(channel, quiet: bool, tick_ms: int) -> None:
     """起一路无头从站。`tick_ms > 0` 时波形按节拍自己动（M4）——命令行与 GUI 起的是同一个
-    工程，读到同一批点表，就不该一个有曲线一个没有。"""
+    工程，读到同一批点表，就不该一个有曲线一个没有。
+
+    `tick_ms` 不给默认值：默认 0 就是"忘了传也照样起监听、只是曲线静默不动"，而那正是
+    这一路 M4 之前的缺陷形状。调用方必须表态。"""
     backend = ModbusTcpBackend(channel, packet_sink=None if quiet else _line,
                                tick_ms=tick_ms, log_sink=_runtime_log)
     await backend.start()

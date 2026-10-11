@@ -371,7 +371,8 @@ def test_cancelling_the_serve_task_releases_the_port():
     assert channel.port == port                   # 覆盖是真的落到了通道上
 
     async def scenario():
-        task = asyncio.create_task(cli._serve(channel, quiet=True))
+        # tick_ms 显式给 0：这一条只验"取消任务后监听真被释放"，曲线动不动与它无关
+        task = asyncio.create_task(cli._serve(channel, quiet=True, tick_ms=0))
         await wait_for_listener(port, task)
         task.cancel()                             # 与 SIGINT 处理函数同一个动作
         with contextlib.suppress(asyncio.CancelledError):
