@@ -564,7 +564,7 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "feat: 值归�
 - Consumes: Task 1 的 `waveform_value(name, params, t)`、`clamp_to_datatype(value, datatype)`；Task 2 的 `SourceStore`、`write_targets(packet)`
 - Produces:
   - `ModbusTcpBackend(channel, packet_sink=None, on_connection=None, tick_ms=0)`；`tick_ms=0` 表示**不起 tick**（M1 那条 CLI 冒烟与现有用例的形状不变）
-  - `ModbusTcpBackend._tick_once(now: float) -> int`（返回写掉的点数）、`.mark_manual(unit_id, area, address, count, who)`、`.restore_waveform(unit_id, area, address) -> bool`、`.manual_keys() -> set`
+  - `ModbusTcpBackend._tick_once(now: float) -> int`（返回写掉的点数）、`.mark_manual(unit_id, area, address, count, who)`、`.restore_waveform(unit_id, area, address, count) -> bool`、`.source_is_waveform(unit_id, area, address) -> bool`（给 `rows()` 用；**不外泄 `manual_keys()` 这种整表快照**，Task 2 复审的口径：调用方要什么就给什么）
   - `Row` 尾部新增 `source: str = "waveform"`（有默认值，位置契约不变——见 Step 1 的理由）
   - `Session.restore_waveform(channel, unit_id, area, address) -> bool`、`Session.manual_count(channel) -> int`
 
@@ -705,7 +705,7 @@ def test_the_tick_task_dies_with_the_backend(engine_runner):
   ```
   三条判据各钉一件事：① **`pt.span` 展开**——主站从 4 个字节的 `uint64` 中间那一格写起时，按裸地址记会让点的基础格仍留在波形手上，下一 tick 就把整点顶掉（评审实测）；② **`pt.readonly` 跳过**——主站写只读点会被协议拒绝（异常码 2），但 rx 报文照样解码成"写"，不过滤就会出现"一次没成功的写把波形停了"，而引擎侧 `raw_writer` 是能写只读点的，症状更难查；③ 落在点跨度外的地址（点表没有的格子）直接忽略，不往状态里塞键。
 - `_packet_sink` 一次拿到的可能是**半个帧或两个帧粘在一起**（pymodbus 在组帧前就 trace）。`write_targets` 只解**一个**帧，所以这里要按 MBAP 长度字段自己切：`while len(buf) >= 8 and len(buf) >= 6 + buf[4]` 那样先切帧再逐帧解；切不出来的余量留给下一包。**这条不做的话"接管"会漏判**，且漏得没有声音。
-- `Session.restore_waveform(channel, unit_id, area, address)`：`self._runner.call(lambda: runtime.backend.restore_waveform(...), _WRITE_TIMEOUT, f"restore waveform {area} {address} (unit {unit_id})")`，并把结果发成一条 `LogLine`（恢复了什么要点名，别静默把值交还波形）。
+- `Session.restore_waveform(channel, unit_id, area, address)`：**签名只有基础地址，跨度要在这里自己算**——`Session` 有摊平的点表索引，取出该点的 `pt.span` 再 `self._runner.call(lambda: runtime.backend.restore_waveform(..., count=pt.span), _WRITE_TIMEOUT, f"restore waveform {area} {address} (unit {unit_id})")`。Task 2 的 `SourceStore.restore(..., count=1)` 与 `own` 对称：少传跨度就会让一个 `uint64` 恢复后仍留 3 格是 `manual`，状态栏的接管计数永远回不了零。把结果发成一条 `LogLine`（恢复了什么要点名，别静默把值交还波形）。
 - `runtime.running is False` 时调用这三条，一律按现有"通道没在跑"的拒绝口径返回，不许抛 `AttributeError`（`_require_writer` 那条已钉过同形问题）。
 
 - [ ] **Step 6: `rows()` 把 `source` 带出去**
