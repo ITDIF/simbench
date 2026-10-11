@@ -693,7 +693,18 @@ def test_the_tick_task_dies_with_the_backend(engine_runner):
 
 - `Session.start_channel`：`ModbusTcpBackend(channel, packet_sink=..., tick_ms=self._project.tick_ms)`。
 - `Session.set_point` 写成功后：把这次写当成"人工接管"——`runtime.backend.mark_manual(unit_id, area, address, count=len(registers), who="gui")`。**写法**：`set_point` 的寄存器写是 `self._runner.call(lambda: _awrite(...))` 投回 loop 线程执行的，`mark_manual` 必须在**同一个 lambda 里之后**做（不要在主线程直接调），否则就是往 loop 线程的状态里插一脚。
-- `ModbusTcpBackend._packet_sink` 的回调里（跑在 loop 线程，与 `SourceStore` 同线程）：收到 rx 写报文就 `for unit, area, address, count in write_targets(...) or (): self._sources.own(self.channel_name, unit, area, address, count, who="master")`。CLI 无头路径天然生效（sink 是 backend 直调，不依赖 GUI）。
+- `ModbusTcpBackend._packet_sink` 的回调里（跑在 loop 线程，与 `SourceStore` 同线程）：收到 rx 写报文后**不许**把解出的区间原样 `own()` 进去，必须**按点位跨度落到点上**——spec §7 说的是"那个点"切 `manual`，不是"那几格寄存器"：
+  ```python
+  for unit, area, address, count in write_targets(event) or ():
+      for point_unit, pt in self._wave_points:
+          if point_unit != unit or pt.area != area or pt.readonly:
+              continue
+          if address <= pt.address < address + count:      # 写落在点的跨度内（含起于中间）
+              self._sources.own(self.channel_name, unit, pt.area, pt.address,
+                                count=pt.span, who="master")
+  ```
+  三条判据各钉一件事：① **`pt.span` 展开**——主站从 4 个字节的 `uint64` 中间那一格写起时，按裸地址记会让点的基础格仍留在波形手上，下一 tick 就把整点顶掉（评审实测）；② **`pt.readonly` 跳过**——主站写只读点会被协议拒绝（异常码 2），但 rx 报文照样解码成"写"，不过滤就会出现"一次没成功的写把波形停了"，而引擎侧 `raw_writer` 是能写只读点的，症状更难查；③ 落在点跨度外的地址（点表没有的格子）直接忽略，不往状态里塞键。
+- `_packet_sink` 一次拿到的可能是**半个帧或两个帧粘在一起**（pymodbus 在组帧前就 trace）。`write_targets` 只解**一个**帧，所以这里要按 MBAP 长度字段自己切：`while len(buf) >= 8 and len(buf) >= 6 + buf[4]` 那样先切帧再逐帧解；切不出来的余量留给下一包。**这条不做的话"接管"会漏判**，且漏得没有声音。
 - `Session.restore_waveform(channel, unit_id, area, address)`：`self._runner.call(lambda: runtime.backend.restore_waveform(...), _WRITE_TIMEOUT, f"restore waveform {area} {address} (unit {unit_id})")`，并把结果发成一条 `LogLine`（恢复了什么要点名，别静默把值交还波形）。
 - `runtime.running is False` 时调用这三条，一律按现有"通道没在跑"的拒绝口径返回，不许抛 `AttributeError`（`_require_writer` 那条已钉过同形问题）。
 
