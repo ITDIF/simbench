@@ -105,9 +105,10 @@ def test_cleared_counts_the_addresses_under_takeover():
 def test_a_restore_clears_exactly_the_address_it_was_given():
     """多寄存器点的尾巴**不会**跟着基础地址一起放行——这条把口径钉死，免得各写各的。
 
-    `restore` 的签名里只有 address（Task 3 的 `restore_waveform` 就按这个调），所以
-    按点恢复整段是调用方的事：要么它自己对 4 个地址各调一次，要么界面接受"尾巴仍标着
-    manual"。这里断言的是**现在的**行为，不是最省事的行为——真要改，红的第一时间就是这个文件。
+    `restore` 的 `count` 默认 1（单寄存器点省事，也是 brief 那条 `restore(*K) is True`
+    用的形状），所以"按点整段放行"是调用方的事：Task 3/5 手里有 `pt.span`，必须把它传进来
+    （见 `test_restoring_a_multi_register_point_clears_the_whole_span`）。这里断言的是**没传
+    跨度时**的行为，不是最省事的行为——真要改默认值，红的第一时间就是这个文件。
     """
     store = SourceStore()
     store.own("tcp-5020", 11, "hr", 5, count=4, who="master")
@@ -115,6 +116,73 @@ def test_a_restore_clears_exactly_the_address_it_was_given():
     assert store.is_waveform("tcp-5020", 11, "hr", 5)
     assert not store.is_waveform("tcp-5020", 11, "hr", 6)
     assert store.cleared() == 3
+
+
+def test_restoring_a_multi_register_point_clears_the_whole_span():
+    """spec §7 的归属单位是**点位**：4 个寄存器的 uint64 按基础地址 + `count=4` 恢复，
+    整段都得回到波形手上，`cleared()` 也要回得去 0。
+
+    留尾巴的代价是看得见的两处：状态栏那句"有 N 处被接管"只增不减（`cleared()` 数的是
+    地址），`is_waveform(6)` 还会对着波形正在刷的地址说"仍被接管"。本模块没有点表，
+    所以跨度由调用方传（`own`/`restore` 同一条要求）。
+    """
+    store = SourceStore()
+    store.own("tcp-5020", 11, "hr", 5, count=4, who="master")
+    assert store.cleared() == 4
+    assert store.restore("tcp-5020", 11, "hr", 5, count=4) is True
+    for address in (5, 6, 7, 8):
+        assert store.is_waveform("tcp-5020", 11, "hr", address)
+    assert store.cleared() == 0
+
+
+def test_restoring_with_too_small_a_count_leaves_the_tail_taken_over():
+    """`count` 传小了不会报错，只会留下尾巴——这条把"跨度必须传对"写成断言，别让调用方猜。
+
+    接口没法自己知道 `hr 5` 那个点占几格（点表在调用方手里），只能照给的撤；剩下的那一截
+    还在 manual 上，直到有人按地址把它也放回去。
+    """
+    store = SourceStore()
+    store.own("tcp-5020", 11, "hr", 5, count=4, who="master")
+    assert store.restore("tcp-5020", 11, "hr", 5, count=2) is True
+    assert store.cleared() == 2
+    assert store.is_waveform("tcp-5020", 11, "hr", 6)
+    assert not store.is_waveform("tcp-5020", 11, "hr", 7)
+    assert store.restore("tcp-5020", 11, "hr", 7, count=2) is True
+    assert store.cleared() == 0
+
+
+def test_a_restore_only_touches_the_span_it_was_handed():
+    """段外的接管一个都不许跟着撤：`[address, address+count)` 是闭左开右的那一段。
+
+    "任一命中就整区放行"这种省事写法会把别人正在 manual 的点一起交回波形——那是反向的
+    spec §7 事故（人刚改的值被波形顶回去）。
+    """
+    store = SourceStore()
+    store.own("tcp-5020", 11, "hr", 5, count=1, who="gui")
+    assert store.restore("tcp-5020", 11, "hr", 6, count=3) is False
+    assert not store.is_waveform("tcp-5020", 11, "hr", 5)
+    assert store.cleared() == 1
+
+
+def test_a_non_positive_count_is_clamped_to_the_base_address():
+    """`count <= 0` 在 `own` 与 `restore` 都钳到 1（`max(1, int(count))`）——这是**声明**。
+
+    选钳到 1 而不是"什么都不标"：漏标才是 spec §7 那条"下发被顶回去"的事故，多标一个地址
+    一次 `restore` 就回得来。报文那一路轮不到它兜（qty=0 的坏帧已被 `write_targets` 挡掉，
+    见 `test_a_quantity_of_zero_is_not_a_write`），它兜的是 `count=len(registers)` 这类
+    调用方算出 0 的手滑。
+    """
+    store = SourceStore()
+    store.own(*K, count=0, who="gui")
+    assert store.cleared() == 1
+    assert not store.is_waveform(*K)
+    assert store.restore(*K, count=0) is True        # restore 的钳位与 own 同一条规则
+    assert store.cleared() == 0
+
+    store.own(*K, count=-3, who="master")
+    assert store.cleared() == 1                      # 负数同样只标基础地址
+    assert store.restore(*K, count=-1) is True
+    assert store.cleared() == 0
 
 
 def test_a_write_that_starts_mid_point_leaves_the_base_address_on_the_waveform():
@@ -234,6 +302,23 @@ def test_a_split_rx_chunk_is_read_never_later_than_the_full_frame():
     with_quantity = bytes.fromhex("00AA0000000F" "0B1000050004")
     assert write_targets(through_the_sink(without_quantity)) is None
     assert write_targets(through_the_sink(with_quantity)) == [(11, "hr", 5, 4)]
+
+
+def test_a_chunk_that_stops_inside_the_fixed_pdu_is_not_a_write():
+    """唯一的长度判定 `len(body) < 5` 得两头钉住：短了不认，齐了必须认。
+
+    上面原本还有一道 `len(raw) < 8`，它被这一道整个吞掉（`body = raw[7:]` 之后 8 与 5 判的
+    是同一件事），删掉它没人少测一条；所以这一道现在是最后一道闸，而 05/06 的 count 是写死
+    的 1、`count <= 0` 那道闸对它们**永远不亮**：半个 FC06（只到地址字段）没有这道闸就会被
+    读成"写了 hr 4"，于是凭空停掉一个点——那半帧可能永远不会补全（半坏的 485 桥、缓冲里的
+    残包）。FC16 只到数量**高字节**的那片同理，剩下那半个字节会被读成一个像模像样的小数量。
+    最后一条对照是给"别把这道闸改严"用的：补上值字段那 2 字节就是合法帧，照旧得认。
+    """
+    half_fc06 = bytes.fromhex("00AA00000006" "0B060004")          # 10B：值字段还没到
+    partial_fc16 = bytes.fromhex("00AA0000000F" "0B10000502")     # 11B：qty 只到了高字节
+    assert write_targets(through_the_sink(half_fc06)) is None
+    assert write_targets(through_the_sink(partial_fc16)) is None
+    assert write_targets(through_the_sink(half_fc06 + b"\x00\x58")) == [(11, "hr", 4, 1)]
 
 
 def test_a_chunk_that_carries_two_frames_reads_as_the_first_one_only():

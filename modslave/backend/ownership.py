@@ -29,6 +29,10 @@ class SourceStore:
         `who` 不进 key，也不另存一份：spec §7 的 v1 只有 waveform|manual 两态，第三维一旦
         参与判定，"GUI 接管过、主站又接管过"就要谈谁覆盖谁，而现在的规则是谁都不覆盖。
         它留着只给调用方的日志说"这次是谁动的"，所以两个来源在状态上必须等价。
+        `count <= 0` 钳到 1（只标基础地址那一个）：宁可多标一个也不要一个都不标——漏标就是
+        "平台下发被波形顶回去"那次事故，多标顶多多一次"已停"，一次 `restore` 就回得来。
+        报文那一路轮不到它兜（qty=0 的坏帧已被 `write_targets` 判掉，见
+        `test_a_quantity_of_zero_is_not_a_write`），它兜的是调用方自己把跨度算成 0 的手滑。
         """
         for offset in range(max(1, int(count))):
             self._manual.add((channel, unit_id, area, address + offset))
@@ -36,13 +40,23 @@ class SourceStore:
     def is_waveform(self, channel: str, unit_id: int, area: str, address: int) -> bool:
         return (channel, unit_id, area, address) not in self._manual
 
-    def restore(self, channel: str, unit_id: int, area: str, address: int) -> bool:
-        """只撤这一个地址的接管；没接管过返回 False，调用方才好在日志里说"没恢复过什么"。"""
-        key = (channel, unit_id, area, address)
-        if key not in self._manual:
-            return False
-        self._manual.discard(key)
-        return True
+    def restore(self, channel: str, unit_id: int, area: str, address: int,
+                count: int = 1) -> bool:
+        """把 `[address, address+count)` 这一段还给波形；这一段里原本有 manual 就返回 True。
+
+        `count` 要与当初 `own` 给的那一段一致（默认 1，单寄存器点照旧一个参数就够）。
+        跨度必须由调用方传：spec §7 的归属单位是**点位**，而本模块只认地址（点表在调用方
+        手里），所以"整点放行"只能靠它把 `pt.span` 递进来。少了这一层就会留尾巴——占 4 个
+        寄存器的 uint64 只恢复基础地址时，6/7/8 永远标着 manual：`cleared()`（状态栏那句
+        "有 N 处被接管"）只增不减，`is_waveform(6)` 也会对着波形正在刷的地址说"仍被接管"。
+        一段里一个都没接管过时返回 False，调用方才好在日志里说"没恢复过什么"。
+        `count <= 0` 与 `own` 同样钳到 1。
+        """
+        span = {(channel, unit_id, area, address + offset)
+                for offset in range(max(1, int(count)))}
+        handed_back = span & self._manual
+        self._manual -= handed_back
+        return bool(handed_back)
 
     def cleared(self) -> int:
         """当前被接管的**地址**数（给状态栏/日志一句人话用）。
@@ -76,16 +90,19 @@ def write_targets(packet: PacketEvent) -> list[tuple[int, str, int, int]] | None
     count 直接采信报文，不核对"数量是否真有那么些数据字节"：sink 收到的是**到达的字节块**
     而不是组好的帧（实测半个 FC16 帧也会进 sink），够长就按数量标。宁可早标一次也不要漏标——
     重复标在 set 里是同一个 key，无害；漏标才是 spec §7 那条"值被波形顶回去"的事故。
+    所以这里只有**一处**长度判定 `len(body) < 5`：5 正好是这几个功能码的固定 PDU
+    （05/06 = fc+地址+值，15/16 = fc+地址+数量），够长才认为字段读得出来。它**不是**在验帧
+    完整——MBAP 的 length、byte count、数量 × 2 都不参与判定，本函数也不管一个字节块里挤了
+    几条报文（切帧是调用方的事）。
     """
     if packet.direction != "rx":
         return None
-    raw = packet.raw or b""
     area = _WRITE_FC_AREA.get(packet.function_code)
-    if area is None or len(raw) < 8:
+    if area is None:
         return None
-    body = raw[7:]                      # MBAP(7B) 之后从功能码开始
+    body = packet.raw[7:]                # MBAP(7B) 之后从功能码开始
     if len(body) < 5:
-        return None                     # 分片没落到数量字段：这一条先不当写，下一片到了再认
+        return None                     # 固定 PDU 还没到齐：这一条先不当写，下一片到了再认
     address = int.from_bytes(body[1:3], "big")
     count = 1
     if packet.function_code in (15, 16):
