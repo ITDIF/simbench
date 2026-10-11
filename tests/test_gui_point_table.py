@@ -27,7 +27,8 @@ from modslave.csv_io_entry import load_point_table
 from modslave.engine.point_source import FakeEngine, session_source
 from modslave.engine.runner import EngineRunner
 from modslave.engine.session import Row, Session
-from modslave.gui.point_table import COLUMNS, PointTableModel, conventional
+from modslave.gui.point_table import (COLUMNS, PointTableModel, PointTableView,
+                                      conventional)
 from modslave.project.model import Project, TcpChannel
 from tests.conftest import free_port
 
@@ -405,3 +406,84 @@ def test_the_fake_engine_and_a_real_session_render_the_same_first_screen(qapp,
     # 归属也同一个口径：谁都没写过值时，整列都是波形在跑（`已停` 一个都不许有）
     assert [r.source for r in real_rows] == [r.source for r in fake_rows] == \
         ["waveform"] * len(real_rows)
+
+
+# ---------- 右键菜单（视图） ----------
+
+def _menu_view(qapp, rows: list[Row]) -> PointTableView:
+    """一张真摆上去的表：`visualRect` 要真实几何才量得到行，offscreen 下 show() 就够。"""
+    view = PointTableView()
+    model = PointTableModel(view)
+    model.attach(TwoRowSource(rows))
+    view.setModel(model)
+    view.resize(600, 300)
+    view.show()
+    qapp.processEvents()
+    return view
+
+
+def test_the_row_menu_carries_the_point_name_and_greys_out_the_wrong_rows(qapp):
+    """菜单每一项的判据来自**那一行**的归属：名字进文案，`source` 进 enabled。
+
+    越界行号回空清单而不是抛：右键落在表头或空白处是操作员每天做的事。
+    """
+    view = _menu_view(qapp, [_row("曲线在跑", "1", waveform="sine"),
+                             _row("人工改过", "2", source="manual")])
+    assert view.row_key(0) == ("tcp-5020", 11, "hr", 0)
+    assert view.row_key(9) is None
+    assert [a.text() for a in view.row_menu_actions(0)] == ["恢复波形：曲线在跑"]
+    assert [a.text() for a in view.row_menu_actions(1)] == ["恢复波形：人工改过"]
+    assert [a.isEnabled() for a in view.row_menu_actions(0)] == [False]
+    assert [a.isEnabled() for a in view.row_menu_actions(1)] == [True]
+    assert view.row_menu_actions(9) == []
+
+
+def test_a_right_click_builds_the_menu_for_the_row_under_the_cursor(qapp, monkeypatch):
+    """命中测试逐行：所有行弹同一份菜单（或永远按第 0 行建）等于点恢复甲、还回去乙。
+
+    弹出这一步（`_popup`）是模态嵌套循环，offscreen 里进不去也出不来；用例替掉它，
+    只留"弹的是哪一行的菜单"这一个事实，菜单内容仍由 `_menu_for` 真建。
+    """
+    view = _menu_view(qapp, [_row("曲线在跑", "1", waveform="sine"),
+                             _row("人工改过", "2", source="manual")])
+    popped: list[list[str]] = []
+    ignored: list[int] = []
+    monkeypatch.setattr(PointTableView, "_popup",
+                        lambda self, menu, _pos: popped.append(
+                            [a.text() for a in menu.actions()]))
+
+    class _Click:
+        def __init__(self, point: QtCore.QPoint) -> None:
+            self._point = point
+
+        def pos(self) -> QtCore.QPoint:
+            return self._point
+
+        def globalPos(self) -> QtCore.QPoint:
+            return self._point
+
+        def ignore(self) -> None:
+            ignored.append(1)
+
+    model = view.model()
+    # `visualRect` 是视口坐标，而 `contextMenuEvent` 拿到的是控件坐标：换算交给 Qt 自己，
+    # 用例不许和实现约定同一个错误口径（两侧都按"未映射"写就会一起错）。
+    row_point = view.viewport().mapTo(view, view.visualRect(model.index(1, 0)).center())
+    view.contextMenuEvent(_Click(row_point))
+    assert popped == [["恢复波形：人工改过"]]
+    popped.clear()
+    view.contextMenuEvent(_Click(QtCore.QPoint(10, view.height() - 4)))
+    assert popped == [] and ignored == [1], "空白处右键弹了菜单或没把事件交还出去"
+
+
+def test_triggering_the_row_action_hands_back_that_rows_point(qapp):
+    """动作带回去的必须是**建这一项时那一行**的身份：两行的 key 在这里要分得开。"""
+    rows = [Row("tcp-5020", "COVI-1", 11, "风机状态", "hr", 4, "uint16", "ABCD",
+                "5", (5,), False, "const", False, "manual"),
+            Row("tcp-5020", "COVI-1", 11, "CO浓度", "hr", 0, "float32", "CDAB",
+                "12.5", (0, 1), True, "const")]
+    view = _menu_view(qapp, rows)
+    got: list[tuple] = []
+    view.restore_requested.connect(got.append)
+    view.row_menu_actions(0)[0].trigger()
+    assert got == [view.row_key(0)] == [("tcp-5020", 11, "hr", 4)]

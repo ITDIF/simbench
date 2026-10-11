@@ -41,6 +41,7 @@ from tests.conftest import free_port
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
 VALUE_COLUMN = 6                       # gui/point_table.COLUMNS 里的"当前值"
+WAVE_COLUMN = 8                        # 同一张表里的"波形"：`已停` 与波形名都落在这一列
 
 
 def second_channel(port: int) -> TcpChannel:
@@ -362,6 +363,69 @@ def test_an_engine_timeout_is_reported_with_the_engine_stack_not_as_a_hang(
     # 拆窗在 monkeypatch 撤销**之前**跑（fixture 销毁是安装的反序），不主动撤掉的话
     # teardown 里的 `shutdown()` 会一路撞在这个必然超时的 `call` 上，监听就留在端口上。
     monkeypatch.undo()
+
+
+# ---------- 右键恢复波形 ----------
+
+def test_the_row_menu_offers_restore_only_for_taken_over_rows(make_window, qapp):
+    """置灰而不是删掉：菜单项增删会让弹框高度变，两次右键两种样子。"""
+    window = make_window()
+    relaunch(window, window.session.project, qapp)
+    window.point_model.setData(window.point_model.index(row_of(window, "风机状态"),
+                                                        VALUE_COLUMN), "42")
+    qapp.processEvents()
+    actions = window.point_table.row_menu_actions(row_of(window, "风机状态"))
+    assert [a.text() for a in actions] == ["恢复波形：风机状态"]
+    assert actions[0].isEnabled() is True
+    other = window.point_table.row_menu_actions(row_of(window, "CO浓度"))
+    assert other[0].isEnabled() is False         # 没被接管的行：看得见，点不动
+
+
+def test_triggering_the_restore_command_puts_the_rows_back_under_the_waveform(
+        make_window, qapp):
+    """右键一下要走到引擎为止：恢复的那一行下一次心跳回到波形名下，另一行仍 `已停`。
+
+    状态栏要说"还剩几处在人工接管"——按点数，和点表上看得见的 `已停` 同一个真相
+    （按地址数的 `cleared()` 在这里会给 4，操作员对着两行表格数不出那个数）。
+    """
+    window = make_window()
+    relaunch(window, window.session.project, qapp)
+    for name, text in [("风机状态", "42"), ("启动命令", "true")]:
+        assert window.point_model.setData(
+            window.point_model.index(row_of(window, name), VALUE_COLUMN), text) is True
+    qapp.processEvents()
+    row = row_of(window, "风机状态")
+    assert window.point_model.index(row, WAVE_COLUMN).data() == "已停"
+    window.point_table.row_menu_actions(row)[0].trigger()
+    window._tick()
+    assert window.point_model.index(row, WAVE_COLUMN).data() == "const", \
+        "恢复了而那一行还说 `已停`：命令根本没走到 backend"
+    assert window.point_model.index(row_of(window, "启动命令"), WAVE_COLUMN).data() == "已停"
+    assert "还剩 1 处" in window.status.currentMessage(), \
+        "成功恢复后状态栏没说还剩几处人工接管"
+    window.point_table.row_menu_actions(row_of(window, "启动命令"))[0].trigger()
+    window._tick()
+    assert window.point_model.index(row_of(window, "启动命令"), WAVE_COLUMN).data() == "const"
+    assert "全部交还" in window.status.currentMessage()
+
+
+def test_a_restore_refused_by_the_engine_says_why_in_the_log_without_a_false_count(
+        make_window, qapp):
+    """菜单建好到点下之间通道停了：拒绝要在日志里点名，状态栏不许报出一个数来撒谎。"""
+    window = make_window()
+    relaunch(window, window.session.project, qapp)
+    assert window.point_model.setData(
+        window.point_model.index(row_of(window, "风机状态"), VALUE_COLUMN), "42") is True
+    qapp.processEvents()
+    actions = window.point_table.row_menu_actions(row_of(window, "风机状态"))
+    assert actions[0].isEnabled()
+    window._stop_all()
+    qapp.processEvents()
+    actions[0].trigger()
+    qapp.processEvents()
+    log = window.log_view.toPlainText()
+    assert "not running" in log and "风机状态" in log, log
+    assert "还剩" not in window.status.currentMessage(), "没恢复成就不许给接管计数"
 
 
 # ---------- ζ：一个通道都没起时 ----------

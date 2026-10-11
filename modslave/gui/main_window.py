@@ -37,7 +37,7 @@ from .dialogs import (
     open_project, read_point_table, save_project_as,
 )
 from .packet_view import PacketPanel
-from .point_table import COLUMNS, PointTableModel
+from .point_table import COLUMNS, PointTableModel, PointTableView
 
 _TICK_MS = 100
 _NOTICE_MS = 8000                       # 拒绝理由要在状态栏留够一读的时间，别一闪就没
@@ -65,7 +65,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge = EngineBridge()
         self.point_model = PointTableModel()
         self.tree = DeviceTree()
-        self.table = self._build_table()
+        self.point_table = self._build_table()
         self.packet_panel = PacketPanel(store)
         self.log_view = self._build_log_view()
         self.channels = ChannelPanel(session)
@@ -94,6 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.channel_state.connect(self._on_state)
         self.bridge.logged.connect(self._on_log)
         self.bridge.point_changed.connect(lambda _event: self.point_model.refresh())
+        self.point_table.restore_requested.connect(self._restore_waveform)
         self.session.subscribe(self.bridge.forward)
 
         self.timer = QtCore.QTimer(self)
@@ -104,8 +105,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- 组装 ----------
 
-    def _build_table(self) -> QtWidgets.QTableView:
-        table = QtWidgets.QTableView()
+    @property
+    def table(self) -> PointTableView:
+        """`table` 与 `point_table` 是同一块视图的两个门牌：布局探针
+        （`test_gui_layout_invariant.py`）按旧名量几何，本轮改动不动那个文件。"""
+        return self.point_table
+
+    def _build_table(self) -> PointTableView:
+        table = PointTableView()
         table.setModel(self.point_model)
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         table.setWordWrap(False)
@@ -135,7 +142,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cols = QtWidgets.QHBoxLayout()
         cols.setContentsMargins(0, 0, 0, 0)
         cols.addWidget(self.tree, _TREE_STRETCH)
-        cols.addWidget(self.table, _TABLE_STRETCH)
+        cols.addWidget(self.point_table, _TABLE_STRETCH)
         rows.addLayout(cols, 1)
 
         bottom = QtWidgets.QWidget()
@@ -307,6 +314,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status.showMessage("导出 CSV 失败，原因见日志页", _NOTICE_MS)
             return
         self._log(f"[info] 已导出 CSV -> {target}")
+
+    def _restore_waveform(self, key: tuple) -> None:
+        """右键"恢复波形"：把这一行的点交还给波形，再报还剩几处在人工接管。
+
+        交还本身由 `Session.restore_waveform` 经 `runner.call` 投回 loop 线程，两条拒绝
+        都已经是带点位名的 `LogLine`（桥会写进日志页）——这里不再抄第二套拒绝文案。
+        计数只在**真还回去过东西**之后说：没恢复成还说"还剩 N 处"，那一行明明仍 `已停`，
+        状态栏就成了说谎的那个人。
+        """
+        channel, unit_id, area, address = key
+        if not self.session.restore_waveform(channel, unit_id, area, address):
+            return
+        remaining = self.session.manual_count(channel)
+        self.status.showMessage(
+            f"已交还波形，人工接管还剩 {remaining} 处" if remaining
+            else "已交还波形，人工接管已全部交还", _NOTICE_MS)
 
     # ---------- 心跳与事件 ----------
 

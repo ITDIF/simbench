@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6 import QtCore
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..engine.point_source import PointSource
 from ..engine.session import Row
@@ -77,6 +77,16 @@ class PointTableModel(QtCore.QAbstractTableModel):
 
     def channel(self) -> str:
         return self._channel
+
+    def row_at(self, row: int) -> Row | None:
+        """按行号取正在展示的 `Row`：视图的右键菜单要名字/归属/身份，但不自己抄一份行。
+
+        越界回 `None` 而不是抛——右键落在表头下方空白处是操作员的日常动作，菜单可以不弹，
+        槽函数不许炸。
+        """
+        if 0 <= row < len(self._rows):
+            return self._rows[row]
+        return None
 
     def attach(self, source: PointSource, channel: str = "") -> None:
         """换一个数据源。默认展示这个通道**全部**点位（口径 2：不给"跟随当前上下文"）。"""
@@ -176,6 +186,61 @@ class PointTableModel(QtCore.QAbstractTableModel):
                                   self.index(i, self.columnCount() - 1))
             changed += 1
         return changed
+
+
+class PointTableView(QtWidgets.QTableView):
+    """点位表的视图：右键一行 = 一条命令——把这一行的点交还给波形。
+
+    每一条行**都**给这一项菜单，没人接管的行置灰而**不删**：删项会让弹框高度随行变，
+    操作员两次右键看见两种菜单（本项目把"状态变化动布局"记成缺陷）。文案带上点位名，
+    因为一次只可能恢复右键的那一行，操作员不需要在弹层里再认一次地址。
+    """
+
+    restore_requested = QtCore.Signal(tuple)      # payload = 那一行的 `Row.key`
+
+    def row_key(self, row: int) -> tuple | None:
+        """行号 -> 点位身份 `(channel, unit_id, area, address)`；越界回 `None`。"""
+        found = self._row_at(row)
+        return found.key if found is not None else None
+
+    def row_menu_actions(self, row: int) -> list[QtGui.QAction]:
+        """那一行右键菜单的动作清单：`contextMenuEvent` 与用例走**同一个**构造口。"""
+        menu = self._menu_for(row)
+        return [] if menu is None else menu.actions()
+
+    def contextMenuEvent(self, event) -> None:                # noqa: N802
+        # `event.pos()` 是控件坐标而 `indexAt` 吃的是视口坐标，中间必须过 `mapFrom`；
+        # 两侧都按"没偏移"写的话，带边框的真实视图会整行错位。
+        menu = self._menu_for(
+            self.indexAt(self.viewport().mapFrom(self, event.pos())).row())
+        if menu is None:
+            event.ignore()               # 空白处/表头：没有哪一行可以被恢复
+            return
+        self._popup(menu, event.globalPos())
+
+    def _popup(self, menu, pos) -> None:
+        """弹层唯一的入口。`exec` 是会吞掉用例的模态嵌套循环（`IssueDialog.exec` 同形），
+        所以弹出这一步单独成方法：界面用例替掉它，弹出的**内容**仍由 `_menu_for` 真建。"""
+        menu.exec(pos)
+        menu.deleteLater()
+
+    def _row_at(self, row: int) -> Row | None:
+        model = self.model()
+        return model.row_at(row) if isinstance(model, PointTableModel) else None
+
+    def _menu_for(self, row: int) -> QtWidgets.QMenu | None:
+        found = self._row_at(row)
+        if found is None:
+            return None
+        menu = QtWidgets.QMenu(self)
+        action = menu.addAction(f"恢复波形：{found.name}")
+        # 置灰的判据只有一条归属事实：manual 才谈得上"交还"。不查通道在不在跑——
+        # 没起的通道给不出 manual 行（`_source_of`），真点了而通道恰好停了，
+        # 拒绝由 `Session.restore_waveform` 点名，界面不重复造第二套判定。
+        action.setEnabled(found.source == "manual")
+        key = self.row_key(row)
+        action.triggered.connect(lambda _checked=False: self.restore_requested.emit(key))
+        return menu
 
 
 def _display(row: Row, header: str) -> str:

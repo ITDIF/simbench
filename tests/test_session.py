@@ -912,6 +912,48 @@ def test_the_restore_is_handed_back_on_the_engine_thread_not_the_gui_one(session
     assert session.manual_count("tcp-5020") == 0
 
 
+def test_restoring_puts_the_point_back_under_the_waveform(session):
+    """接管 → 波形不顶 → 恢复 → 波形又拿回去，整条路要能在一个用例里走完。
+
+    tick 是 backend 的事、住在 loop 线程，所以这里用 `runner.call` 走一步；`now` 固定
+    给 0.0，`const` 波形在任何 `t` 上都是同一个值，断言与真实时钟无关。
+    """
+    project = loaded(free_port())
+    p = next(pt for pt in project.channels[0].devices[0].points if pt.name == "风机状态")
+    p.waveform, p.wave_param = "const", {"value": "77"}
+    session.load(project)
+    session.start_channel("tcp-5020")
+    backend = session.channel("tcp-5020").backend
+
+    async def _step() -> int:            # `runner.call` 只收协程工厂，与 `_arestore` 同形
+        return backend._tick_once(0.0)
+
+    tick = lambda: session._runner.call(_step, 10, "test tick")
+    try:
+        assert session.set_point("tcp-5020", 11, "hr", 4, "5").ok
+        tick()
+        assert value_of(session, "风机状态") == "5"          # 被接管，波形一个字都不写
+        assert session.restore_waveform("tcp-5020", 11, "hr", 4) is True
+        tick()
+        assert value_of(session, "风机状态") == "77"         # 还给波形就重新动
+        assert session.restore_waveform("tcp-5020", 11, "hr", 4) is False
+    finally:
+        session.stop_channel("tcp-5020")
+
+
+def test_restore_on_a_stopped_channel_is_a_named_refusal_not_an_attribute_error(session):
+    """没起的通道上点"恢复波形"：给一句带点位名的拒绝，别从 Qt 槽里抛 traceback。
+
+    与 β（拒绝要有名字）同口径：`backend` 这时是 None，裸调就是 `AttributeError`，
+    界面表现为"点了没反应"。
+    """
+    session.load(loaded(free_port()))
+    lines: list[LogLine] = []
+    session.subscribe(lambda e: isinstance(e, LogLine) and lines.append(e))
+    assert session.restore_waveform("tcp-5020", 11, "hr", 4) is False
+    assert any("not running" in l.text and "风机状态" in l.text for l in lines), lines
+
+
 def test_dirty_flag_tracks_edits(session):
     session.load(loaded(free_port()))
     session.start_channel("tcp-5020")
