@@ -922,11 +922,14 @@ def test_the_row_menu_offers_restore_only_for_taken_over_rows(make_window, qapp)
                                                         VALUE_COLUMN), "42")
     qapp.processEvents()
     actions = window.point_table.row_menu_actions(row_of(window, "风机状态"))
-    assert [a.text() for a in actions] == ["恢复波形：风机状态", "属性…"]
+    assert [a.text() for a in actions] == ["恢复波形：风机状态"]
     assert actions[0].isEnabled() is True
     other = window.point_table.row_menu_actions(row_of(window, "CO浓度"))
     assert other[0].isEnabled() is False         # 没被接管的行：看得见，点不动
 ```
+
+> **计划原来这里断言的是两项**（`["恢复波形：风机状态", "属性…"]`）：那会逼 Task 5 先造一个
+> 没人接的"属性…"空动作。`属性…` 与它的面板一起由 Task 6 加，届时这条断言跟着改。
 
 - [ ] **Step 5: 跑测试并提交**
 
