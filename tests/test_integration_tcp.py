@@ -777,6 +777,47 @@ def test_the_tick_task_dies_with_the_backend(engine_runner):
         backend._tick_once(now=time.monotonic())
 
 
+def test_the_tick_cancel_runs_before_the_shutdown_not_after(engine_runner,
+                                                            monkeypatch):
+    """钉住 `stop()` 里"先取消 tick 任务"这条**顺序**本身（要点 2 与 `:354` 的注释）。
+
+    为什么"任务 done 了"顶不掉这条：早取消与晚取消的任务都是 `done()==True`，把
+    cancel 挪到 `server.shutdown()` 之后 837 条照样全绿。能分辨的只有**结束形态**——
+    先取消：任务在 `sleep` 里收到 `CancelledError`，`cancelled()` 为真且永远不带异常；
+    后取消：`_writer` 已经置 None 而 shutdown 的 await 让 loop 转出去，计时器一响，
+    `_tick_once` 就踩进"通道没在跑"的 `RuntimeError` 把任务带崩——正是注释里承诺防住的
+    "停通道时崩一次 / 曲线静默停"。这里让 shutdown 主动让出 5 个 tick 周期（50ms vs
+    tick 10ms），顺序错了就**必然**踩响，不赌真实时序。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    project.channels[0].devices[0].points[0].waveform = "sine"   # CO浓度，tick 一直在写
+    project.channels[0].devices[0].points[0].wave_param = {
+        "base": "20", "amp": "15", "period": "60"}
+    backend = ModbusTcpBackend(project.channels[0], tick_ms=10)
+    engine_runner.call(lambda: backend.start(), 10, "test open")
+    task = backend._tick_task
+    assert task is not None and not task.done(), "tick 任务没起来，这条测不到顺序"
+
+    server = backend._server
+    real_shutdown = server.shutdown
+
+    async def yielding_shutdown():
+        await asyncio.sleep(0.05)     # 晚取消的变异只能在这个窗口里现形
+        await real_shutdown()
+
+    monkeypatch.setattr(server, "shutdown", yielding_shutdown)
+    try:
+        engine_runner.call(lambda: backend.stop(), 10, "test close")
+        engine_runner.call(lambda: asyncio.sleep(0.05), 10, "settle")
+        assert task.done(), "stop 之后 tick 任务仍没结束"
+        assert task.cancelled(), (
+            f"tick 任务不是被取消收掉的（exception={task.exception()!r}）：cancel 排到了 "
+            f"_writer 置 None / shutdown 之后，停通道时任务踩了 'channel is not started'")
+    finally:
+        engine_runner.call(lambda: backend.stop(), 10, "test close again")
+
+
 def test_a_backend_that_was_not_handed_a_tick_ms_has_no_tick_task(open_backend):
     """`tick_ms=0` 是默认，也就是**不起任务**：无头 CLI（M1 那条验收入口）不建 `Session`，
     它起的从站形状因此一个字都没变。只有 `Session.start_channel` 会把工程里的 `tick_ms`
@@ -887,6 +928,87 @@ def test_a_bad_waveform_does_not_kill_the_tick_task(engine_runner):
         assert backend._tick_task is not None and not backend._tick_task.done()
     finally:
         engine_runner.call(lambda: backend.stop(), 10, "test close")
+
+
+def test_the_real_tick_measures_time_since_the_channel_started(engine_runner):
+    """spec §5 的 `t`：**本通道启动以来的单调秒**，不是裸的时钟读数——此前零覆盖。
+
+    既有 tick 用例全用 const / 快 ramp，对错参照系不敏感：`_tick_started` 停在 0.0 时
+    `t` 是开机以来的秒数、loop 里换 `time.time()` 时 `t` 是纪元秒，两者照样产出**格式
+    合法**的值，837 条全绿。所以故意选单程 100000s、速度 1 数值/秒的 ramp：起通道后
+    头几步真 tick 写出的值只可能是个位数，而错参照系给的是大数（uint16 钳位也救不了
+    它回到个位——除非相位正好撞上，概率约十万分之三）；初值 11 证明值确实来自 tick。
+    停再起钉"重新起通道曲线从 0 相位开始"：第二次启动必须重新记 `_tick_started`，
+    沿用旧值/零值的话第二次读到的还是开机秒数。判值不判私有属性：这是"参照系错了"
+    唯一能被**观察**到的形状，私有断言留给下一条钉时钟源本身。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    point = project.channels[0].devices[0].points[2]         # 状态字 hr4 uint16，初值 11
+    point.waveform, point.wave_param = "ramp", {
+        "from": "0", "to": "100000", "speed": "1"}
+    backend = ModbusTcpBackend(project.channels[0], tick_ms=10)
+
+    def first_written_value(what: str) -> int:
+        """等第一步真 tick 落进寄存器（值离开初值 11），返回写进去的那格。"""
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            regs = backend.read_registers(11, "hr", 4, 1)
+            if regs and regs[0] != 11:
+                return regs[0]
+            time.sleep(0.01)
+        raise AssertionError(f"{what}: tick 任务没往寄存器写过")
+
+    engine_runner.call(lambda: backend.start(), 10, "test open")
+    try:
+        first = first_written_value("first start")
+        engine_runner.call(lambda: backend.stop(), 10, "test close")
+        engine_runner.call(lambda: backend.start(), 10, "test reopen")
+        second = first_written_value("restart")
+    finally:
+        engine_runner.call(lambda: backend.stop(), 10, "test close")
+    assert first <= 3, (
+        f"起通道后 t 应当只有零点几秒，真 tick 却写出 {first}：t 的参照系不是本通道启动"
+        "时刻（`_tick_started` 停在 0.0，或 loop 喂的不是单调钟）")
+    assert second <= 3, (
+        f"重新起通道后曲线相位没归零（写出 {second}）：start() 没有重记 _tick_started")
+
+
+def test_the_tick_loop_feeds_the_tick_a_monotonic_reading_not_the_wall_clock(
+        engine_runner, monkeypatch):
+    """`_tick_loop` 递给 `_tick_once` 的必须是 `time.monotonic()`：把时钟**参照**本身钉死。
+
+    上一条按值只能**概率性**抓错参照——错钟给出的也是合法值，撞上相位就绿。这里记录
+    真任务实际传入的 `now` 参数，与本机两个钟直接比：monotonic 是开机秒（本机量级千），
+    纪元秒是十亿量级，两者相差六个数量级，不存在撞相位——判据是传给 tick 的实参，
+    不是私有属性：时钟源错了照样全绿的形状只有这一条照得出。任务仍由真 `_tick_loop`
+    驱动，recorder 只旁听参数并把活转回原函数。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    point = project.channels[0].devices[0].points[2]
+    point.waveform, point.wave_param = "const", {"value": "7"}
+    backend = ModbusTcpBackend(project.channels[0], tick_ms=10)
+    recorded: list[float] = []
+    real_tick = backend._tick_once
+
+    def probe(now: float) -> int:
+        recorded.append(now)
+        return real_tick(now=now)
+
+    monkeypatch.setattr(backend, "_tick_once", probe)
+    engine_runner.call(lambda: backend.start(), 10, "test open")
+    try:
+        deadline = time.monotonic() + 5.0
+        while not recorded and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        engine_runner.call(lambda: backend.stop(), 10, "test close")
+    assert recorded, "tick 任务一次都没调到 _tick_once，上面测了个空"
+    drift = max(abs(now - time.monotonic()) for now in recorded)
+    assert drift < 60.0, (
+        f"_tick_loop 的时钟参照不再是单调钟：记录的 now 与当前单调秒差 {drift:.1f}s"
+        f"（纪元秒与单调秒差约 {time.time() - time.monotonic():.0f}s）")
 
 
 def test_a_point_that_is_not_in_the_datastore_is_skipped_without_breaking_the_round(

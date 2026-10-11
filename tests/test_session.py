@@ -880,6 +880,38 @@ def test_restore_waveform_refuses_without_raising(session):
     assert session.manual_count("tcp-5020") == 0
 
 
+def test_the_restore_is_handed_back_on_the_engine_thread_not_the_gui_one(session,
+                                                                         monkeypatch):
+    """恢复侧的线程纪律，与接管侧（`test_the_takeover_is_recorded_on_the_engine_thread_
+    not_the_gui_one`）成对：`SourceStore` 只许 loop 线程写（spec §13 那条 GC 死锁的同族）。
+
+    为什么必须有这条：把 `Session.restore_waveform` 里的 `runner.call(...)` 换成主线程
+    直调，状态照样恢复、计数照样归零——session+GUI 84 条全绿，跨线程共享却已经发生。
+    判得了的只有线程身份：在 backend 的恢复路径里记录 ident，它必须是引擎线程的，
+    且不是调用方（GUI/测试主线程）的。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    backend = session.channel("tcp-5020").backend
+    assert session.set_point("tcp-5020", 11, "hr", 4, "37").ok
+    assert session.manual_count("tcp-5020") == 1
+    real = backend.restore_waveform
+    seen: list[int] = []
+
+    def record(*args, **kwargs):
+        seen.append(threading.get_ident())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "restore_waveform", record)
+    assert session.restore_waveform("tcp-5020", 11, "hr", 4) is True
+    assert seen and seen[0] != threading.get_ident(), (
+        "恢复在调用方线程上直接跑了：主线程直插 loop 线程的 SourceStore")
+    assert seen == [session._runner.thread_ident], (
+        f"恢复是在 {seen} 线程上做的，引擎线程是 {session._runner.thread_ident}")
+    assert session.manual_count("tcp-5020") == 0
+
+
 def test_dirty_flag_tracks_edits(session):
     session.load(loaded(free_port()))
     session.start_channel("tcp-5020")

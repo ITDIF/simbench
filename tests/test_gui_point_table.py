@@ -272,16 +272,37 @@ def test_the_takeover_shows_up_in_the_wave_column_without_moving_the_table(qapp)
     assert m.index(1, wave + 1).data() == "", "波形列右边已经不是只读列了"
 
 
-def test_the_stale_and_wave_columns_do_not_share_a_value(model):
-    """`stale`（没读到）走角色、`已停`（被接管）走文字：两个状态挤在同一列就会互相顶掉。
+def test_the_stale_and_wave_columns_do_not_share_a_value(qapp):
+    """`stale`（没读到）走角色、`已停`（被接管）走文字：钉的是**同一行两态叠加**。
 
-    现场这两种情形是叠加的（通道在跑、值被人工接管、某次回读还失败了），界面必须同时
-    说得出这两件事，所以这里拿真替身钉住"改文案不动角色"。
+    现场的形状就是叠加的：通道在跑、点被界面/主站接管（`source="manual"`）、某次回读
+    又失败（`stale=True`，那一格显示的是回落的初值）。此时波形列必须仍说得出 `已停`
+    （不许被 stale 顶成空白或波形名），当前值必须仍灰得起来（不许被 `已停` 顶掉角色）。
+    早先版本这条跑在 `model`/FakeEngine 夹具上，而替身从不产生这两种状态（见
+    `point_source.FakeEngine` 的口径）——没有任何一行是 stale 或 manual，"stale 时把波形
+    列清空"和"干脆忽略 stale"两种变异全绿，它实际只是在重复别处钉过的事实。这里换成
+    真带这两种状态的数据源（与 `test_stale_rows_report_their_role` 同一条 attach 路），
+    四种组合逐格对照。
     """
-    r = row_of(model, "CO浓度")
-    assert model.index(r, 8).data() == "const"
-    assert model.index(r, 6).data() == "12.5"
-    assert model.data(model.index(r, 6), model.stale_role()) is False
+    m = PointTableModel()
+    m.attach(TwoRowSource([_row("接管又没读到", "7", waveform="sine", stale=True,
+                                source="manual"),
+                           _row("只被接管", "8", waveform="sine", source="manual"),
+                           _row("只没读到", "9", waveform="sine", stale=True),
+                           _row("谁都没动", "1", waveform="sine")]))
+    wave = [c.header for c in COLUMNS].index("波形")
+    stale_role = m.stale_role()
+    # 叠加行：两个事实必须同时说得出，谁也不许顶掉谁
+    assert m.index(0, wave).data() == "已停", "stale 把接管文案顶掉了"
+    assert m.data(m.index(0, 6), stale_role) is True, "接管把 stale 角色顶掉了"
+    assert m.index(0, 6).data() == "7", "初值回落的文字不许被两种状态改掉"
+    # 单态行各自只说自己那一半，互不越界
+    assert m.index(1, wave).data() == "已停"
+    assert m.data(m.index(1, 6), stale_role) is False, "接管自己不算回读失败"
+    assert m.index(2, wave).data() == "sine", "stale 不许去动波形列的文字"
+    assert m.data(m.index(2, 6), stale_role) is True
+    assert m.index(3, wave).data() == "sine"
+    assert m.data(m.index(3, 6), stale_role) is False
 
 
 def test_the_fake_keeps_every_field_it_does_not_edit(engine):
