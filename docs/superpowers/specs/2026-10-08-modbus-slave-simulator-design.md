@@ -371,13 +371,17 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 4. **M4 波形引擎 + 值归属 + 点位属性面板（已完成）**（const/ramp/sine/random/step）——
    纯逻辑、可全自动测，不依赖硬件，所以排在串口之前。落地在计划
    `docs/superpowers/plans/2026-10-11-modslave-m4-waveform.md`、分支 `m4-waveform`，
-   提交 `7442a49`…`571d103`（Task 1–6 各一轮评审 + 两轮修复，收尾提交由控制器追加）。
-   全量 `.venv/Scripts/python.exe -m pytest` **909 passed**（无 skip、无 xfail，**串行**跑，
+   提交 `7442a49`…`3b79559`（Task 1–6 各一轮评审 + 两轮修复；全分支评审打回一次，两条跨任务
+   缺陷与一处 feature gap 修在 `7279b83`，剩下的措辞与 `_serve` 的默认值修在 `3b79559`）。
+   全量 `.venv/Scripts/python.exe -m pytest` **917 passed in 89.91s**（无 skip、无 xfail，**串行**跑，
    这套件绑真实临时端口，两份并行结果不可信）。三条真主站验收（读一条动起来的 `sine`、
-   主站写 `hr` 与 `co` 各活过十个 tick）在 `tests/test_integration_tcp.py`；执行期与计划
-   文本不一致的地方全部记在那份计划末尾的"执行期已裁决的偏离"表里（D1–D13），其中一条是
-   新增的启动前判据：**点位名不许为空**（属性面板清得空、CSV 那边 `csv_io._require_text`
-   只认得行号），判据住在 `validate_project`，面板与 `start_channel` 一起生效。
+   主站写 `hr` 与 `co` 各活过十个 tick）在 `tests/test_integration_tcp.py`；无头 CLI 这一路
+   现在也自己驱动曲线（`__main__._serve` 收 `project.tick_ms`，运行期报错一句进 stderr），
+   命令行与界面起同一个工程行为一致。执行期与计划文本不一致的地方全部记在那份计划末尾的
+   "执行期已裁决的偏离"表里（D1–D17），其中一条是新增的启动前判据：**点位名不许为空**
+   （属性面板清得空、CSV 那边 `csv_io._require_text` 只认得行号），判据住在 `validate_project`，
+   面板与 `start_channel` 一起生效；另一条是**改值不许超出点位跨度**（`len(registers) > pt.span`
+   在进引擎之前拒，跨度归点表的初值管）。
    等人的仍是人工那一条：Task 7 Step 5 的界面冒烟清单。
 5. **M5 RTU backend**（串口；唯一需要真硬件冒烟的一段）。
 

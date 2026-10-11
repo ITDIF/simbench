@@ -1230,7 +1230,8 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "test: 真主�
 ## M4 完成检查表
 
 - [x] `.venv\Scripts\python.exe -m pytest` 全绿，无 skip / xfail（基线 773，只增不减；**串行跑**）
-      —— Task 7 收尾实测 **909 passed in 86.18s**（900 → +3 条真主站验收、+5 条空点位名判据、+1 条面板拒绝用例）
+      —— Task 7 收尾实测 **909 passed in 86.18s**（900 → +3 条真主站验收、+5 条空点位名判据、+1 条面板拒绝用例）；
+      final whole-branch review 的那一轮修复之后是 **917 passed in 89.91s**（+8：A1 两条、A2 四条、A3 两条）
 - [x] `tests/test_architecture.py` 仍全绿：`waveform.py`/`ownership.py` 里**没有** `PySide6`，`point_props.py` 里**没有** `pymodbus`
 - [x] 五种波形每条都有"注入固定 `t`"的纯函数断言，且 §5 表的每个默认值分支（`phase/hold/interval/seed`）都有用例
 - [x] 主站写 `hr`（06/16）与 `co`（05/15）两条路都有"两个 tick 后值仍是主站写的"集成用例
@@ -1243,8 +1244,9 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "test: 真主�
       另加三条（`sine` 忽略 `t`、关掉空点位名判据、`write_targets` 不判 `direction`）也都红
 - [ ] Task 7 Step 5 的人工清单由用户当面跑过 —— **还等人的这一条**（自动化替不了：
       界面跳动、右键恢复、布局不挪动要肉眼过；M2 那两条人工清单同样还挂着）
-- [ ] `git status --short` 为空 —— 由控制器在本 Task 评审通过后按计划的信息提交（实现方按
-      ledger 的口径不碰 git），提交前这里必然是脏的
+- [x] `git status --short` 为空 —— 由控制器提交（实现方按 ledger 的口径不碰 git）：
+      Task 7 收尾 `0cef91e`，final review 修复 `7279b83`（A1/A2/A3 + D1-D6）与
+      `3b79559`（复审判定剩下的那一处措辞、spec §4 的三个不存在的名字、`_serve` 的默认值）
 
 ## M4 不做（留给后续）
 
@@ -1284,4 +1286,8 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "test: 真主�
 | D10 | 正文 Task 7 Step 1 的"起来就采 4 次" | **实测把第一条采成点表初值**：`_tick_loop` 是**先睡一个周期再算**，监听起来后的头 `tick_ms` 里寄存器还是初值（实测首样 4/4 是 12.5），区间断言当场红。落地在采样前先用主站自己的读等第一拍 | Task 7 A；`tests/test_integration_tcp.py::test_a_real_master_reads_a_running_sine_wave` |
 | D11 | 正文 Task 7 Step 3 的"0.5 秒后读一次" | **变异当场存活**（本轮实测）：0.5s 正好是 `step;1,0;interval=0.2` 的 2.5 倍，单点读撞上"曲线此刻在 1 那一半"，把 `_tick_once` 的归属判定拆掉它照样全绿。改成 0.5 秒里连读 5 次、每次都要是 1——任何一次越权写入都会被其中一次读到 | Task 7 A；同一变异重跑 3/3 红（`下发被波形顶回去过：[True, True, True, False, False]`） |
 | D12 | 正文 Task 7 Step 4 的变异第 2 条写的是"把 `write_targets` 里 `direction != "rx"` 判掉"，本轮派单写的是"去掉 sink 里 `readonly` 那条跳过" | **两条不是同一个变异，两条都跑了**：前者红 `tests/test_ownership.py::test_the_slaves_own_write_response_is_not_a_write`（05/06 的响应与请求逐字节相同，`direction` 是唯一可靠判据），后者红 `test_a_write_the_protocol_refused_does_not_take_the_waveform_off`。Step 4 第 1/3/4 条也各自红（见 M4 完成检查表那一行的结果） | Task 7 E |
-| D13 | 正文与多处注释把"运行期拒绝**带点位名**""值没写出去 vs 写掉了"引成 `spec §8` 的原话 | §8 原文只有"越界/NaN → 钳到边界 + 只记一条日志、同点同类 60s 不重复刷屏"和"运行期故障要有一条日志"；**带点位名是本文件 Global Constraints 那条报错口径**，两种处置的区分是 Task 4 定的。已把五处引文改成直述或改引计划（`tests/test_integration_tcp.py` 的小节标题与两条用例、`modslave/backend/modbus_tcp.py::_report_clamp`、`modslave/backend/ownership.py::LogDedupe`），**没有反过来改 spec 迁就代码** | Task 7 C.2；残余一处同类假引文在 `modslave/engine/session.py:248`（不在本轮可改文件清单内，留给下一轮） |
+| D13 | 正文与多处注释把"运行期拒绝**带点位名**""值没写出去 vs 写掉了"引成 `spec §8` 的原话 | §8 原文只有"越界/NaN → 钳到边界 + 只记一条日志、同点同类 60s 不重复刷屏"和"运行期故障要有一条日志"；**带点位名是本文件 Global Constraints 那条报错口径**，两种处置的区分是 Task 4 定的。已把五处引文改成直述或改引计划（`tests/test_integration_tcp.py` 的小节标题与两条用例、`modslave/backend/modbus_tcp.py::_report_clamp`、`modslave/backend/ownership.py::LogDedupe`），**没有反过来改 spec 迁就代码** | Task 7 C.2；残余一处同类假引文在 `modslave/engine/session.py:248`，**已由 final review 的 D3 了结**（改成直述 §8 的原话，并写明"带点位名"是本文件的口径） |
+| D14 | 正文与 Task 2 让 `write_targets` **照报文里的数量**标接管（原文："count 直接采信报文"） | final review 实测：MBAP 长度合规、数量字段写 65535 的那一帧 FC16，把 unit 11 的 hr 区 10 个地址一次全标成 manual 且日志一个字没有，而那一帧一个寄存器都没落下去（协议先拒）。定死：**数量超过协议上限就当不是写**——FC16 123 寄存器、FC15 1968 位（`_WRITE_MAX_COUNT`），与既有 `qty<=0` 及 `_own_write_frame` 拒撒谎 `length` 同一个理由；仍然**不**核对数量与数据字节数（sink 收到的是到达的字节块，不是组好的帧） | final review A1；`tests/test_ownership.py::test_a_quantity_beyond_the_protocol_maximum_is_not_a_write`（两头都钉：123/1968 照收、+1 才拒）、`tests/test_integration_tcp.py::test_a_chunk_whose_quantity_field_lies_does_not_take_over_anything` |
+| D15 | 正文没有"编辑出来的寄存器多于点位跨度"这一条 | **新口径：`set_point` 在 `encode` 之后、进引擎之前拒绝 `len(registers) > pt.span`**，一个字节都不写、不标 manual、不动 Row；消息带点位名 + 两个数 + 指向点表初值。因为 `Point.span` 是**初值**撑出来的（string 取 `ceil(len/2)`），把 `铭牌` 改长就编出多于该点格数的寄存器：越格踩邻居，而 `_awrite` 按 `len(registers)` 标、`restore_waveform` 只还得回 `pt.span`，邻居永久 manual（实测 restore 回 True 而仍有 3 处被接管）。固定宽度类型恒 `len(registers) == pt.span`、位区恒 1，闸门是 `>` 不是 `!=`（改短要写得成） | final review A2；`tests/test_session.py::test_a_longer_string_edit_is_refused_before_it_reaches_the_engine`、`::test_a_refused_oversized_edit_leaves_the_neighbours_and_the_count_alone`、`::test_a_same_or_shorter_string_edit_still_lands`、`::test_a_bit_point_still_takes_exactly_one_address` |
+| D16 | D1 那条"tick 放 backend 是为了无头 CLI 也驱动曲线"当时只是**理由**，落地后 CLI 仍然没接上 | final review 判这是 feature gap：命令行与 GUI 起的是同一个工程，不该一个有曲线一个没有。落地 `main()` 把 `project.tick_ms` 交给 `_serve`，并接一个进 **stderr** 的运行期报错 sink（`_runtime_log`，**不**受 `--quiet` 管——那是报文开关，报错不是报文）。`_serve` 的 `tick_ms` **不给默认值**：默认 0 就是"忘了传也照样起监听、只是曲线静默不动"，正是这一条的形状 | final review A3；`tests/test_cli.py::test_the_headless_path_drives_the_waveforms`、`::test_the_headless_path_reports_a_runtime_waveform_fault_on_stderr`（两条都起真子进程走 `main()`，不是直接调 `_serve`） |
+| D17 | 多处注释与 spec §4/§7 把状态栏那句"有 N 处被接管"归给 `SourceStore.cleared()`；spec §4 的关键接口写着 `SlaveEngine` / `PointCodec` / `Backend.build` | 都不成立：状态栏用的是 `Session.manual_count`（**按点**、只问各点基础格），`cleared()` 按地址数且**没有生产调用方**（只有测试在用；本轮只把措辞改真、不删 API，删不删由用户定）；"4 格只恢复基础格"那个场景里 `manual_count` 恰好正常归零，状态栏看不见的正是那三格尾巴。§4 的真实形状：门面对象是 `Session`，编解码是 `codec/point_codec` 的模块函数 `encode/decode`，backend 侧是 `build_sim_devices(project)` 加 `ModbusTcpBackend` 的 `start()/stop()` 两个协程，`Backend` 抽象与 RTU 一起是 M5 的缝 | final review D3/D4/D6 + scoped re-review；`tests/test_session.py::test_a_gui_edit_hands_the_point_over_and_the_row_says_so`（按点与按地址的单位差就写在那条用例的注释里） |
