@@ -189,14 +189,15 @@ class PointTableModel(QtCore.QAbstractTableModel):
 
 
 class PointTableView(QtWidgets.QTableView):
-    """点位表的视图：右键一行 = 一条命令——把这一行的点交还给波形。
+    """点位表的视图：右键一行 = 两条命令——把这一行的点交还给波形、打开点位属性面板。
 
-    每一条行**都**给这一项菜单，没人接管的行置灰而**不删**：删项会让弹框高度随行变，
-    操作员两次右键看见两种菜单（本项目把"状态变化动布局"记成缺陷）。文案带上点位名，
+    每一条行**都**给这两项菜单，恢复项按归属置灰而**不删**：删项会让弹框高度随行变，
+    操作员两次右键看见两种菜单（本项目把"状态变化动布局"记成缺陷）。恢复的文案带上点位名，
     因为一次只可能恢复右键的那一行，操作员不需要在弹层里再认一次地址。
     """
 
     restore_requested = QtCore.Signal(tuple)      # payload = 那一行的 `Row.key`
+    props_requested = QtCore.Signal(tuple)        # 同一份身份：属性面板按 key 找点位本体
 
     def row_key(self, row: int) -> tuple | None:
         """行号 -> 点位身份 `(channel, unit_id, area, address)`；越界回 `None`。"""
@@ -240,6 +241,11 @@ class PointTableView(QtWidgets.QTableView):
         action.setEnabled(found.source == "manual")
         key = found.key
         action.triggered.connect(lambda _checked=False: self.restore_requested.emit(key))
+        props = menu.addAction("属性…")
+        # `属性…` 对每一行都开着：能不能改是 `point_props.apply()` 里带理由的拒绝
+        # （通道在跑、验不过回滚都会点名），菜单先置灰就成了"没打开就拒"，
+        # 操作员看不见那一句为什么。
+        props.triggered.connect(lambda _checked=False: self.props_requested.emit(key))
         return menu
 
 

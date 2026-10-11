@@ -138,15 +138,7 @@ class Session:
             stuck = self._stop_all_locked()
             self._project = project
             self._channels = {ch.name: ChannelRuntime(ch.name) for ch in project.channels}
-            # 索引一次建好：渲染路径（10Hz）只查表，不遍历工程对象树。
-            self._points = {}
-            self._rows_meta = {ch.name: [] for ch in project.channels}
-            for ch in project.channels:
-                for dev in ch.devices:
-                    bucket = self._points.setdefault((ch.name, dev.unit_id), {})
-                    for p in dev.points:
-                        bucket[(p.area, p.address)] = p
-                        self._rows_meta[ch.name].append((dev.unit_id, dev.name, p))
+            self._rebuild_index_locked()
             self._dirty = False
             # 旧通道没关掉就得在这里留一句话：它的句柄随 `_channels` 一起换掉了，再没有
             # 第二次"停止"能摸到它，端口会一直占到进程结束。只发日志不发 ChannelState——
@@ -157,6 +149,18 @@ class Session:
                                  f"while loading the point table; its port is still held: "
                                  f"{runtime.last_error}")
         return validate_project(project)
+
+    def reindex(self) -> None:
+        """按当前工程重建读写索引，**不停任何通道**（点位属性面板的结构性改动用它）。
+
+        `load()` 同样重建索引，但它第一步就是 `_stop_all_locked()`：改一个已停通道的
+        点地址，会把另一路正给网关服务的从站一起停掉——那是新的现场事故（Task 6 裁决）。
+        这里只摊平引用：`_points`/`_rows_meta` 存的本来就是同一批 `Point` 对象，在跑的
+        SimDevice 拿的也是它们，重建不打扰任何通道；`initial`/`datatype`（算 `span` 用）
+        在通道跑着时改不动，所以跨度键不会因此变陈旧。
+        """
+        with self._lock:
+            self._rebuild_index_locked()
 
     @property
     def project(self) -> Project:
@@ -538,6 +542,21 @@ class Session:
         runtime.detail = ""
         runtime.last_error = ""
         return True
+
+    def _rebuild_index_locked(self) -> None:
+        """索引一次建好：渲染路径（10Hz）只查表，不遍历工程对象树。
+
+        `load()` 与 `reindex()` 共用这一份摊平逻辑——两份键的构造迟早漂移，漂了的
+        表现是"按新地址写值被挡在不在点表里"。调用方持锁。
+        """
+        self._points = {}
+        self._rows_meta = {ch.name: [] for ch in self._project.channels}
+        for ch in self._project.channels:
+            for dev in ch.devices:
+                bucket = self._points.setdefault((ch.name, dev.unit_id), {})
+                for p in dev.points:
+                    bucket[(p.area, p.address)] = p
+                    self._rows_meta[ch.name].append((dev.unit_id, dev.name, p))
 
     def _stop_all_locked(self) -> list[ChannelRuntime]:
         """逐个关，返回**没关掉**的那些（调用方决定怎么报，这里不碰状态机）。"""

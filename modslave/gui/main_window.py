@@ -37,6 +37,7 @@ from .dialogs import (
     open_project, read_point_table, save_project_as,
 )
 from .packet_view import PacketPanel
+from .point_props import STRUCTURAL_FIELDS, PointPropertiesDialog
 from .point_table import COLUMNS, PointTableModel, PointTableView
 
 _TICK_MS = 100
@@ -95,6 +96,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.logged.connect(self._on_log)
         self.bridge.point_changed.connect(lambda _event: self.point_model.refresh())
         self.point_table.restore_requested.connect(self._restore_waveform)
+        self.point_table.props_requested.connect(self._show_point_props)
         self.session.subscribe(self.bridge.forward)
 
         self.timer = QtCore.QTimer(self)
@@ -324,6 +326,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(
             f"已交还波形，人工接管还剩 {remaining} 处" if remaining
             else "已交还波形，人工接管已全部交还", _NOTICE_MS)
+
+    def _show_point_props(self, key: tuple) -> None:
+        """右键"属性…"：逐点编辑点表锁死的字段，成功后把"什么时候生效"说清楚。
+
+        装载口径按 Task 6 裁决，不是"apply → `session.load`"：`load()` 会停掉**所有**
+        通道，为一个已停通道的小编辑把正在服务网关的那一路停了就是新的现场事故。停通道
+        检查、`load`/`reindex` 的分叉都住在 `point_props.apply()` 里（那里有拒绝理由），
+        主窗只做事后呈现：表立刻刷一次 + 状态栏一句生效时机。措辞分三档：纯结构性改动
+        只提重启；纯 live 改动只提下一拍（骗操作员去重启在跑的通道比不说更糟）；一次
+        应用里两种都有就两句都说——只说一种就是另一半在撒谎。
+        """
+        try:
+            dialog = PointPropertiesDialog(self, self.session.project, key)
+        except KeyError as exc:
+            # 菜单建好与打开面板之间行没了（换工程的瞬间）：槽函数不许炸，给一句人话。
+            self._log(f"[refused] 打开点位属性失败：{exc}")
+            self.status.showMessage("该行点位已不在当前点表中，属性面板未打开", _NOTICE_MS)
+            return
+        dialog.exec()
+        changes = dialog.applied
+        if changes is None:
+            return                                   # 取消或整体被拒：什么都没发生
+        self.point_model.refresh()
+        count = len(changes)
+        structural = set(changes) & set(STRUCTURAL_FIELDS)
+        if structural and len(structural) == count:
+            message = f"已改 {count} 处，重启通道后生效"
+        elif structural:
+            message = (f"已改 {count} 处：区/地址等重启通道后生效，"
+                       f"名称/波形改动下一拍生效")
+        else:
+            message = f"已改 {count} 处，下一拍生效"
+        self.status.showMessage(message, _NOTICE_MS)
 
     # ---------- 心跳与事件 ----------
 

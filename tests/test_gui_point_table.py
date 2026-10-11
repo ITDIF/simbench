@@ -426,15 +426,17 @@ def test_the_row_menu_carries_the_point_name_and_greys_out_the_wrong_rows(qapp):
     """菜单每一项的判据来自**那一行**的归属：名字进文案，`source` 进 enabled。
 
     越界行号回空清单而不是抛：右键落在表头或空白处是操作员每天做的事。
+    `属性…` 对每一行都开着——能不能改是 `apply()` 里带理由的拒绝（通道在跑、验不过
+    回滚），菜单先把它置灰就成了"没打开就拒"，操作员看不见那一句。
     """
     view = _menu_view(qapp, [_row("曲线在跑", "1", waveform="sine"),
                              _row("人工改过", "2", source="manual")])
     assert view.row_key(0) == ("tcp-5020", 11, "hr", 0)
     assert view.row_key(9) is None
-    assert [a.text() for a in view.row_menu_actions(0)] == ["恢复波形：曲线在跑"]
-    assert [a.text() for a in view.row_menu_actions(1)] == ["恢复波形：人工改过"]
-    assert [a.isEnabled() for a in view.row_menu_actions(0)] == [False]
-    assert [a.isEnabled() for a in view.row_menu_actions(1)] == [True]
+    assert [a.text() for a in view.row_menu_actions(0)] == ["恢复波形：曲线在跑", "属性…"]
+    assert [a.text() for a in view.row_menu_actions(1)] == ["恢复波形：人工改过", "属性…"]
+    assert [a.isEnabled() for a in view.row_menu_actions(0)] == [False, True]
+    assert [a.isEnabled() for a in view.row_menu_actions(1)] == [True, True]
     assert view.row_menu_actions(9) == []
 
 
@@ -474,7 +476,7 @@ def test_a_right_click_builds_the_menu_for_the_row_under_the_cursor(qapp, monkey
     # 全局点 = 控件点 + 窗口在屏幕上的任意偏移：用例只需要两个坐标系分得开。
     global_point = row_point + QtCore.QPoint(520, 300)
     view.contextMenuEvent(_Click(row_point, global_point))
-    assert [texts for texts, _ in popped] == [["恢复波形：人工改过"]]
+    assert [texts for texts, _ in popped] == [["恢复波形：人工改过", "属性…"]]
     assert popped[0][1] == global_point, "传给 _popup 的不是 globalPos，菜单不会开在光标下"
     popped.clear()
     view.contextMenuEvent(_Click(QtCore.QPoint(10, view.height() - 4),
@@ -493,6 +495,24 @@ def test_triggering_the_row_action_hands_back_that_rows_point(qapp):
     view.restore_requested.connect(got.append)
     view.row_menu_actions(0)[0].trigger()
     assert got == [view.row_key(0)] == [("tcp-5020", 11, "hr", 4)]
+
+
+def test_the_properties_item_carries_the_identity_of_its_own_row(qapp):
+    """`属性…` 和恢复同一条纪律：payload 是**建这一项时那一行**的 key，逐行分得开。
+
+    两行的 unit/区/地址都给不同的值：如果菜单把行号抄成了固定值或取错了行，
+    这里收到的第二个 key 会对不上——属性面板改错点比恢复错点更糟（直接动点表本体）。
+    """
+    rows = [Row("tcp-5020", "COVI-1", 11, "甲", "hr", 0, "uint16", "ABCD",
+                "1", (1,), False, "const"),
+            Row("tcp-5020", "COVI-2", 12, "乙", "co", 3, "bool", "ABCD",
+                "true", (1,), False, "const", False, "manual")]
+    view = _menu_view(qapp, rows)
+    got: list[tuple] = []
+    view.props_requested.connect(got.append)
+    view.row_menu_actions(0)[1].trigger()
+    view.row_menu_actions(1)[1].trigger()
+    assert got == [("tcp-5020", 11, "hr", 0), ("tcp-5020", 12, "co", 3)]
 
 
 def test_a_greyed_item_stays_inert_when_triggered(qapp):

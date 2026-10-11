@@ -368,17 +368,22 @@ def test_an_engine_timeout_is_reported_with_the_engine_stack_not_as_a_hang(
 # ---------- 右键恢复波形 ----------
 
 def test_the_row_menu_offers_restore_only_for_taken_over_rows(make_window, qapp):
-    """置灰而不是删掉：菜单项增删会让弹框高度变，两次右键两种样子。"""
+    """置灰而不是删掉：菜单项增删会让弹框高度变，两次右键两种样子。
+
+    `属性…` 对每一行都开（判"能不能改"是属性面板 apply 的事，那里有拒绝理由），
+    `恢复波形` 才按归属置灰。
+    """
     window = make_window()
     relaunch(window, window.session.project, qapp)
     window.point_model.setData(window.point_model.index(row_of(window, "风机状态"),
                                                         VALUE_COLUMN), "42")
     qapp.processEvents()
     actions = window.point_table.row_menu_actions(row_of(window, "风机状态"))
-    assert [a.text() for a in actions] == ["恢复波形：风机状态"]
-    assert actions[0].isEnabled() is True
+    assert [a.text() for a in actions] == ["恢复波形：风机状态", "属性…"]
+    assert [a.isEnabled() for a in actions] == [True, True]
     other = window.point_table.row_menu_actions(row_of(window, "CO浓度"))
     assert other[0].isEnabled() is False         # 没被接管的行：看得见，点不动
+    assert other[1].isEnabled() is True          # 但属性照样能打开
 
 
 def test_triggering_the_restore_command_puts_the_rows_back_under_the_waveform(
@@ -426,6 +431,115 @@ def test_a_restore_refused_by_the_engine_says_why_in_the_log_without_a_false_cou
     log = window.log_view.toPlainText()
     assert "not running" in log and "风机状态" in log, log
     assert "还剩" not in window.status.currentMessage(), "没恢复成就不许给接管计数"
+
+
+# ---------- 右键属性…（点位属性面板接线） ----------
+
+def _props_dialog_factory(monkeypatch, stage):
+    """把主窗的对话框接线换成"真面板 + 非模态 exec"：`stage(dialog)` 摆好改动。
+
+    `exec()` 是会吞掉用例的模态嵌套循环（`IssueDialog.exec` 同形），这里用**真**
+    `PointPropertiesDialog`，只把它实例的 `exec` 换成 `apply`：主窗读的本来就是
+    `dialog.applied`，摆错形状（比如 apply 拒了还带 applied 回来）在这里就会露出来。
+    """
+    real_cls = main_window_module.PointPropertiesDialog
+
+    def factory(parent, project, key):
+        dialog = real_cls(parent, project, key)
+        stage(dialog)
+        dialog.exec = dialog.apply
+        return dialog
+
+    monkeypatch.setattr(main_window_module, "PointPropertiesDialog", factory)
+
+
+def test_the_properties_action_opens_the_panel_built_for_that_row(make_window, qapp,
+                                                                  monkeypatch):
+    """右键哪一行，面板就按**那一行的 key** 建；什么都没应用时主窗不留任何痕迹。"""
+    window = make_window()
+    opened: list[tuple] = []
+
+    class Stub:
+        applied = None
+
+        def __init__(self, parent, project, key) -> None:
+            opened.append(key)
+
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(main_window_module, "PointPropertiesDialog", Stub)
+    row = row_of(window, "风机状态")
+    window.point_table.row_menu_actions(row)[1].trigger()
+    assert opened == [("tcp-5020", 11, "hr", 4)]
+    assert not window.session.dirty
+    assert "已改" not in window.status.currentMessage()
+
+
+def test_a_structural_apply_from_the_menu_says_a_restart_is_needed(make_window, qapp,
+                                                                   monkeypatch):
+    """没起通道时应用地址改动：状态栏"已改 1 处，重启通道后生效"，表里立刻看得见新地址，
+    标题带 `*`。"""
+    window = make_window()
+    _props_dialog_factory(monkeypatch, lambda d: d.address_edit.setText("20"))
+    window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
+    message = window.status.currentMessage()
+    assert "已改 1 处" in message and "重启通道后生效" in message, message
+    window.point_model.refresh()
+    assert window.point_model.index(row_of(window, "风机状态"), 2).data() == "20"
+    window._tick()
+    assert window.windowTitle().endswith("*")
+
+
+def test_a_live_only_apply_from_the_menu_says_next_tick_not_restart(make_window, qapp,
+                                                                    monkeypatch):
+    """只改名称：状态栏说"下一拍生效"并且**不许**提重启——误导操作员去重启在跑的
+    通道，比不说更糟。"""
+    window = make_window()
+    _props_dialog_factory(monkeypatch, lambda d: d.name_edit.setText("风机状态B"))
+    window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
+    message = window.status.currentMessage()
+    assert "下一拍" in message and "重启通道" not in message, message
+    window.point_model.refresh()
+    assert window.point_model.index(row_of(window, "风机状态B"), 0).data() == "风机状态B"
+
+
+def test_a_mixed_apply_names_both_effect_times(make_window, qapp, monkeypatch):
+    """一次应用里既有结构性又有 live 安全：两种生效时机都要说，只说一种就是另一半撒谎。"""
+    window = make_window()
+
+    def stage(dialog):
+        dialog.address_edit.setText("20")
+        dialog.name_edit.setText("风机状态B")
+
+    _props_dialog_factory(monkeypatch, stage)
+    window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
+    message = window.status.currentMessage()
+    assert "已改 2 处" in message, message
+    assert "重启通道后生效" in message and "下一拍" in message, message
+
+
+def test_a_refused_properties_apply_leaves_no_trace_in_the_window(make_window, qapp,
+                                                                  monkeypatch):
+    """被拒（撞 CO浓度）的改动：地址列还是 4、标题不带 `*`、状态栏不给"已改"。"""
+    window = make_window()
+    _props_dialog_factory(monkeypatch, lambda d: d.address_edit.setText("0"))
+    window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
+    window.point_model.refresh()
+    assert window.point_model.index(row_of(window, "风机状态"), 2).data() == "4"
+    assert "已改" not in window.status.currentMessage()
+    assert not window.session.dirty
+    window._tick()
+    assert not window.windowTitle().endswith("*")
+
+
+def test_properties_for_a_row_that_vanished_says_so_instead_of_crashing(make_window,
+                                                                        qapp):
+    """菜单建好与打开面板之间行没了（换工程的瞬间）：槽函数不许炸，给一句人话。"""
+    window = make_window()
+    window._show_point_props(("tcp-5020", 11, "hr", 999))
+    assert "不在当前点表" in window.status.currentMessage()
+    assert "属性面板" in window.status.currentMessage()
 
 
 # ---------- ζ：一个通道都没起时 ----------
