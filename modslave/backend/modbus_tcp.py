@@ -548,7 +548,8 @@ class ModbusTcpBackend:
 
     def _report_clamp(self, unit_id: int, pt: Point, value, now: float) -> None:
         """值飘出 datatype 之外：这一轮**照样写**，只是写在边界上，所以要告诉操作员
-        他的曲线配大了（spec §8：运行期拒绝带点位名）。
+        他的曲线配大了（spec §8：越界要钳到边界并只记一条日志、同点同类 60s 不重复刷屏；
+        那句日志里带**点位名**是 M4 计划的报错口径，不是 §8 的原文）。
         """
         self._emit("warning", "clamp", (unit_id, pt.area, pt.address),
                    f"{pt.name}: waveform value outside {pt.datatype}, "

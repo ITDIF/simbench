@@ -781,7 +781,8 @@ def test_the_tick_task_dies_with_the_backend(engine_runner):
 
 def test_the_tick_cancel_runs_before_the_shutdown_not_after(engine_runner,
                                                             monkeypatch):
-    """钉住 `stop()` 里"先取消 tick 任务"这条**顺序**本身（要点 2 与 `:354` 的注释）。
+    """钉住 `stop()` 里"先取消 tick 任务"这条**顺序**本身（承诺在
+    `modslave/backend/modbus_tcp.py` 的 `stop()` 开头那段注释里，不在行号里）。
 
     为什么"任务 done 了"顶不掉这条：早取消与晚取消的任务都是 `done()==True`，把
     cancel 挪到 `server.shutdown()` 之后 837 条照样全绿。能分辨的只有**结束形态**——
@@ -1039,7 +1040,7 @@ def test_a_point_that_is_not_in_the_datastore_is_skipped_without_breaking_the_ro
             client.close()
 
 
-# ---- spec §8：运行期报错带点位名，且同点同类 60s 只留一条 ----
+# ---- 运行期那一条日志：带点位名（M4 计划的报错口径）+ 同点同类 60s 一条（spec §8）----
 
 def test_a_clamped_waveform_logs_one_line_naming_the_point(open_backend):
     """`base=20;amp=1e6` 压在 float32 上合法，但 uint16 点这么配就天天飘出边界。
@@ -1106,13 +1107,15 @@ def test_restarting_the_channel_reports_the_same_clamped_point_again(
 
 def test_a_point_that_stopped_computing_is_named_instead_of_falling_silent(open_backend):
     """Task 3 把坏点的三种异常咽进无声的 `continue`：通道照旧应答、那个点冻在初值上、
-    日志一句没有。spec §8 要的是"运行期拒绝带点位名"，同点同类 60s 一条。
+    日志一句没有。spec §8 要的是"这一类运行期故障得留下一条日志、同点同类 60s 不重复刷屏"；
+    **那句日志要带点位名**是 M4 计划 Global Constraints 的报错口径，不是 §8 的原文。
 
     四类坏点各配一个（Task 1 实测的形状：未知名 `KeyError`、`period=0`
     `ZeroDivisionError`、参数不是数 `ValueError`、字符串点位的编码 `ValueError`），外加
     一个好点。三条各自钉一个容易被改坏的地方：
-    ① `written` 只数真写掉的好点（把失败也算进去时这一句会先红，spec §8 的"值没写出去"
-       与"写掉了"是两件事）；
+    ① `written` 只数真写掉的好点（把失败也算进去时这一句会先红）——"这个点这一轮没写
+       出去"与"写掉了"是两件事，Task 4 把它们分成两种处置（钳位的照写边界值、算不出的
+       冻在旧值上），§8 只承诺两边各有一条日志；
     ② "算值炸"与"编码炸"是两个 kind、两句不同的话——操作员要改的东西不一样
        （曲线名/参数 vs 点表的类型），共用一个身份时后者会被前者吃掉；
     ③ 消息带异常类名，否则"为什么这个点不刷新"只剩操作员自己猜。
@@ -1268,8 +1271,8 @@ def test_an_unexpected_tick_error_is_reported_and_the_loop_keeps_running(engine_
 
 def test_a_started_channel_routes_waveform_warnings_into_the_session_log(engine_runner):
     """`Session.start_channel` 必须把 `log_sink` 接到 `publish_log`：接不上时 backend 那套
-    去重日志只活在测试里，界面与无头 CLI 一条都收不到，spec §8 的"运行期拒绝带点位名"
-    就还是空的。
+    去重日志只活在测试里，界面与无头 CLI 一条都收不到，spec §8 承诺的"越界/算不出来要有
+    那一条日志"就还是空的。
 
     走的是生产那一条完整路：`Session` 起通道 → 工程里的 `tick_ms` 交下去 → 真 tick 在引擎
     线程上算出越界值 → 同一线程把 `LogLine` 发进事件流（三个 sink 都在引擎 loop 线程上被调，
@@ -1479,6 +1482,90 @@ def test_a_chunk_whose_length_field_lies_does_not_take_over_anything(open_backen
         finally:
             client.close()
         assert not backend.source_is_waveform(11, "hr", 4), "上一台的垃圾把这一台带瞎了"
+
+
+# ---- M4 的三条真主站验收：曲线要主站看得见，下发要活过 tick ----
+
+def test_a_real_master_reads_a_running_sine_wave(open_backend):
+    """曲线必须是**主站侧**看得见：界面自己刷是一回事，网关读到的是另一回事。
+
+    周期 1.2s、`tick_ms=50`，采 4 次每次间隔 0.4s：区间要守住，而且不能是一串常数
+    （常数就是"tick 没在跑"或"值被谁顶住了"的形状）。`CO浓度` 是 CDAB 浮点，正好把
+    字序一起验了。
+
+    采样前先拿主站自己的读等第一拍：`_tick_loop` 是**先睡一个周期再算**，监听起来之后的
+    头 50ms 里寄存器还是点表初值 12.5（实测首样 4/4 次都是它），照字面"起来就采 4 次"
+    会把那条初值算进区间断言里。
+    """
+    project = tunnel_project(free_port())
+    point = project.channels[0].devices[0].points[0]
+    point.waveform, point.wave_param = "sine", {"base": "100", "amp": "20",
+                                                "period": "1.2"}
+    with open_backend(project.channels[0], tick_ms=50):
+        client = connect(project.channels[0].port)
+        seen = []
+        try:
+            wait_for(lambda: 80.0 <= cdab_to_float(client.read_holding_registers(
+                0, count=2, device_id=11).registers) <= 120.0,
+                what="第一拍 tick 把 sine 写进了寄存器")
+            for _ in range(4):
+                seen.append(client.read_holding_registers(0, count=2,
+                                                          device_id=11).registers)
+                time.sleep(0.4)
+        finally:
+            client.close()
+    values = [cdab_to_float(pair) for pair in seen]
+    assert all(80.0 <= v <= 120.0 for v in values), values
+    assert len({round(v, 1) for v in values}) >= 3, f"曲线没在动：{values}"
+
+
+def test_a_master_write_survives_the_waveform_tick(open_backend):
+    """给 `hr4` 配一条 0.4 秒一圈的 `sine`，主站写 333 进去，0.5 秒后必须还是 333。
+
+    这条红了就是 M4 的核心承诺破了：平台下发成功、值被模拟器顶掉，运维会去查平台
+    而不是查这里。0.5s 在 `tick_ms=50` 下跨 10 个 tick、1.25 个周期，够证"没被覆盖"。
+    """
+    project = tunnel_project(free_port())
+    point = next(pt for pt in project.channels[0].devices[0].points if pt.name == "状态字")
+    point.waveform, point.wave_param = "sine", {"base": "0", "amp": "10",
+                                                "period": "0.4"}
+    with open_backend(project.channels[0], tick_ms=50):
+        client = connect(project.channels[0].port)
+        try:
+            client.write_register(4, 333, device_id=11)
+            time.sleep(0.5)
+            assert client.read_holding_registers(4, count=1,
+                                                 device_id=11).registers == [333]
+        finally:
+            client.close()
+
+
+def test_a_master_write_of_a_coil_survives_the_waveform_tick(open_backend):
+    """位区单独走一条：`write_registers` 写 `co` 会写错一位（raw_writer 的实测说明）。
+
+    `启动` 线圈配 `step;1,0;interval=0.2`——不接管的话它每 0.2 秒翻一次，主站读到的是
+    一直在抖的启动指令。写 1 之后 0.5 秒里连读 5 次，每次都必须是 1。
+
+    **连读而不是只读一次**（实测把这条改结实过）：0.5s 正好是 `interval` 的 2.5 倍，
+    单点读会撞上"曲线此刻正好在 1 那一半"，变异（tick 无视归属）当场存活；把这 0.5 秒
+    铺开取样，任何一次越权写入都会被其中一次读到。
+    """
+    project = tunnel_project(free_port())
+    coil = next(pt for pt in project.channels[0].devices[0].points if pt.area == "co")
+    coil.waveform, coil.wave_param = "step", {"values": "1,0", "interval": "0.2"}
+    with open_backend(project.channels[0], tick_ms=50):
+        client = connect(project.channels[0].port)
+        try:
+            client.write_coil(coil.address, True, device_id=11)
+            seen = []
+            for _ in range(5):
+                seen.append(client.read_coils(coil.address, count=1,
+                                              device_id=11).bits[0])
+                time.sleep(0.1)
+            assert all(bit is True for bit in seen), \
+                f"下发被波形顶回去过：{seen}"
+        finally:
+            client.close()
 
 
 def test_the_probe_does_not_refuse_a_port_whose_previous_owner_was_killed():

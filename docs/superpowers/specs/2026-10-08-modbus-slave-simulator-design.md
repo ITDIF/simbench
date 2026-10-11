@@ -268,10 +268,19 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
   界面 + 引擎线程并存的工具里，让引擎线程去回收等于让它销毁界面丢弃的 widget，而它等的主线程
   正在等它回话——整个软件冻死（实测根因与证据在 §12）。这条不改任何可见行为，但决定了
   "点一下启动之后界面卡住"这类现象会不会再出现。
-- **值归属规则（v1 唯一一条）**：每个点位有 `source = waveform | manual`。GUI 手动改值、
-  或主站用 FC05/06/15/16 写入，都把该点切成 `manual`，波形引擎**不再覆盖**它，
-  点位表波形列显示 `已停`，右键"恢复波形"可切回。这样测平台下发命令时不会出现
-  "值被波形顶掉、误判下发没生效"。
+- **值归属规则（v1 唯一一条，M4 已实现）**：每个点位有 `source = waveform | manual`，归属的
+  **单位是点位**而不是寄存器格。GUI 双击改值、或主站用 FC05/06/15/16 写入，都把该点切成
+  `manual`，波形引擎**不再覆盖**它——识别发生在 backend 的 rx 报文侧，与写值同线程、同一次
+  到达落地（不是界面侧的"我记得写过"）。点位表"波形"那一列显示 `已停`（占原来那一格的文案位，
+  列宽列序不动）。两条实测边界：**主站写只读点被协议拒绝（异常码 2）时不切 manual**——
+  一次没成功的写不该把曲线停了，而引擎自己的 `raw_writer` 写得进只读点，混起来更难查；
+  **右键"恢复波形"按点位跨度整段放行**——占 4 格的 uint64 只恢复基础格时那 3 格会永远标着
+  manual，状态栏那句"有 N 处被接管"也就只增不减。
+  这样测平台下发命令时不会出现"值被波形顶掉、误判下发没生效"。证据：
+  `tests/test_integration_tcp.py::test_a_master_write_survives_the_waveform_tick`、
+  `::test_a_master_write_of_a_coil_survives_the_waveform_tick`（FC05 那条走 `write_bits`，
+  与 `write_registers` 是两个入口）、`::test_a_write_the_protocol_refused_does_not_take_the_waveform_off`、
+  `::test_a_master_write_at_a_middle_register_takes_the_whole_point_over`。
 
 ## 8. 错误处理
 
@@ -280,7 +289,10 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 - **启动前校验，一次报全**：CSV 解析错误带行号；地址重叠（位区按位判、寄存器区按寄存器判，
   两边口径实测不同，见 §12）；类型与区不匹配（如 co 上放 float32）；`wave_param` 缺参或非法
   （`period=0`、`min>max`、类型不符）；`unit_id` 越界（只认 1..247，且不建 `id=0` 兜底设备）；
-  `host` 不是非空字符串；**`port=0`**（"让系统随便给一个"在 M1 也算 error——要读回实际端口
+  `host` 不是非空字符串；**点位名为空**（M4 Task 7 补：`name` 是身份列，加这条之前属性面板
+  能把它一路应用到运行态，而这份工程导出的 CSV 再也读不回来；判据在 `validate_project`，
+  CSV 那侧带行号的另一句在 `csv_io._require_text`，两个来源两种说法）；**`port=0`**
+  （"让系统随便给一个"在 M1 也算 error——要读回实际端口
   得从 pymodbus 内部摸 transport 对象，版本一变就碎）；**同一个 `(host, port)` 被两个通道
   占用**（不等启动第二阶段炸 bind：Windows 只回 10048 且不带通道名，现场看不出是点表配置错）；
   字序与数据类型冲突——**64 位类型填 `CDAB`/`BADC`、`string` 填非 `ABCD` 才是拦截项**
@@ -346,8 +358,17 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
    `QWidget`，与正等引擎回话的主线程互锁；现已定口径**回收只许发生在 GUI 线程**。
    等人的还是人工那两条：计划 Task 9 Step 2（真界面 6 项）与 Step 3（真界面 + 真主站）。
 3. **M3 CSV 导入导出 + 报文监视窗 + 多通道独立启停**。
-4. **M4 波形引擎**（const/ramp/sine/random/step）+ 点位属性面板 —— 纯逻辑、可全自动测，
-   不依赖硬件，所以排在串口之前。
+4. **M4 波形引擎 + 值归属 + 点位属性面板（已完成）**（const/ramp/sine/random/step）——
+   纯逻辑、可全自动测，不依赖硬件，所以排在串口之前。落地在计划
+   `docs/superpowers/plans/2026-10-11-modslave-m4-waveform.md`、分支 `m4-waveform`，
+   提交 `7442a49`…`571d103`（Task 1–6 各一轮评审 + 两轮修复，收尾提交由控制器追加）。
+   全量 `.venv/Scripts/python.exe -m pytest` **909 passed**（无 skip、无 xfail，**串行**跑，
+   这套件绑真实临时端口，两份并行结果不可信）。三条真主站验收（读一条动起来的 `sine`、
+   主站写 `hr` 与 `co` 各活过十个 tick）在 `tests/test_integration_tcp.py`；执行期与计划
+   文本不一致的地方全部记在那份计划末尾的"执行期已裁决的偏离"表里（D1–D13），其中一条是
+   新增的启动前判据：**点位名不许为空**（属性面板清得空、CSV 那边 `csv_io._require_text`
+   只认得行号），判据住在 `validate_project`，面板与 `start_channel` 一起生效。
+   等人的仍是人工那一条：Task 7 Step 5 的界面冒烟清单。
 5. **M5 RTU backend**（串口；唯一需要真硬件冒烟的一段）。
 
 已确认按 M1→M2→M3→M4→M5 顺序。
@@ -428,6 +449,55 @@ M2 内确认（**已全部清零**，探针 `m2-probe/qt_spike.py`，结论都�
   `.result(10)` 与 `join(5)` 超时）。→ 测试会话共用一条 `EngineRunner`，全量从 45s 降到 21s；
   代价是"上一个用例的后端没关干净"会串到下一个，所以 `tests/conftest.py` 里那条
   监听泄漏检查器是必需的，不是可选的清洁工。
+
+M4 内确认（**已清零**，结论都有用例钉住；这些是"看着像常识、实测不成立"的那一类）：
+
+- **已实测：`random.Random(种子)` 是确定的，跨进程也一样**（字符串种子走 sha512 派生，不掺
+  pid / 系统熵 / hash 随机化）。→ 计划里那句"`interval` 缺省就 `Random(bucket)`，两次运行不
+  重复"**不成立**：同一个 `bucket` 每次 pytest 都给同一个数，正是 §5"不填 `seed` 则不重复"
+  不要的形状。所以不填 `seed` 时种子掺一份**每进程**熵（import 时取一次 pid +
+  `SystemRandom`，本次运行内恒定，同 `interval` 区间里才不抖），填了 `seed` 就完全可复现。
+  证据：`tests/test_waveform.py::test_random_is_stable_within_one_interval_and_seeded_is_reproducible`
+  （金标准是常量 `25.14189165270887`，不是"和自己比"的自证式断言）、
+  `::test_random_defaults_to_one_second_between_values_when_interval_is_omitted`。
+- **已实测：`_tick_once` 每一轮都重新读同一个 `Point` 对象**（点表摊平成 `[(unit_id, Point)]`
+  一次，之后按对象取）。→ `name`/`waveform`/`wave_param` 是 **live 安全**的：面板改完下一拍
+  就生效，不需要重载会话；而 `area`/`address`/`datatype`/`word_order`/`initial`/`readonly` 烘在
+  `start_channel` 时建好的 `SimDevice` 与 `Session._points` 索引里，**必须重启通道**才生效。
+  这条区分是点位属性面板整套拒绝口径的根据，也顺手钉住了 `Point.span` 的稳定性（跨度由
+  `datatype`+`initial` 算出，跑着时改不动 → 接管键不会陈旧）。证据：
+  `tests/test_gui_point_props.py::test_live_safe_fields_apply_while_the_channel_runs_without_reloading`、
+  `::test_structural_fields_refuse_an_apply_while_the_owning_channel_runs`。
+- **已实测：一张带着 error 的点表必须照样渲染**——区名写成 `holding` 的那一行让
+  `QAbstractTableModel.data()` 对**该行每一格**都抛（10/10 格全空白），"带错装载再进去修"
+  这条路在表格层是死的（而 §8 的"一次报全"就意味着操作员开的往往是这一行）。→ 算不出的
+  惯例地址在显示层给同一个 `—` 标记（`point_table.NO_CONVENTION`，面板共用），
+  `conventional()` 继续抛：判定只在 `validate_project` 一份里，标记不许变成"看着合法的错值"。
+  证据：`tests/test_gui_point_table.py::test_a_row_with_an_unknown_area_still_renders_every_column`、
+  `::test_showing_a_dirty_row_does_not_make_it_valid`。
+- **已实测：波形节拍是"先睡一个周期再算"**，所以通道起来之后的头一个 `tick_ms` 里寄存器还是
+  点表初值（`tick_ms=50` 时实测首样 4/4 读到 12.5）。→ 主站侧"读到的第一条不是曲线"是预期，
+  任何验收都得先等第一拍，否则断言测的是启动时序而不是波形。证据：
+  `tests/test_integration_tcp.py::test_a_real_master_reads_a_running_sine_wave` 采样前那句
+  `wait_for`。
+- **已实测：把归属判定拆掉之后，"写一次、0.5 秒后读一次"这种单点采样会放过变异**——
+  `step;1,0;interval=0.2` 的 2.5 倍正好是 0.5 秒，那一拍曲线本来就在 1 上。→ 下发不被顶的
+  验收必须把一个周期铺开取样（实测形状 `[True, True, True, False, False]`）。证据：
+  `tests/test_integration_tcp.py::test_a_master_write_of_a_coil_survives_the_waveform_tick`。
+- **已实测：05/06 的响应帧与请求逐字节相同**（连 transaction id 都一样），15/16 的响应回的是
+  同样的 fc+地址+数量，异常响应又被 `parse_packet` 脱掉了 `0x80`。→ 报文侧唯一可靠的
+  "这是主站的命令"判据是 `direction == "rx"`，按内容分辨不出来。这条只有单元层钉得住：
+  把 `direction` 判掉之后集成用例全绿（响应帧多标一次 manual 是幂等的）。证据：
+  `tests/test_ownership.py::test_the_slaves_own_write_response_is_not_a_write`。
+- **已实测：位区与寄存器区的两个写入口不许混用**（M1 的 `raw_writer` 说明，M4 的 tick 用到）：
+  寄存器路径的"地址 0"是**线圈 0..15 共用的那一整字**，所以
+  `write_registers(11,'co',0,[0x0002])` 会回 `True` 而点亮的是**线圈 1**（同一字里的第 1 位），
+  并把那一个字其余 15 位一起覆盖掉——"引擎想关风机、写成开"就是这么来的。→ `raw_writer`
+  直接按区把两条 API 互相拒掉，tick 按 `area_is_bit` 分派。证据：
+  `tests/test_raw_writer.py::test_register_api_refuses_bit_areas`、
+  `::test_bit_api_refuses_register_areas`（两条 API 互拒），
+  `tests/test_integration_tcp.py::test_one_bad_point_does_not_stop_the_rest_of_the_tick`
+  （tick 若给 `co` 走寄存器入口，那个点会因 `ValueError` 不算写掉，`written == 2` 当场红）。
 
 M5 内确认：
 

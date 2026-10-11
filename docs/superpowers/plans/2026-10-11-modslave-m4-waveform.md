@@ -75,7 +75,9 @@ docs/superpowers/specs/2026-10-08-modbus-slave-simulator-design.md  回写 §4/�
 - Consumes: `modslave.project.model.WAVEFORMS`、点位的 `wave_param: dict[str,str]`（`csv_io.parse_wave_param` 已经切好 `k=v;k=v`）
 - Produces:
   - `waveform_value(name: str, params: dict[str, str], t: float) -> float | int | bool | str`
-  - `WAVE_BUILDERS: dict[str, Callable[[dict[str,str]], Builder]]`，`Builder.next(t) -> value`（spec §9 的"注册表按名字装配"）
+  - `WAVE_BUILDERS: dict[str, Callable[[dict[str,str]], Callable[[float], value]]]`——工厂吃参数、
+    回一个 `t -> value` 的可调用对象（**落地形状**：计划原先写的是 `Builder.next(t)`，实现里没有
+    `.next` 这一层，见末尾偏离表 D5；spec §9 的"注册表按名字装配"照样成立）
   - `clamp_to_datatype(value, datatype: str) -> tuple[value, bool]`（返回钳位后的值与"是否被钳过"）
 
 - [ ] **Step 1: 写失败的测试（`const` / `sine`）**
@@ -1080,11 +1082,11 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "feat: 点位�
 - Modify: `docs/superpowers/specs/2026-10-08-modbus-slave-simulator-design.md`（§7/§11/§12）
 - Modify: `docs/superpowers/plans/2026-10-11-modslave-m4-waveform.md`（勾选与偏离表）
 
-- [ ] **Step 0: 夹具先把 `tick_ms` 透出来**
+- [x] **Step 0: 夹具先把 `tick_ms` 透出来**（Task 4 已落，本轮核对：`tests/conftest.py` 的 `_open(channel, packet_sink=None, on_connection=None, tick_ms=0, log_sink=None)`）
 
 `tests/conftest.py` 的 `open_backend` 已经是 `_open(channel, packet_sink=None, on_connection=None)`；Task 4 加了 `tick_ms`/`log_sink` 之后签名变成 `_open(channel, packet_sink=None, on_connection=None, tick_ms=0, log_sink=None)`，内部原样交给 `ModbusTcpBackend(...)`。**这一步在 Task 4 做过，这里只是确认它存在**——Task 7 三条用例都靠 `tick_ms` 让真 tick 跑起来。
 
-- [ ] **Step 1: 真主站读一条动起来的 `sine`**
+- [x] **Step 1: 真主站读一条动起来的 `sine`**（落地多了一步"等第一拍"，见偏离表 D10）
 
 ```python
 def test_a_real_master_reads_a_running_sine_wave(open_backend):
@@ -1093,15 +1095,21 @@ def test_a_real_master_reads_a_running_sine_wave(open_backend):
     周期 1.2s、`tick_ms=50`，采 4 次每次间隔 0.4s：区间要守住，而且不能是一串常数
     （常数就是"tick 没在跑"或"值被谁顶住了"的形状）。`CO浓度` 是 CDAB 浮点，正好把
     字序一起验了。
+
+    采样前先拿主站自己的读等第一拍：`_tick_loop` 是**先睡一个周期再算**，监听起来之后的
+    头 50ms 里寄存器还是点表初值 12.5（实测首样 4/4 次都是它）。
     """
     project = tunnel_project(free_port())
     point = project.channels[0].devices[0].points[0]
     point.waveform, point.wave_param = "sine", {"base": "100", "amp": "20",
                                                 "period": "1.2"}
-    with open_backend(project.channels[0], tick_ms=50) as backend:
+    with open_backend(project.channels[0], tick_ms=50):
         client = connect(project.channels[0].port)
         seen = []
         try:
+            wait_for(lambda: 80.0 <= cdab_to_float(client.read_holding_registers(
+                0, count=2, device_id=11).registers) <= 120.0,
+                what="第一拍 tick 把 sine 写进了寄存器")
             for _ in range(4):
                 seen.append(client.read_holding_registers(0, count=2,
                                                           device_id=11).registers)
@@ -1113,7 +1121,7 @@ def test_a_real_master_reads_a_running_sine_wave(open_backend):
     assert len({round(v, 1) for v in values}) >= 3, f"曲线没在动：{values}"
 ```
 
-- [ ] **Step 2: 主站下发不被波形顶回去（spec §7 的验收，也是 W1 的验收）**
+- [x] **Step 2: 主站下发不被波形顶回去（spec §7 的验收，也是 W1 的验收）**
 
 ```python
 def test_a_master_write_survives_the_waveform_tick(open_backend):
@@ -1137,14 +1145,15 @@ def test_a_master_write_survives_the_waveform_tick(open_backend):
             client.close()
 ```
 
-- [ ] **Step 3: `co` 上的下发同测（走 `write_bits`，不是 `write_registers`）**
+- [x] **Step 3: `co` 上的下发同测（走 `write_bits`，不是 `write_registers`）**（落地把那一次读铺成 0.5 秒里连读 5 次，见偏离表 D11：单点读会让变异存活）
 
 ```python
 def test_a_master_write_of_a_coil_survives_the_waveform_tick(open_backend):
     """位区单独走一条：`write_registers` 写 `co` 会写错一位（raw_writer 的实测说明）。
 
     `启动` 线圈配 `step;1,0;interval=0.2`——不接管的话它每 0.2 秒翻一次，主站读到的是
-    一直在抖的启动指令。写 1 之后 0.5 秒再读，必须仍是 1。
+    一直在抖的启动指令。写 1 之后 0.5 秒里**连读 5 次**，每次都必须是 1（只读一次会放过
+    变异：0.5s 正好是 `interval` 的 2.5 倍，那一拍曲线本来就在 1 上，见 D11）。
     """
     project = tunnel_project(free_port())
     coil = next(pt for pt in project.channels[0].devices[0].points if pt.area == "co")
@@ -1153,13 +1162,18 @@ def test_a_master_write_of_a_coil_survives_the_waveform_tick(open_backend):
         client = connect(project.channels[0].port)
         try:
             client.write_coil(coil.address, True, device_id=11)
-            time.sleep(0.5)
-            assert client.read_coils(coil.address, count=1, device_id=11).bits[0] is True
+            seen = []
+            for _ in range(5):
+                seen.append(client.read_coils(coil.address, count=1,
+                                              device_id=11).bits[0])
+                time.sleep(0.1)
+            assert all(bit is True for bit in seen), \
+                f"下发被波形顶回去过：{seen}"
         finally:
             client.close()
 ```
 
-- [ ] **Step 4: 全量与变异检查**
+- [x] **Step 4: 全量与变异检查**（四条变异逐条结果见下面那张表）
 
 Run: `.venv/Scripts/python.exe -m pytest`（**串行，一次只跑一份**）
 Expected: 全 PASS（基线 773，只增不减），无 skip / xfail
@@ -1171,6 +1185,19 @@ Expected: 全 PASS（基线 773，只增不减），无 skip / xfail
 4. `ramp` 的 `hold` 改成恒 0 → Step 6 的 hold 用例红。
 
 任何一条"改坏了还全绿"，就是那条用例是假的——把它写结实再继续（M2 有过同样一轮：`readonly` 恒 True 时全量 468 条全绿）。
+
+**Task 7 执行结果（每条改坏→跑→撤，撤完用 `git diff` 复核过只剩该留的改动）**：
+
+| 变异 | 改在哪 | 红的是谁 | 结论 |
+|---|---|---|---|
+| 1 `_tick_once` 无视归属 | `backend/modbus_tcp.py`：`if not self._sources.is_waveform(...)` 判成恒假 | `test_a_point_the_master_took_over_gets_not_a_single_word_from_the_tick`、Step 2 的 `test_a_master_write_survives_the_waveform_tick`（读到 `[9]`）、Step 3 的线圈那条 | **第一轮 Step 3 存活**（`0.5s` 正好是 `interval=0.2` 的 2.5 倍，单点读撞回曲线的 1 那一半）。改成 0.5 秒里连读 5 次之后 3/3 红，形状是 `下发被波形顶回去过：[True, True, True, False, False]` → 见偏离表 D11 |
+| 2 去掉 sink 的 `readonly` 跳过 | `backend/modbus_tcp.py::_own_write_frame` | `test_a_write_the_protocol_refused_does_not_take_the_waveform_off` | 红（被拒的写不许把曲线停了） |
+| 2b `write_targets` 不判 `direction` | `backend/ownership.py`（计划这条原文） | `tests/test_ownership.py::test_the_slaves_own_write_response_is_not_a_write` | 红，且**只有它红**：从站自己的响应帧与请求逐字节相同，把响应也标一次 manual 是幂等的，所以集成侧看不出来——判据得靠这条单元用例 |
+| 3 `clamp_to_datatype` 原值返回 | `codec/waveform.py` | `tests/test_waveform.py::test_clamp_pins_out_of_range_and_nan_to_the_low_edge` + 12 条集成/会话用例（11 集成 + 1 会话） | 红 |
+| 4 `ramp` 的 `hold` 恒 0 | `codec/waveform.py::_ramp` | `test_ramp_hold_parks_at_the_edge_before_reversing`、`test_ramp_lower_hold_parks_at_the_low_bound_before_reversing` | 红 |
+| 补 1（计划外，验 Step 1 的"不许是常数"） `sine` 忽略 `t`（振幅乘 0） | `codec/waveform.py::_sine` | `test_a_real_master_reads_a_running_sine_wave`（`曲线没在动：[100.0, ×4]`）、`test_sine_formula_and_phase_default` | 红 |
+| 补 2（Task 7 的新判据）关掉空点位名 | `project/validate.py::_points` | `test_validate.py` 3 条 + `test_gui_point_props.py::test_blanking_the_name_is_refused_and_brought_back_into_the_field` + `test_csv_io.py::test_an_empty_name_is_refused_by_the_loader_and_by_validate` | 红 |
+| 补 3（Task 7 的新判据，因 D8 那条常量共用而加）`_display` 退回"未知区名直接抛" | `gui/point_table.py::_display`（去掉 `except ValueError` 那两行，让 `conventional()` 的抛逃出去） | `tests/test_gui_point_table.py::test_a_row_with_an_unknown_area_still_renders_every_column` | 红（`ValueError: unknown area 'holding'` 从 `data()` 逃出来，正是 Task 6 第二轮那个 Critical 的形状）；面板那一格由 `test_gui_point_props.py::test_a_row_with_an_unknown_area_opens_and_stays_an_error` 自己钉着，两处不互相顶掉（本轮实测：拆表格那半，面板那条仍绿） |
 
 - [ ] **Step 5: 人工冒烟清单（要他亲手做，自动化替不了）**
 
@@ -1186,7 +1213,7 @@ Expected: 全 PASS（基线 773，只增不减），无 skip / xfail
 6. 属性面板改一个合法地址 → 面板写着"重启通道后生效"，此时从站**仍在旧地址应答**（这是预期），停止再启动后新地址生效；
 7. 全流程里窗口布局不因为状态变化挪动过（`●/▲`、`已停`、菜单置灰都不许推挤控件）。
 
-- [ ] **Step 6: 文档回写并提交**
+- [x] **Step 6: 文档回写并提交**（spec §7/§11/§12 与本文件的偏离表已回写；提交按 ledger 的口径由控制器执行，实现方不动 git）
 
 spec 里三处：
 - §7 把"`source` 规则"从设计描述改成已实现口径（含"主站写入也切 manual，识别在 rx 报文侧"）；
@@ -1202,15 +1229,22 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "test: 真主�
 
 ## M4 完成检查表
 
-- [ ] `.venv\Scripts\python.exe -m pytest` 全绿，无 skip / xfail（基线 773，只增不减；**串行跑**）
-- [ ] `tests/test_architecture.py` 仍全绿：`waveform.py`/`ownership.py` 里**没有** `PySide6`，`point_props.py` 里**没有** `pymodbus`
-- [ ] 五种波形每条都有"注入固定 `t`"的纯函数断言，且 §5 表的每个默认值分支（`phase/hold/interval/seed`）都有用例
-- [ ] 主站写 `hr`（06/16）与 `co`（05/15）两条路都有"两个 tick 后值仍是主站写的"集成用例
-- [ ] 钳位有日志、且同点同类 60s 内只一条
-- [ ] 属性面板：验不过整体回滚、不留脏标记、写明"重启通道后生效"、几何与可见性恒定
-- [ ] Task 7 Step 4 的四条变异检查逐条确认"改坏它就变红"
-- [ ] Task 7 Step 5 的人工清单由用户当面跑过
-- [ ] `git status --short` 为空
+- [x] `.venv\Scripts\python.exe -m pytest` 全绿，无 skip / xfail（基线 773，只增不减；**串行跑**）
+      —— Task 7 收尾实测 **909 passed in 86.18s**（900 → +3 条真主站验收、+5 条空点位名判据、+1 条面板拒绝用例）
+- [x] `tests/test_architecture.py` 仍全绿：`waveform.py`/`ownership.py` 里**没有** `PySide6`，`point_props.py` 里**没有** `pymodbus`
+- [x] 五种波形每条都有"注入固定 `t`"的纯函数断言，且 §5 表的每个默认值分支（`phase/hold/interval/seed`）都有用例
+- [x] 主站写 `hr`（06/16）与 `co`（05/15）两条路都有"两个 tick 后值仍是主站写的"集成用例
+      —— `test_a_master_write_survives_the_waveform_tick`（0.5s = 十个 tick）、
+      `test_a_master_write_of_a_coil_survives_the_waveform_tick`（0.5s 里连读 5 次，见 D11）
+- [x] 钳位有日志、且同点同类 60s 内只一条
+- [x] 属性面板：验不过整体回滚、不留脏标记、写明"重启通道后生效"、几何与可见性恒定
+- [x] Task 7 Step 4 的四条变异检查逐条确认"改坏它就变红"——见 Step 4 下面那张结果表；
+      其中第 1 条**第一轮放过了线圈那条用例**（单点采样撞回曲线的 1），改结实后 3/3 红；
+      另加三条（`sine` 忽略 `t`、关掉空点位名判据、`write_targets` 不判 `direction`）也都红
+- [ ] Task 7 Step 5 的人工清单由用户当面跑过 —— **还等人的这一条**（自动化替不了：
+      界面跳动、右键恢复、布局不挪动要肉眼过；M2 那两条人工清单同样还挂着）
+- [ ] `git status --short` 为空 —— 由控制器在本 Task 评审通过后按计划的信息提交（实现方按
+      ledger 的口径不碰 git），提交前这里必然是脏的
 
 ## M4 不做（留给后续）
 
@@ -1228,3 +1262,26 @@ git -c user.name=gaojie -c user.email=2084220263@qq.com commit -m "test: 真主�
 **1. spec 覆盖**：§5 波形参数表 → Task 1（五种 + 默认值分支）；§7 值归属 → Task 2/3/5；§8 钳位 + 60s 去重 → Task 4；§9 注册表缝 → Task 1 的 `WAVE_BUILDERS`；§10 纯函数注入时间戳 + 真主站集成 → Task 1 / Task 7；§11 M4 含"点位属性面板" → Task 6。**没有漏项**。
 **2. 占位符**：Task 1 Step 6 的 `_ramp.value()` 是**故意留了"能跑通但不干净"的实现 + 一条必须重写的指令**（不是 TBD，代码是全的），Step 7 之后有验收。Task 3 的 `_tick_once` 给的是完整代码，但 **Step 5/6 关于 `Session` 的那几处给的是"改哪里 + 判据 + 为什么"而不是整段抄写**——因为 `Session` 已被 M2 撑到 450 行、`set_point` 的 `runner.call` 那段有它自己的异常口径，逐行抄一份"参考实现"会与本仓库实际形状分叉（M1/M2 计划里那些"裁决前快照"代码块就是这么失效的）。执行时以"测试先红后绿 + 要点逐条落到"为准，形状对不上就按仓库现状改，别照抄。
 **3. 类型一致性**：`waveform_value(name, params, t)`、`clamp_to_datatype(value, datatype) -> (value, bool)`、`SourceStore.own(channel, unit_id, area, address, count, who)`、`is_waveform(channel, unit_id, area, address)`、`restore(...) -> bool`、`write_targets(packet) -> list[(unit_id, area, address, count)] | None`、`Session.restore_waveform(...) -> bool`、`Row.source: str`（默认 `"waveform"`，位置在最后）——Task 1/2/3/5 之间用名与签名一致。`_tick_once(now)` 全程只用传入的 `now`，不在函数里读 `time`，这样 Task 3/4/7 的确定性测试才成立。
+
+---
+
+## 执行期已裁决的偏离（评审后确定，评审者按此核对，不要再当跑偏报）
+
+沿用 M1/M2 计划的这张表：正文写于执行之前，与仓库落地形状不一致的地方**以本表与代码为准**。
+每条都带"证据"列——那条用例把它钉着，改这些行为前先改用例。
+
+| # | 偏离 | 定死的口径 | 出处 / 证据 |
+|---|---|---|---|
+| D1 | 正文"Architecture/文件结构"把 tick 与运行态画在 `engine/`（spec §4 那张图也在引擎那一侧） | 纯函数进 `codec/waveform.py`；**tick 循环、`SourceStore`、`LogDedupe` 进 `backend/`**。无头 CLI（`python -m modslave x.csv`，M1 的验收入口）直接建 `ModbusTcpBackend`、**不建 `Session`**——tick 住在 `Session` 就等于"命令行起的从站没有波形"；而 `gui → engine → backend` 单向（`tests/test_architecture.py` 守），`backend` 反过来 import `engine` 会破方向 | Task 3；`tests/test_integration_tcp.py::test_a_started_channel_routes_waveform_warnings_into_the_session_log`（生产那条路是 `Session` 把 `tick_ms` 交下去） |
+| D2 | 正文 Step 11 说"不填 `seed` 就用 `Random(bucket)`，两次运行之间不重复" | **实测不成立**：`random.Random(int)` 的播种是确定的，同一个 `bucket` 跨进程同值，两次 pytest 会给出**同一条**曲线，正是 spec §5"不填则不重复"不要的形状。落地为 `key = f"{_RUN_SALT}:{bucket}"`，`_RUN_SALT` 在 import 时取一次 `pid + SystemRandom` 熵（本次运行内恒定，所以同 bucket 内不抖）。`interval` 按 §5 是**选填**、缺省 1.0（正文一度当必填） | Task 1；`tests/test_waveform.py::test_random_is_stable_within_one_interval_and_seeded_is_reproducible`（golden 常量，不是自证式比对）、`::test_random_defaults_to_one_second_between_values_when_interval_is_omitted` |
+| D3 | 正文 Step 13 手抄了一份 `_BOUNDS` 数字表 | 改成从 `model._INT_BOUNDS` / `model._FLOAT_LIMIT` **派生**，并加导入期漂移守卫（`set(_BOUNDS) \| {BOOL, STRING} == set(DATATYPES)`，不等就 `RuntimeError`）。同裁决 H/M：两个来源就一定会漂 | Task 1；`tests/test_waveform.py::test_clamp_pins_out_of_range_and_nan_to_the_low_edge` |
+| D4 | 正文 Step 5 的 `ramp` 期望 `t=15.0 → 0.0` | **计划错**：`hold=0` 时一个来回是 `2*leg=10s`，`t=15` 的相位是 5，正落在**上边界** → 期望 10.0。正文已按实测改正（那两行 + 一句说明），改的是计划不是实现 | Task 1；`tests/test_waveform.py::test_ramp_moves_by_speed_and_bounces_at_the_edges` |
+| D5 | 正文 Task 1"Produces"写 `WAVE_BUILDERS: dict[str, Callable[..., Builder]]`、`Builder.next(t)` | 落地形状是工厂回一个 **`t -> value` 的可调用对象**（`_const` 直接 `return lambda t: ...`），没有 `.next` 那一层。spec §9 的"注册表按名字装配"不受影响；Produces 那两行已按形状改正 | Task 1；`tests/test_waveform.py` 全部走 `waveform_value(name, params, t)` 这个三参数形式 |
+| D6 | 正文 Task 2/3 把接管按**裸协议地址**记，命中判据写的是 `address <= pt.address < address + count` | 归属的单位是**点**（spec §7），三条都是计划里没有、评审实测要求加的：① 命中判据换成**区间求交** `pt.address < address + count and address < pt.address + pt.span`，`own(...)` 传 `count=pt.span`——否则主站从 uint64 的中间格写起时基础格还在波形手上，下一 tick 把刚写的值一起顶掉；`restore(...)` 同样收 `count`，整点放行（不然 `cleared()` 只增不减）；② `pt.readonly` 的点**跳过**——主站写只读点被协议拒（异常码 2），但 rx 照样解成"写"，不过滤就变成"一次没成功的写把曲线停了"，而 `raw_writer` 写得进只读点，症状比"主站压根写不到"更难查；③ backend 自己按 MBAP `length` **切帧**（pymodbus 在组帧前 trace：一个字节块可能挤两条写，也可能只有半帧，半帧下次整段重放），`length` 不在 2..254 就整段不认 | Task 2/3；`test_a_master_write_at_a_middle_register_takes_the_whole_point_over`、`test_a_write_the_protocol_refused_does_not_take_the_waveform_off`、`test_two_writes_inside_one_tcp_chunk_are_both_taken_over`、`test_a_write_split_across_two_chunks_is_still_taken_over`、`test_a_chunk_whose_length_field_lies_does_not_take_over_anything`（均在 `tests/test_integration_tcp.py`） |
+| D7 | 正文 Task 6 Step 5 写"apply 之后 `session.load`" | **推翻**：`Session.load()` 第一步是 `_stop_all_locked()`——为一个已停通道改地址，会把另一路正给网关服务的从站一起停掉，是新的现场事故。落地：结构性字段（区/地址/类型/字序/初值/只读）在**所属通道在跑**时整体拒绝并点名"先停通道"；全停才 `load`，兄弟在跑用新增的 `session.reindex(那一行的通道)`（只重建读写索引，且它自己就挡"给在跑的通道重建键"）。面板另外把字段分成 live 安全（名称/波形/波形参数，原地改、下一拍生效）与结构性两份清单，清单只在一处定义 | Task 6；`test_structural_fields_refuse_an_apply_while_the_owning_channel_runs`、`test_a_structural_edit_with_a_sibling_running_keeps_the_sibling_and_reindexes`、`test_session_reindex_refuses_to_rekey_a_channel_that_is_running`、`test_a_structural_apply_with_nothing_running_reconciles_the_channel_set`（`tests/test_gui_point_props.py`） |
+| D8 | 正文没有"点表带着 error 时表格画不画得出来"这一条 | 控制器复现的 Critical：区名 `holding` 那一行使 `QAbstractTableModel.data()` 对**该行每一格**都抛（实测 10/10 格崩），"带错装载再进去修"这条路在表格层是死的。定死：**脏行也必须渲染**——显示层对算不出的惯例地址给同一个 `NO_CONVENTION`（`—`）标记，`conventional()` 继续抛（它同时是面板的判定入口，那里要靠异常区分"算不出"）。标记常量从 `point_table` 导出给面板用，两处不再各留一份字面量 | Task 6 修复轮 + Task 7 C.3；`tests/test_gui_point_table.py` 的脏行用例、`tests/test_gui_point_props.py::test_a_row_with_an_unknown_area_opens_and_stays_an_error` |
+| D9 | spec §8 的启动前清单里没有"点位名不许为空"，正文也没写 | **Task 7 补的判据**：空点位名今天能从属性面板一路走到运行态（`name_edit.text().strip()` 原样写回本体、零新增错误就应用、`start_channel` 照起、这份工程导出的 CSV 再也导不回来）。判据加在 `validate_project._points`——面板的新增错误差集与 `start_channel` 问的都是这一份，一处加两处生效；`csv_io._require_text` **保留不接管**（它说得出行号，管的是 CSV 单元格那一格）。代价：`tests/test_csv_io.py` 里原先钉着"validate 对空 name 一条 error 都不出"的那条断言被本行推翻，已改成"两层各拦各的、行号那句仍在 loader" | Task 7 B；`tests/test_validate.py::test_a_blank_point_name_is_an_error_naming_the_device_and_the_address`、`tests/test_gui_point_props.py::test_blanking_the_name_is_refused_and_brought_back_into_the_field` |
+| D10 | 正文 Task 7 Step 1 的"起来就采 4 次" | **实测把第一条采成点表初值**：`_tick_loop` 是**先睡一个周期再算**，监听起来后的头 `tick_ms` 里寄存器还是初值（实测首样 4/4 是 12.5），区间断言当场红。落地在采样前先用主站自己的读等第一拍 | Task 7 A；`tests/test_integration_tcp.py::test_a_real_master_reads_a_running_sine_wave` |
+| D11 | 正文 Task 7 Step 3 的"0.5 秒后读一次" | **变异当场存活**（本轮实测）：0.5s 正好是 `step;1,0;interval=0.2` 的 2.5 倍，单点读撞上"曲线此刻在 1 那一半"，把 `_tick_once` 的归属判定拆掉它照样全绿。改成 0.5 秒里连读 5 次、每次都要是 1——任何一次越权写入都会被其中一次读到 | Task 7 A；同一变异重跑 3/3 红（`下发被波形顶回去过：[True, True, True, False, False]`） |
+| D12 | 正文 Task 7 Step 4 的变异第 2 条写的是"把 `write_targets` 里 `direction != "rx"` 判掉"，本轮派单写的是"去掉 sink 里 `readonly` 那条跳过" | **两条不是同一个变异，两条都跑了**：前者红 `tests/test_ownership.py::test_the_slaves_own_write_response_is_not_a_write`（05/06 的响应与请求逐字节相同，`direction` 是唯一可靠判据），后者红 `test_a_write_the_protocol_refused_does_not_take_the_waveform_off`。Step 4 第 1/3/4 条也各自红（见 M4 完成检查表那一行的结果） | Task 7 E |
+| D13 | 正文与多处注释把"运行期拒绝**带点位名**""值没写出去 vs 写掉了"引成 `spec §8` 的原话 | §8 原文只有"越界/NaN → 钳到边界 + 只记一条日志、同点同类 60s 不重复刷屏"和"运行期故障要有一条日志"；**带点位名是本文件 Global Constraints 那条报错口径**，两种处置的区分是 Task 4 定的。已把五处引文改成直述或改引计划（`tests/test_integration_tcp.py` 的小节标题与两条用例、`modslave/backend/modbus_tcp.py::_report_clamp`、`modslave/backend/ownership.py::LogDedupe`），**没有反过来改 spec 迁就代码** | Task 7 C.2；残余一处同类假引文在 `modslave/engine/session.py:248`（不在本轮可改文件清单内，留给下一轮） |

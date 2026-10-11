@@ -116,6 +116,7 @@ def _points(channel_name: str, dev, issues: list[Issue]) -> None:
                f"{brief_name(pt.name)}")
         if pt.row:
             loc = f"{loc} (line {pt.row})"
+        _name(pt, dev, loc, issues)
         if pt.datatype not in DATATYPES:
             issues.append(Issue("error", "datatype", loc,
                                 f"unknown datatype {brief(pt.datatype)}"))
@@ -124,6 +125,28 @@ def _points(channel_name: str, dev, issues: list[Issue]) -> None:
         if pt.datatype in DATATYPES and pt.area in AREAS:
             _shape(channel_name, dev, pt, loc, used, issues)
         _wave(pt, loc, issues)
+
+
+def _name(pt, dev, loc, issues) -> None:
+    """点位名是**身份列**，空着不许一路走到运行态：属性面板把 `name_edit.text().strip()`
+    原样写回本体，零新增错误就应用成功，`start_channel` 照起这个无名的点，而这份工程导出
+    的 CSV 再也导不回来（`csv_io` 认 name 是身份列）。
+
+    家在这里而不是面板：`gui/point_props` 的新增错误差集与 `Session.start_channel` 问的都
+    是这一份清单，加一条两处同时生效；只写进面板的话，命令行起的那一路照样服务无名点。
+    `csv_io._require_text` 不接管这条也不许删——它判的是**CSV 单元格里的那一格**并说得出
+    行号（行号只有 loader 知道），这里判的是**模型里的那个点**，两个来源两种说法，不是
+    同一个判定抄两遍。
+
+    只判"空"（strip 之后），不判"难看"：`0`、带空格、400 字符的名字都是别人点表里的合法
+    身份，多拦一条就是把别人的点表拦在启动之外（同裁决 T 对 host 的口径）。非字符串不在
+    这里说一句"must not be empty"：那要说的是类型不对，说反了比不说更难查。
+    """
+    if isinstance(pt.name, str) and not pt.name.strip():
+        issues.append(Issue(
+            "error", "name", loc,
+            f"point name must not be empty (device {brief_name(dev.name)}, "
+            f"area {brief(pt.area)}, address {brief(pt.address)})"))
 
 
 def _shape(channel_name, dev, pt, loc, used, issues) -> None:

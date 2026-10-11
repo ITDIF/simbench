@@ -2699,12 +2699,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         cols = QtWidgets.QHBoxLayout()
         cols.setContentsMargins(0, 0, 0, 0)
-        self.table = QtWidgets.QTableView()
-        self.table.setModel(self.point_model)
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.table.setWordWrap(False)
+        # 属性只有一个名字 `point_table`：M4 Task 5 的复审把 `MainWindow.table` 那个兼容垫片
+        # 删了（零生产消费者，只为省两行测试改名而存在，且只读 property 会让将来
+        # `self.table = ...` 变成 AttributeError）。别和 `packet_view.PacketPanel` 里的
+        # `self.table` 搞混——那一个是报文表。
+        self.point_table = QtWidgets.QTableView()
+        self.point_table.setModel(self.point_model)
+        self.point_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.point_table.setWordWrap(False)
         cols.addWidget(self.tree, 1)
-        cols.addWidget(self.table, 4)
+        cols.addWidget(self.point_table, 4)
         rows.addLayout(cols, 1)
 
         bottom = QtWidgets.QWidget()
@@ -2931,7 +2935,8 @@ def _row(window, name):
 
 def test_title_marks_dirty_after_a_write(window, qapp):
     assert "*" not in window.windowTitle()
-    window.table.model().setData(window.point_model.index(_row(window, "风机状态"), 6), "21")
+    window.point_table.model().setData(
+        window.point_model.index(_row(window, "风机状态"), 6), "21")
     qapp.processEvents()
     assert window.windowTitle().endswith("*")
 
@@ -3074,7 +3079,7 @@ def snapshot(window):
         "window": window.size().getRect(),
         "tree_col0": window.tree.columnWidth(0),
         "tree_width": window.tree.size().width(),
-        "table_col_widths": [window.table.columnWidth(i)
+        "table_col_widths": [window.point_table.columnWidth(i)
                              for i in range(window.point_model.columnCount())],
         "tabs_geometry": window.tabs.geometry().getRect(),
         "packet_panel": window.packet_panel.geometry_snapshot(),
@@ -3108,7 +3113,7 @@ def test_no_control_is_hidden_on_state_change(window, qapp):
         return ([b.isVisible() for b in window.packet_panel.filter_labels()],
                 window.packet_panel.pause_button.isVisible(),
                 window.packet_panel.clear_button.isVisible(),
-                window.table.isVisible(), window.tree.isVisible())
+                window.point_table.isVisible(), window.tree.isVisible())
     before = visible()
     window._start_all()
     qapp.processEvents()

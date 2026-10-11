@@ -47,6 +47,10 @@ VALUE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == VALUE_HEADER
 STALE_ROLE = QtCore.Qt.UserRole + 1
 
 _CONVENTION = {"co": "0x", "di": "1x", "ir": "3x", "hr": "4x"}
+# 惯例地址算不出时那一格给什么。只有一个字面量：点位表那一格与属性面板那个标签是同一个
+# 意思（地址不是数、或区名根本不在表里），各留一份就会漂成两种标记（面板本来就 import
+# 本模块，从这里取是 2 行，不必为它再加第三个文件）。
+NO_CONVENTION = "—"
 
 
 def conventional(area: str, address: int) -> str:
@@ -55,7 +59,8 @@ def conventional(area: str, address: int) -> str:
     只由 area+address 现算，不在 `Row` 里另存一份：存了就会有"改了 CSV 忘了改它"这种
     漂移，而这一列恰好是现场拿去和点表对号的那一列。未知区名直接抛，不猜一个前缀——
     两个调用方（本模块 `_display`、属性面板 `_update_convention`）各自把这一抛换成
-    `—`，靠的是"抛"和"给标记"分得开：标记只在显示层出现，判定只在 `validate_project`。
+    `NO_CONVENTION`，靠的是"抛"和"给标记"分得开：标记只在显示层出现，判定只在
+    `validate_project`。
     """
     prefix = _CONVENTION.get(area)
     if prefix is None:
@@ -261,7 +266,7 @@ def _display(row: Row, header: str) -> str:
     try:
         convention = conventional(row.area, row.address)
     except ValueError:
-        convention = "—"
+        convention = NO_CONVENTION
     return {
         "名称": row.name, "区": row.area, "地址": str(row.address),
         "4x": convention, "类型": row.datatype,

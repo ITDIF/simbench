@@ -3,6 +3,8 @@
 
 from dataclasses import FrozenInstanceError
 
+import pytest
+
 from modslave.project import validate
 from modslave.project.model import (
     DATATYPES, Device, Point, Project, TcpChannel, WAVEFORMS, word_orders_allowed,
@@ -381,6 +383,57 @@ def test_issue_is_frozen_and_renders_the_blocking_line():
         pass
     else:
         raise AssertionError("Issue 必须是 frozen dataclass：清单生成后不许被改写")
+
+
+# ---- M4 Task 7：点位名不许为空（属性面板能造出这个形状） ----
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_point_name_is_an_error_naming_the_device_and_the_address(blank):
+    """无名点位今天能一路走到运行态：面板把 `name_edit.text().strip()` 原样写回本体，
+    零新增错误就应用成功，`start_channel` 于是对外服务一个没有名字的点，而这份工程导出
+    成 CSV 后再也导不回来（`csv_io` 认 name 是身份列，空名回读当场 ValueError）。
+
+    判据的家在 `validate_project` 而不是面板：面板与 `start_channel` 问的是同一份清单，
+    加一条两处同时生效；`csv_io._require_text` 不接管这条——它管的是"带行号的那一句"，
+    而行号只有 loader 知道（同一个空值两个地方各说一遍，改判据就得改两处）。
+    """
+    issues = [i for i in validate_project(_proj(_p(name=blank))) if i.code == "name"]
+    assert len(issues) == 1 and issues[0].level == "error", issues
+    text = str(issues[0])
+    assert "D1" in text, f"没说是哪台设备的点：{text}"
+    assert "hr" in text and "address 0" in text, f"没指出是无名的那一行：{text}"
+    assert "must not be empty" in text, text
+
+
+def test_a_blank_name_does_not_swallow_that_points_other_errors():
+    """一次报全不打折（同 `test_area_type_mismatch_still_reserves_its_address`）：
+    空名要说一句，但这一行自己的初值脏、它占的格子撞了别人，照样得各说一句——
+    在这里 `return` 就等于让操作员修完名字再跑一轮才发现第二个错。
+    """
+    got = {(i.code, i.where) for i in validate_project(
+        _proj(_p(name="", initial="not-a-number"), _p(name="q", address=0)))
+        if i.level == "error"}
+    assert ("name", "c1/D1/") in got, got
+    assert ("initial", "c1/D1/") in got, got
+    assert ("overlap", "c1/D1/q") in got, got
+
+
+def test_a_real_name_still_needs_no_name_error():
+    """只拦"空"，不拦"难看"：名字带空格、纯数字、400 字符都是点表里合法的身份，
+    多拦一条就是把别人的点表拦在启动之外（同裁决 T 对 host 的口径）。
+    """
+    for name in ("0", " a ", "C" * 400, "CO浓度"):
+        got = [i for i in validate_project(_proj(_p(name=name))) if i.code == "name"]
+        assert got == [], name
+
+
+def test_a_non_string_name_is_left_to_its_own_layer():
+    """`name=None` 是 json 手改出来的形状，不是"空名字"：本条判据只管字符串，
+    非字符串在这里说一句"must not be empty"会把真正的原因（类型不对）说反。
+    """
+    pt = _p(name=None)
+    got = [i for i in validate_project(_proj(pt)) if i.code == "name"]
+    assert got == []
 
 
 def test_overlong_identity_names_do_not_flood_the_report():

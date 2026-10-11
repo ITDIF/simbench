@@ -52,7 +52,7 @@ from ..project.csv_io import format_wave_param, parse_wave_param
 from ..project.model import AREAS, DATATYPES, WAVEFORMS, WORD_ORDERS, Point, \
     brief_name, word_orders_allowed
 from ..project.validate import error_lines, validate_project
-from .point_table import conventional
+from .point_table import NO_CONVENTION, conventional
 
 # 结构性 vs live 安全是裁决的骨架，清单只在这一处定义：面板按它判拒绝与重载，
 # 主窗按它措辞"什么时候生效"（live 安全 = 全字段里不属于结构性的那部分，不另列一份，
@@ -65,9 +65,6 @@ _FIELD_LABELS = {"area": "区", "address": "地址", "datatype": "类型",
 
 _NOTICE_WIDTH = 420
 _ERROR_VIEW_HEIGHT = 64
-# 惯例地址算不出时那一格给什么：地址不是数、或区名根本不在表里（带着错装载的行）都算不出，
-# 半截旧值与前缀猜测都会被读成一个真实地址。
-_NO_CONVENTION = "—"
 
 
 @dataclass
@@ -380,7 +377,7 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         try:
             address = int(text)
         except ValueError:
-            self.convention_label.setText(_NO_CONVENTION)   # 地址不是数：算不出，明说
+            self.convention_label.setText(NO_CONVENTION)   # 地址不是数：算不出，明说
             return
         try:
             self.convention_label.setText(
@@ -389,7 +386,7 @@ class PointPropertiesDialog(QtWidgets.QDialog):
             # 带着错装载的行，区名可以是 `holding` 这种合法表里没有的东西：`conventional`
             # 对未知区名直接抛（它不猜前缀）。这一格给"算不出"，不给半截旧值，
             # 也不在面板里抄第二份区名白名单——那份判定住在 validate_project 里。
-            self.convention_label.setText(_NO_CONVENTION)
+            self.convention_label.setText(NO_CONVENTION)
 
     def _load_widgets(self, point: Point) -> None:
         # 单选组先摆正，再写地址框：setText 会触发 textChanged → `_update_convention`

@@ -564,6 +564,25 @@ def test_a_rename_that_also_creates_a_real_collision_is_still_refused(qapp, wind
     assert real_point(project, KEY).address == 4
 
 
+def test_blanking_the_name_is_refused_and_brought_back_into_the_field(qapp, window):
+    """把名称框清空是面板自己造得出来的形状：`target["name"] = text().strip()` 原样写回本体。
+
+    判据不住在这里——`validate_project._points` 一份，面板靠既有的"新增错误"差集免费拿到
+    这条（这正是它没走进 `_refuse` 那条只服务转换失败的路）。被拒之后本体一字未动、输入框
+    退回真名、不留 dirty，与本文件其余拒绝用例同一个口径。
+    """
+    project = window.session.project
+    before = copy.deepcopy(real_point(project, KEY))
+    dialog = PointPropertiesDialog(window, project, KEY)
+    dialog.name_edit.setText("")
+    assert dialog.apply() is False, "空点位名被应用了"
+    joined = "\n".join(dialog.error_lines())
+    assert "must not be empty" in joined and "device COVI-1" in joined, joined
+    assert real_point(project, KEY) == before, "被拒的空名字留在了本体里"
+    assert dialog.name_edit.text() == NAME, "被拒的值没连输入框一起退回"
+    assert not window.session.dirty
+
+
 # ---------- 两条臂的分工：load 对上一切，reindex 只重建索引且自带守卫 ----------
 
 def test_a_structural_apply_with_nothing_running_reconciles_the_channel_set(

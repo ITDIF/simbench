@@ -451,7 +451,9 @@ def test_empty_identity_column_is_rejected_with_line_number(column):
     """空 channel 会建出一个名为 '' 的通道，空 device/name 把空串原样带进模型。
 
     后果是点位挂到无名通道上：GUI 列表、报文解析、日志三边都对不上号，而从站照样
-    起得来。行号只有 loader 知道，所以这条必须停在 read_csv，不许挪进 validate。
+    起得来。行号只有 loader 知道，所以**带行号的那一句**必须停在 read_csv，不许挪进
+    validate（`validate_project` 后来也判空点位名，但它说不出"第几行"，见
+    `test_an_empty_name_is_refused_by_the_loader_and_by_validate`）。
     """
     with pytest.raises(ValueError) as excinfo:
         read_csv(_row(**{column: ""}), ports=ALL_PORTS)
@@ -475,12 +477,20 @@ def test_two_rows_with_empty_channel_do_not_merge_into_an_unnamed_channel():
     assert str(excinfo.value) == "line 2: channel must not be empty"
 
 
-def test_empty_name_is_not_left_for_validate_to_notice():
-    """validate 对空 name 一条 error 都不出（实测），空串能一路走到模型里：
-    所以挡它的地方只能是 loader，这条断言同时钉住"两边都没静默放行"。"""
+def test_an_empty_name_is_refused_by_the_loader_and_by_validate():
+    """空点位名现在**两层**都拦：loader 拦（带行号的那句，只有它知道行号），
+    `validate_project` 也拦（属性面板清空名称框 apply 之后本体里的空名，CSV 那条路走不到它）。
+
+    这条改的是断言的前半段——它原先钉的是"validate 对空 name 一条 error 都不出（实测）"，
+    那个"实测"到 M4 Task 7 已经不成立：面板带着空名应用得干干净净、`start_channel` 照样
+    服务这个点，而这份工程导出的 CSV 再也导不回来。后半段一个字没动：`_require_text`
+    不许删，它给的是行号。
+    """
     proj = Project(channels=[TcpChannel(name="c", devices=[Device(
         name="D", unit_id=1, points=[Point("", "hr", 0, "uint16")])])])
-    assert error_lines(validate_project(proj)) == []
+    lines = error_lines(validate_project(proj))
+    assert len(lines) == 1 and lines[0].startswith("[name] c/D/:"), lines
+    assert "must not be empty" in lines[0] and "device D" in lines[0], lines[0]
     with pytest.raises(ValueError, match="line 2: name must not be empty"):
         read_csv(_row(name=""), ports=ALL_PORTS)
 
