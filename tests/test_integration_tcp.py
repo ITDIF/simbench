@@ -1111,7 +1111,8 @@ def test_a_point_that_stopped_computing_is_named_instead_of_falling_silent(open_
     四类坏点各配一个（Task 1 实测的形状：未知名 `KeyError`、`period=0`
     `ZeroDivisionError`、参数不是数 `ValueError`、字符串点位的编码 `ValueError`），外加
     一个好点。三条各自钉一个容易被改坏的地方：
-    ① `written` 只数真写掉的好点（把失败也计进去时这句会先红，要点 6）；
+    ① `written` 只数真写掉的好点（把失败也算进去时这一句会先红，spec §8 的"值没写出去"
+       与"写掉了"是两件事）；
     ② "算值炸"与"编码炸"是两个 kind、两句不同的话——操作员要改的东西不一样
        （曲线名/参数 vs 点表的类型），共用一个身份时后者会被前者吃掉；
     ③ 消息带异常类名，否则"为什么这个点不刷新"只剩操作员自己猜。
@@ -1139,6 +1140,40 @@ def test_a_point_that_stopped_computing_is_named_instead_of_falling_silent(open_
     assert "encode" in encoded and "ValueError" in encoded, encoded
 
 
+def test_the_same_point_reports_both_failure_stages(open_backend):
+    """上一用例的四个坏点是四个不同的地址，同一个点从来没走到过第二个 stage，所以它那句
+    ②（"compute 与 encode 是两个身份"）其实没被任何断言覆盖——两个身份塌成一个时，全仓库
+    没有一条用例会红。这里补上那个缺口：同一个点先以 `compute` 落进表里、再以 `encode`
+    落进表里。
+
+    现场形状是操作员照着第一句日志把波形名改对（`spiral` → `const`），值却照样编不出去
+    （string 点位挂着数值曲线）：地址一个字没动，炸的那一步换了。塌成一个身份时第二句会被
+    第一句压住 60s，而他刚改完东西正等这句回执（spec §8 的"不重复刷屏"说的是同点**同类**，
+    不是同点）。后半段反向钉：两类各自再犯一次时照旧不许刷屏——分成两个身份不能变成"这个
+    点每类都爱说几遍说几遍"。
+    """
+    seen: list[tuple[str, str]] = []
+    project = tunnel_project(free_port())
+    point = project.channels[0].devices[0].points[4]      # 铭牌 hr9 string
+    point.waveform, point.wave_param = "spiral", {}      # 算值就炸 → compute
+    with open_backend(project.channels[0], tick_ms=0,
+                      log_sink=lambda level, text: seen.append((level, text))) as backend:
+        assert backend._tick_once(now=0.0) == 0, "炸掉的点不许算作写掉"
+        assert len(seen) == 1 and "compute" in seen[0][1], seen
+        # 改完波形名，同一个点换在编码那一步炸：地址没动，stage 动了
+        point.waveform, point.wave_param = "const", {"value": "7"}
+        assert backend._tick_once(now=0.5) == 0
+        assert len(seen) == 2, seen                       # 身份塌成一个时这里只剩 1 条
+        assert seen[1][0] == "error" and "铭牌" in seen[1][1], seen
+        assert "encode" in seen[1][1] and "ValueError" in seen[1][1], seen
+        # 各自再犯一次（都还在同一个 60s 窗口里）：同类照旧压着，也不许顺着把对方挤掉
+        point.waveform, point.wave_param = "spiral", {}
+        assert backend._tick_once(now=0.6) == 0
+        point.waveform, point.wave_param = "const", {"value": "7"}
+        assert backend._tick_once(now=0.7) == 0
+        assert len(seen) == 2, seen                       # 每类一条，不是合计一条
+
+
 def test_a_backend_nobody_listens_to_keeps_no_dedupe_book(open_backend):
     """`log_sink=None` 是无头 CLI 与 M1/M2 绝大多数用例的形状：这里 `_emit` 必须原样不做事。
 
@@ -1158,7 +1193,8 @@ def test_a_backend_nobody_listens_to_keeps_no_dedupe_book(open_backend):
 
 def test_a_failing_log_sink_costs_a_line_not_the_whole_waveform(open_backend):
     """日志那条是**症状**，曲线是病体：sink 自己炸了（订阅者写歪、界面已经没了）时代价
-    只能到"这一条没记上"为止。放它把异常带出去，就是要点 1 防的那件事——而且比一个坏点
+    只能到"这一条没记上"为止。放它把异常带出去，代价就从"少一条日志"升级成"停曲线"
+    （spec §8 只承诺运行期有一条日志，没承诺拿波形去换）——而且比一个坏点
     更糟：整轮中断，同通道其余点位一起冻住。
 
     坏点排在**第一个**（`1e40` 压在 float32 上必然钳位），后面还排着一个好点：
@@ -1186,7 +1222,8 @@ def test_an_unexpected_tick_error_is_reported_and_the_loop_keeps_running(engine_
                                                                         open_backend,
                                                                         monkeypatch):
     """三种异常**之外**的东西逃逸出 `_tick_once` 时，任务一死曲线就静默停了，而通道照旧
-    应答、界面照旧刷新（要点 3 的那道兜底）。
+    应答、界面照旧刷新——`_tick_loop` 那道兜底防的就是这个（spec §8：运行期的故障得留下
+    一条日志，而不是留下一条不动的曲线）。
 
     这里让 writer 头一次写就抛 `RuntimeError`（不在按点兜的三种里）。"下一轮还在跑"要数得
     出来才算证：`calls` 记的是 writer 被调的次数（连炸掉的那些轮也算），先等日志出现、再数到
@@ -1235,8 +1272,9 @@ def test_a_started_channel_routes_waveform_warnings_into_the_session_log(engine_
     就还是空的。
 
     走的是生产那一条完整路：`Session` 起通道 → 工程里的 `tick_ms` 交下去 → 真 tick 在引擎
-    线程上算出越界值 → 同一线程把 `LogLine` 发进事件流（要点 4：sink 不碰 widget，界面那一
-    路是 Qt bridge，不在本条用例的范围）。断言只认事件流里的东西，不去读 backend 的私有表。
+    线程上算出越界值 → 同一线程把 `LogLine` 发进事件流（三个 sink 都在引擎 loop 线程上被调，
+    都不许碰 widget，界面那一路是 Qt bridge，不在本条用例的范围）。断言只认事件流里的东西，
+    不去读 backend 的私有表。
     """
     port = free_port()
     project = tunnel_project(port)

@@ -453,8 +453,8 @@ class ModbusTcpBackend:
         普遍"只捕具体类型"的口径相反，理由要写明白：走到这里的都是没预料到的
         （`_require_writer` 的 RuntimeError、writer 内部的 IndexError、点表与 SimDevice
         不一致……），而这里"捕漏了"的代价不是少一条日志，是**任务死亡**——曲线静默停、
-        通道照旧应答、界面照旧 10Hz 刷新，正是 M4 最防的那类假象（要点 3）。
-        兜住之后这一轮丢掉几个点的写入、下一轮照旧，并且 60s 内留一句带通道名的话。
+        通道照旧应答、界面照旧 10Hz 刷新，正是 spec §8"运行期错误要有一条日志"要防的那类
+        假象。兜住之后这一轮丢掉几个点的写入、下一轮照旧，并且 60s 内留一句带通道名的话。
 
         不写 `except BaseException`：`CancelledError` 必须原样逃出去，`stop()` 靠把任务
         取消来收尾（Task 3 的顺序用例钉着 `task.cancelled()`）。
@@ -489,7 +489,8 @@ class ModbusTcpBackend:
                 value = waveform_value(pt.waveform, pt.wave_param, t)
                 # 先把值钳进 datatype 的区间再编码——写一个被 `& 0xFFFF` 截过的错值比不报
                 # 日志严重（主站读到的是"合法但完全错误"的遥测量）。报告必须排在这个 try
-                # **之内**：那句日志自己出故障时，代价不许越过"这一个点的这一轮"（要点 1），
+                # **之内**：那句日志自己出故障时，代价不许越过"这一个点的这一轮"（spec §8
+                # 只要求运行期有一条日志，没要求拿整轮写入去换），
                 # `_emit` 里那道 sink 兜底是同一件事的另一半。
                 value, clamped = clamp_to_datatype(value, pt.datatype)
                 if clamped:
