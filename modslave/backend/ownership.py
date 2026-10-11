@@ -1,8 +1,10 @@
-"""值归属：每个点是 `waveform` 还是 `manual`。
+"""运行态两张表：每个点是 `waveform` 还是 `manual`，以及同点同类的报错 60s 只留一条。
 
 **只在引擎 loop 线程读写**（`Session` 负责把 GUI 的接管/恢复命令用 `runner.call`
 投回来）。这不是洁癖：这条仓库刚被"跨线程共享可变状态"咬过一次（spec §13 那条
-GC 死锁），运行态只有一条线程碰，才谈得上"界面卡住也不会把状态写歪"。
+GC 死锁），运行态只有一条线程碰，才谈得上"界面卡住也不会把状态写歪"。`LogDedupe`
+是同一条纪律下的第二张表——tick 在 loop 上算值、在 loop 上报错，两张表都只被那一条
+线程摸到。
 """
 
 from __future__ import annotations
@@ -65,6 +67,43 @@ class SourceStore:
         折算需要点表跨度，而本模块不持有点位对象（见 `write_targets` 只给裸协议地址）。
         """
         return len(self._manual)
+
+
+@dataclass
+class LogDedupe:
+    """同点同类的运行期错误 60s 只留一条；`window` 是给测试压成 0 用的。
+
+    spec §8 的"运行期拒绝带点位名"与"不重复刷屏"要同时成立：tick 是 100ms 一拍，一条
+    飘出 uint16 边界的曲线两分钟能写 1200 行，把那扇只有两指宽的日志窗刷成噪声，操作员
+    反而看不见第二件事（另一个点、另一类错）。所以留的是**每个身份一条**，不是每分钟一条。
+
+    身份 = `(kind, key)`，`key` 由调用方给（backend 给 `(unit_id, area, address)`）：
+    本模块不认识点位对象，也不认识"钳位/编码"这些类别名——它只按调用方给的身份压窗口。
+    `kind` 必须进身份，因为"这个点飘出边界了（值照写）"与"这个点算不出来（值冻住）"是
+    两条不同的处置，共享窗口的话第二条会被第一条吃掉。
+
+    表的大小由 `点位数 × 类别数` 封顶（几百条 float），所以不清理旧条目；通道重起时
+    由调用方 `reset()`，那是"新一轮运行"唯一的边界。
+    """
+
+    window: float = 60.0
+    _last: dict[tuple[str, tuple], float] = field(default_factory=dict)
+
+    def report(self, kind: str, key: tuple, text: str, now: float) -> str | None:
+        """该发就把 `text` 原样返回并记住这一刻，被压住就返回 `None`。
+
+        `now` 由调用方给，本模块不读任何时钟（与 `waveform_value` 的 `t` 同一个口径）：
+        时间进来的话，"60s 一条"就只能靠真等一分钟来验。
+        """
+        stamp = self._last.get((kind, key))
+        if stamp is not None and now - stamp < self.window:
+            return None
+        self._last[(kind, key)] = now
+        return text
+
+    def reset(self) -> None:
+        """把所有身份的记忆清空：重新起通道后，上一轮已经报过的那个点要能立刻再说一次。"""
+        self._last.clear()
 
 
 _WRITE_FC_AREA = {5: "co", 15: "co", 6: "hr", 16: "hr"}

@@ -2,11 +2,14 @@
 
 spec §7 的理由是现场最费时的误判——平台下发命令后值被波形顶回去，人就去查平台。
 这个文件只测状态本身；tick 真不真写寄存器由 `tests/test_session.py` 与集成用例钉。
+
+`LogDedupe`（spec §8 的"同点同类 60s 一条"）也住在这里，因为它和 `SourceStore` 是同一种
+东西：只在引擎 loop 线程读写的运行态表，本身不含任何协议或波形知识。
 """
 
 from modslave.backend.events import PacketEvent
 from modslave.backend.modbus_tcp import parse_packet
-from modslave.backend.ownership import SourceStore, write_targets
+from modslave.backend.ownership import LogDedupe, SourceStore, write_targets
 
 K = ("tcp-5020", 11, "hr", 4)
 
@@ -331,4 +334,53 @@ def test_a_chunk_that_carries_two_frames_reads_as_the_first_one_only():
     two_frames = bytes.fromhex("00B100000006" "0B060004" "0099"
                                "00B200000006" "0B060005" "0088")
     assert write_targets(through_the_sink(two_frames)) == [(11, "hr", 4, 1)]
+
+
+# ---- 运行期报错的去重表（spec §8：同点同类 60s 内不重复刷屏）----
+
+def test_the_same_point_and_kind_is_reported_once_per_sixty_seconds():
+    """飘出边界的曲线每 100ms 一条，日志窗两分钟就被同一条刷屏刷死（spec §8）。"""
+    dedupe = LogDedupe()
+    key = (11, "hr", 0)
+    assert dedupe.report("clamp", key, "CO浓度 clamped", 0.0) == "CO浓度 clamped"
+    assert dedupe.report("clamp", key, "CO浓度 clamped", 1.0) is None
+    assert dedupe.report("clamp", key, "CO浓度 clamped", 59.0) is None
+    assert dedupe.report("clamp", key, "CO浓度 clamped", 61.0) == "CO浓度 clamped"
+    # 另一个点是另一件事：风机与照明不能互相把对方的报错吃掉
+    assert dedupe.report("clamp", (12, "hr", 0), "回路 clamped", 61.5)
+
+
+def test_different_kinds_on_the_same_point_do_not_share_a_window():
+    dedupe = LogDedupe()
+    assert dedupe.report("clamp", (11, "hr", 0), "a", 0.0)
+    assert dedupe.report("encode", (11, "hr", 0), "b", 0.5)      # 不同类，各报各的
+
+
+def test_the_window_is_a_knob_and_not_a_hardcoded_sixty_seconds():
+    """`window` 必须真参与判定：把 60 写死在比较里时，上面那两条照样全绿（`now` 本来就是
+    按 60 的量级给的），而集成用例与 Task 7 全靠这个旋钮——写死就等于逼测试 sleep 一分钟。
+
+    两头都钉：`0` 一条都不压（窗口内没有"上一条"），`3600` 把 61s 那条也按住。只钉一头时
+    把常数换成另一头的值还能过。
+    """
+    off = LogDedupe(window=0.0)
+    assert off.report("clamp", (11, "hr", 0), "a", 0.0) == "a"
+    assert off.report("clamp", (11, "hr", 0), "a", 0.0) == "a"
+
+    wide = LogDedupe(window=3600.0)
+    assert wide.report("clamp", (11, "hr", 0), "a", 0.0) == "a"
+    assert wide.report("clamp", (11, "hr", 0), "a", 61.0) is None
+
+
+def test_reset_lets_the_next_run_report_the_same_point_again():
+    """`reset()` 是"这是一次新的运行"那句话：通道重新起来时 backend 调它（集成用例
+    `test_restarting_the_channel_reports_the_same_clamped_point_again` 钉那个调用点）。
+
+    这里钉表本身：不清零时 0.5s 的那一次还在窗口内（`now` 没往前走够），清了就重新开口。
+    """
+    dedupe = LogDedupe()
+    assert dedupe.report("clamp", (11, "hr", 0), "a", 0.0) == "a"
+    assert dedupe.report("clamp", (11, "hr", 0), "a", 0.5) is None
+    dedupe.reset()
+    assert dedupe.report("clamp", (11, "hr", 0), "a", 0.5) == "a"
 

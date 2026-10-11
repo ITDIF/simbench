@@ -1,4 +1,4 @@
-"""pymodbus Modbus TCP 从站的封装：起停、报文钩子、日志降噪、波形 tick。
+"""pymodbus Modbus TCP 从站的封装：起停、报文钩子、日志降噪、波形 tick 与它的运行期报错。
 
 pymodbus 的 import 只允许出现在 backend/（tests/test_architecture.py 守这条线）。
 
@@ -24,7 +24,7 @@ from ..codec.point_codec import encode
 from ..codec.waveform import clamp_to_datatype, waveform_value
 from ..project.model import Point, Project, area_is_bit
 from .events import PacketEvent
-from .ownership import SourceStore, write_targets
+from .ownership import LogDedupe, SourceStore, write_targets
 from .raw_writer import RawRegisterWriter
 from .simdev import build_sim_devices
 
@@ -247,7 +247,7 @@ class ModbusTcpBackend:
     """一个 TCP 通道 = 一个 ModbusTcpServer = 一个 loop 线程里的监听。"""
 
     def __init__(self, channel, packet_sink=None, on_connection=None,
-                 tick_ms: int = 0) -> None:
+                 tick_ms: int = 0, log_sink=None) -> None:
         self.channel = channel
         self.channel_name = channel.name
         # port=0（"随便给一个"）不支持：Task 5 的 validate 已把它判成 error，
@@ -259,6 +259,11 @@ class ModbusTcpBackend:
         self.tick_ms = tick_ms
         self._packet_sink = packet_sink
         self._on_connection = on_connection
+        # `(level, text)` 回调，和 `packet_sink` 一样在 **loop 线程**上被调：报错了要能
+        # 落到界面/CLI，但曲线不能因此停（`_emit` 那一道就是为这件事设的）。
+        self._log_sink = log_sink
+        # 同点同类 60s 一条（spec §8）：本 backend 一份表，所以 key 里不用再带通道名。
+        self._dedupe = LogDedupe()
         self._server: ModbusTcpServer | None = None
         self._writer: RawRegisterWriter | None = None
         self._task: asyncio.Task | None = None
@@ -313,6 +318,9 @@ class ModbusTcpBackend:
         self.started_at = time.monotonic()
         # 曲线的 0 相位与监听同时起（spec §5：`t` 是引擎启动后的单调秒，不是系统时间）。
         self._tick_started = self.started_at
+        # 去重表跟着相位一起归零：重起通道通常就是操作员照着那句日志改了点什么，
+        # 上一轮报过的"这个点在飘"不许把这一轮的同一句话压成一分钟静音。
+        self._dedupe.reset()
         if self.tick_ms > 0:
             self._tick_task = asyncio.create_task(
                 self._tick_loop(self.tick_ms / 1000.0))
@@ -439,18 +447,33 @@ class ModbusTcpBackend:
             self._on_connection("open" if is_new else "close")
 
     async def _tick_loop(self, interval: float) -> None:
-        """引擎 loop 上的波形节拍。异常一律在 `_tick_once` 里按点兜住，这里不加 try：
-        真出了没预料到的异常，任务死掉比每轮把异常咽进无声的 `pass` 更容易被发现。
+        """引擎 loop 上的波形节拍。
+
+        按点兜的三种异常在 `_tick_once` 里；这一道是**故意瞎捕**的最后一层，与本仓库
+        普遍"只捕具体类型"的口径相反，理由要写明白：走到这里的都是没预料到的
+        （`_require_writer` 的 RuntimeError、writer 内部的 IndexError、点表与 SimDevice
+        不一致……），而这里"捕漏了"的代价不是少一条日志，是**任务死亡**——曲线静默停、
+        通道照旧应答、界面照旧 10Hz 刷新，正是 M4 最防的那类假象（要点 3）。
+        兜住之后这一轮丢掉几个点的写入、下一轮照旧，并且 60s 内留一句带通道名的话。
+
+        不写 `except BaseException`：`CancelledError` 必须原样逃出去，`stop()` 靠把任务
+        取消来收尾（Task 3 的顺序用例钉着 `task.cancelled()`）。
         """
         while True:
             await asyncio.sleep(interval)
-            self._tick_once(time.monotonic())
+            now = time.monotonic()
+            try:
+                self._tick_once(now)
+            except Exception as exc:                    # noqa: BLE001
+                self._report_tick_failure(exc, now)
 
     def _tick_once(self, now: float) -> int:
         """把"还在波形手上"的点算一遍值写进寄存器，返回真写掉的点数。
 
         `t = now - self._tick_started`：重新起通道曲线就从 0 相位开始，改系统时间
-        影响不到它（spec §5）。`now` 由调用方给，测试才注得进固定时间戳。
+        影响不到它（spec §5）。`now` 由调用方给，测试才注得进固定时间戳——它同时是
+        去重表的时间戳，所以"60s 只留一条"也能被 `_tick_once(now=61.0)` 这样验，
+        不必有人真睡一分钟。
         """
         writer = self._require_writer()
         written = 0
@@ -461,11 +484,19 @@ class ModbusTcpBackend:
                 continue                                  # spec §7：被接管就一个字都不写
             if pt.waveform in ("", "const") and not pt.wave_param:
                 continue                                  # W4：空 const 不参与
+            stage = "compute"
             try:
                 value = waveform_value(pt.waveform, pt.wave_param, t)
-                # 钳位报告（`_report_clamp` + 60s 去重日志）是 Task 4 的活：这一层先把值
-                # 钳进 datatype 的区间再编码——写一个被 `& 0xFFFF` 截过的错值比不报日志严重。
-                value, _clamped = clamp_to_datatype(value, pt.datatype)
+                # 先把值钳进 datatype 的区间再编码——写一个被 `& 0xFFFF` 截过的错值比不报
+                # 日志严重（主站读到的是"合法但完全错误"的遥测量）。报告必须排在这个 try
+                # **之内**：那句日志自己出故障时，代价不许越过"这一个点的这一轮"（要点 1），
+                # `_emit` 里那道 sink 兜底是同一件事的另一半。
+                value, clamped = clamp_to_datatype(value, pt.datatype)
+                if clamped:
+                    self._report_clamp(unit_id, pt, value, now)
+                # 从这里起再炸就不是"算值"的问题了：分类只影响日志那一句怎么说，
+                # 而两种错要改的东西不一样（曲线参数 vs 点表的类型）。
+                stage = "encode"
                 registers = encode(value, pt.datatype, pt.word_order)
                 if area_is_bit(pt.area):
                     # 两个写入口不许混用：`write_registers` 写 co 会回 True 而点亮的是
@@ -475,16 +506,77 @@ class ModbusTcpBackend:
                 else:
                     wrote = writer.write_registers(unit_id, pt.area, pt.address,
                                                    list(registers))
-            except (KeyError, ZeroDivisionError, ValueError):
+            except (KeyError, ZeroDivisionError, ValueError) as exc:
                 # 逐点兜：未知波形名是 KeyError、`period=0`/`speed=0` 是 ZeroDivisionError、
                 # 参数与编码是 ValueError（Task 1 实测三种都会到这里来）。只跳过这一个点——
                 # 异常冒进 asyncio 任务就是"波形停了而通道还在跑"，而整轮中断还会让同通道
-                # 其余点位一起冻住。日志归 Task 4。
+                # 其余点位一起冻住。这三种**不许往窄里收**，也不许像 Task 3 那样只 `continue`：
+                # 一个坏点从此不刷新而日志一句都没有，操作员只剩"挨个点位猜哪个坏了"这条路。
+                self._report_failure(stage, unit_id, pt, exc, now)
                 continue
             if not wrote:
                 continue          # 地址不在块内（点表与 SimDevice 不一致）：静默跳下一个点
             written += 1
         return written
+
+    def _emit(self, level: str, kind: str, key: tuple, text: str,
+              now: float) -> None:
+        """运行期报错的唯一出口：没接 sink 就一个字都不发，接了也同点同类 60s 一条。
+
+        没接 sink 是**常态**而不是错误：无头 CLI（`python -m modslave`，M1 的验收入口）与
+        M1/M2 的绝大多数用例都不看运行期日志，这里既不查去重表也不发回调，它们的形状因此
+        一个字没变（`test_a_backend_nobody_listens_to_keeps_no_dedupe_book` 钉这一支）。
+
+        `key` 是这次故障的身份：一个点给 `(unit_id, area, address)`，整轮的失败没有点可指
+        就给 `()`（本 backend 一份表，通道已经隐含在里面了）。
+        """
+        if self._log_sink is None:
+            return
+        line = self._dedupe.report(kind, key, text, now)
+        if line is None:
+            return
+        try:
+            self._log_sink(level, line)
+        except Exception:                               # noqa: BLE001
+            # 吞掉的是一条日志，不是一条曲线。与 `packet_sink` 的"异常原样冒出去"是**反**
+            # 的口径，因为两者丢的东西不一样：报文 sink 炸了报文窗露一段空档（看得见），
+            # 日志 sink 炸了如果放它出去，带走的是正在跑的模拟量——症状不许升级成病。
+            # `Session.publish_log` 那一侧同样吞订阅者异常（`_publish`），两道一起才是
+            # "界面坏了曲线照跑"。这里刻意不留 traceback：能报出这条故障的只有同一个 sink。
+            pass
+
+    def _report_clamp(self, unit_id: int, pt: Point, value, now: float) -> None:
+        """值飘出 datatype 之外：这一轮**照样写**，只是写在边界上，所以要告诉操作员
+        他的曲线配大了（spec §8：运行期拒绝带点位名）。
+        """
+        self._emit("warning", "clamp", (unit_id, pt.area, pt.address),
+                   f"{pt.name}: waveform value outside {pt.datatype}, "
+                   f"clamped to {value}", now)
+
+    def _report_failure(self, stage: str, unit_id: int, pt: Point, exc: Exception,
+                        now: float) -> None:
+        """这个点这一轮一个字都没写出去：通道照旧应答，值冻在上一次（或点表初值）上。
+
+        `stage` 进身份也进文案，因为两类要改的东西不是一回事：`compute` 是曲线自己算不出
+        来（波形名写错、`period=0`、参数不是数），`encode` 是值算出来了但这个点位编不成
+        寄存器（最常见是给 string 点位挂了数值曲线）。共用一个身份时，先报的那一类会把
+        后报的那一类压住 60s，操作员看见的就是"日志说了句不相干的话"。
+        异常类名一起带上：只说 failed 的话，他还得自己复现一遍才知道为什么。
+        """
+        self._emit("error", stage, (unit_id, pt.area, pt.address),
+                   f"{pt.name}: waveform {stage} failed: "
+                   f"{type(exc).__name__}: {exc}", now)
+
+    def _report_tick_failure(self, exc: Exception, now: float) -> None:
+        """整轮 tick 被一个没预料到的异常打断了：这一轮一个点都没写完，下一轮照旧。
+
+        这一类没有"点"可指（能逃到 `_tick_loop` 的已经不是某个点的参数问题），身份就是
+        本通道——`()` 足够，因为去重表是一个 backend 一份。消息带通道名与异常类名：
+        操作员要看的是"曲线为什么不动了"，答案得说清是这一层崩了、崩在哪一句。
+        """
+        self._emit("error", "tick", (),
+                   f"channel {self.channel_name}: waveform tick stopped by "
+                   f"{type(exc).__name__}: {exc}", now)
 
     def mark_manual(self, unit_id: int, area: str, address: int,
                     count: int = 1, who: str = "gui") -> None:

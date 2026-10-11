@@ -120,20 +120,27 @@ def engine_runner():
 
 @pytest.fixture
 def open_backend(engine_runner):
-    """`with open_backend(channel, packet_sink=..., on_connection=...) as backend:`。
+    """`with open_backend(channel, packet_sink=..., on_connection=..., tick_ms=...,
+    log_sink=...) as backend:`。
 
     loop 由 `EngineRunner` 持有（生产同一个类），协程一律经 `submit(工厂)` 投回引擎线程。
-    `packet_sink`/`on_connection` 仍然直接交给 backend：它们在 **loop 线程**被调用，与 M1
-    完全一致——不绕 `runner.publish()` 的 pump 线程，否则用例里"发完报文立刻断言"的时序
-    会多一次跨线程交接，M1 那批真主站用例钉的就是 backend 直调的形状。
+    `packet_sink`/`on_connection`/`log_sink` 仍然直接交给 backend：它们在 **loop 线程**被调用，
+    与 M1 完全一致——不绕 `runner.publish()` 的 pump 线程，否则用例里"发完报文立刻断言"的时序
+    会多一次跨线程交接，M1 那批真主站用例钉的就是 backend 直调的形状。正因为在这条线程上，
+    三个回调都不许碰 widget（界面要收就走 Qt bridge），也不许抛异常出来当作停 tick 的理由。
+
+    `tick_ms` 默认 0 = **不起 tick 任务**，与生产默认同一口径：既有全部用例的形状因此一个字
+    没变，要驱动真节拍（Task 7 的验收用例）才显式给一个。
 
     `finally` 里只停 backend，不停 runner（runner 是会话级的）；backend 没建出来也要把
     已经起到的 listener 收干净，所以 `backend.stop()` 单独包一层。
     """
     @contextlib.contextmanager
-    def _open(channel, packet_sink=None, on_connection=None):
+    def _open(channel, packet_sink=None, on_connection=None, tick_ms=0,
+              log_sink=None):
         backend = ModbusTcpBackend(channel, packet_sink=packet_sink,
-                                   on_connection=on_connection)
+                                   on_connection=on_connection, tick_ms=tick_ms,
+                                   log_sink=log_sink)
         try:
             # 走 `call` 而不是裸 `submit(...).result()`：引擎不回话时要把它当时卡在哪一起
             # 报出来。裸 TimeoutError 只说"10s 没回"，而这次挂死全靠那句栈才分清是

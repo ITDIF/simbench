@@ -19,12 +19,14 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
+from modslave.backend.events import LogLine
 from modslave.backend.modbus_tcp import (
     _DropDatastoreNoise, ModbusTcpBackend, PortInUseError, _bind_probe,
     _connect_probe, _is_being_served, check_port_is_free, configure_library_logging,
     parse_packet,
 )
 from modslave.codec.point_codec import encode
+from modslave.engine.session import Session
 from modslave.project.model import Device, Point, Project, TcpChannel
 from modslave.project.validate import validate_project
 from tests.conftest import free_port
@@ -1035,6 +1037,228 @@ def test_a_point_that_is_not_in_the_datastore_is_skipped_without_breaking_the_ro
             assert got == [123], got
         finally:
             client.close()
+
+
+# ---- spec §8：运行期报错带点位名，且同点同类 60s 只留一条 ----
+
+def test_a_clamped_waveform_logs_one_line_naming_the_point(open_backend):
+    """`base=20;amp=1e6` 压在 float32 上合法，但 uint16 点这么配就天天飘出边界。
+
+    两条都钉：值必须落在边界上（不许写个 70000 掩码成 4464 出去），且日志里点名
+    是哪个点钳的——只写"clamped"的操作员等于没看日志。
+    """
+    seen: list[tuple[str, str]] = []
+    project = tunnel_project(free_port())
+    point = project.channels[0].devices[0].points[2]        # 状态字 hr4 uint16
+    point.waveform, point.wave_param = "const", {"value": "70000"}
+    with open_backend(project.channels[0], tick_ms=0,
+                      log_sink=lambda level, text: seen.append((level, text))) as backend:
+        backend._tick_once(now=0.0)
+        client = connect(project.channels[0].port)
+        try:
+            assert client.read_holding_registers(
+                4, count=1, device_id=11).registers == [65535]
+        finally:
+            client.close()
+    assert seen and seen[0][0] == "warning" and "状态字" in seen[0][1], seen
+
+
+def test_a_clamped_point_gets_one_line_per_window_not_one_per_tick(open_backend):
+    """tick 是 100ms 一拍：不去重时两个飘出边界的点两分钟能写 2400 行（spec §8）。
+
+    时间照 `_tick_once(now=...)` 注入，不为这条 sleep 一分钟。三个方向都要钉：
+    窗口内两点各一条（不是每 tick 一条）、两个点不互相压制、过了 60s 各再来一条。
+    """
+    seen: list[tuple[str, str]] = []
+    project = tunnel_project(free_port())
+    points = project.channels[0].devices[0].points
+    points[2].waveform, points[2].wave_param = "const", {"value": "70000"}   # 状态字 uint16
+    points[3].waveform, points[3].wave_param = "const", {"value": "-1"}      # 电量 uint64
+    with open_backend(project.channels[0], tick_ms=0,
+                      log_sink=lambda level, text: seen.append((level, text))) as backend:
+        for now in (0.0, 0.1, 30.0):
+            assert backend._tick_once(now=now) == 2, "钳到边界的两个点都该照写"
+        assert len(seen) == 2, seen
+        assert {text.split(":")[0] for _level, text in seen} == {"状态字", "累计电量"}, seen
+        assert backend._tick_once(now=61.0) == 2
+        assert len(seen) == 4, seen        # 窗口过了：每个点再来一条，不是一串
+
+
+def test_restarting_the_channel_reports_the_same_clamped_point_again(
+        engine_runner, open_backend):
+    """重新起通道是一次**新的运行**：曲线从 0 相位重来（Task 3 钉的 `_tick_started`），
+    去重表也得跟着归零，否则操作员改完点表重启之后那一分钟是静音的，他没法确认自己
+    修的那个点到底还在不在飘——而日志正是他唯一的证据。
+    """
+    seen: list[tuple[str, str]] = []
+    project = tunnel_project(free_port())
+    point = project.channels[0].devices[0].points[2]
+    point.waveform, point.wave_param = "const", {"value": "70000"}
+    with open_backend(project.channels[0], tick_ms=0,
+                      log_sink=lambda level, text: seen.append((level, text))) as backend:
+        assert backend._tick_once(now=0.0) == 1
+        assert len(seen) == 1, seen
+        engine_runner.call(lambda: backend.stop(), 10, "test restart")
+        engine_runner.call(lambda: backend.start(), 10, "test reopen")
+        assert backend._tick_once(now=0.5) == 1     # 上一轮的时间窗还没到期
+        assert len(seen) == 2, seen
+
+
+def test_a_point_that_stopped_computing_is_named_instead_of_falling_silent(open_backend):
+    """Task 3 把坏点的三种异常咽进无声的 `continue`：通道照旧应答、那个点冻在初值上、
+    日志一句没有。spec §8 要的是"运行期拒绝带点位名"，同点同类 60s 一条。
+
+    四类坏点各配一个（Task 1 实测的形状：未知名 `KeyError`、`period=0`
+    `ZeroDivisionError`、参数不是数 `ValueError`、字符串点位的编码 `ValueError`），外加
+    一个好点。三条各自钉一个容易被改坏的地方：
+    ① `written` 只数真写掉的好点（把失败也计进去时这句会先红，要点 6）；
+    ② "算值炸"与"编码炸"是两个 kind、两句不同的话——操作员要改的东西不一样
+       （曲线名/参数 vs 点表的类型），共用一个身份时后者会被前者吃掉；
+    ③ 消息带异常类名，否则"为什么这个点不刷新"只剩操作员自己猜。
+    """
+    seen: list[tuple[str, str]] = []
+    project = tunnel_project(free_port())
+    points = project.channels[0].devices[0].points
+    points[0].waveform, points[0].wave_param = "const", {"value": "44.5"}   # 好：hr0
+    points[1].waveform, points[1].wave_param = "spiral", {}         # KeyError
+    points[2].waveform, points[2].wave_param = "sine", {
+        "base": "1", "amp": "1", "period": "0"}                     # ZeroDivisionError
+    points[3].waveform, points[3].wave_param = "const", {"value": "abc"}   # 参数不是数
+    points[4].waveform, points[4].wave_param = "const", {"value": "7"}     # 编码不了
+    with open_backend(project.channels[0], tick_ms=0,
+                      log_sink=lambda level, text: seen.append((level, text))) as backend:
+        assert backend._tick_once(now=0.0) == 1, "四个坏点不许混进写掉的点数"
+        assert backend._tick_once(now=0.5) == 1
+    assert len(seen) == 4, seen                      # 每点一条，不是每 tick 一条
+    assert all(level == "error" for level, _ in seen), seen
+    for name in ("VI风速", "状态字", "累计电量", "铭牌"):
+        assert any(name in text for _, text in seen), (name, seen)
+    broken = next(text for _, text in seen if "状态字" in text)
+    assert "compute" in broken and "ZeroDivisionError" in broken, broken
+    encoded = next(text for _, text in seen if "铭牌" in text)
+    assert "encode" in encoded and "ValueError" in encoded, encoded
+
+
+def test_a_backend_nobody_listens_to_keeps_no_dedupe_book(open_backend):
+    """`log_sink=None` 是无头 CLI 与 M1/M2 绝大多数用例的形状：这里 `_emit` 必须原样不做事。
+
+    留着"照样拼消息、照样往去重表记时间戳、最后把 `None(...)` 的 TypeError 吞掉"那条路，
+    等于给每一拍 tick 记一份没人看的账，而表里的时间戳还会替一个不存在的听众把后面同类的
+    报错压住 60s。断言的是表里**一个条目都没有**——不看这份状态就没别的方式证明这一支
+    真的短路了（`_tick_task`/`_wave_points`/`_writer` 是同一文件里既有的私有断言口径）。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    point = project.channels[0].devices[0].points[2]
+    point.waveform, point.wave_param = "const", {"value": "70000"}    # 每一拍都钳位
+    with open_backend(project.channels[0], tick_ms=0) as backend:
+        assert backend._tick_once(now=0.0) == 1
+        assert backend._dedupe._last == {}, backend._dedupe._last
+
+
+def test_a_failing_log_sink_costs_a_line_not_the_whole_waveform(open_backend):
+    """日志那条是**症状**，曲线是病体：sink 自己炸了（订阅者写歪、界面已经没了）时代价
+    只能到"这一条没记上"为止。放它把异常带出去，就是要点 1 防的那件事——而且比一个坏点
+    更糟：整轮中断，同通道其余点位一起冻住。
+
+    坏点排在**第一个**（`1e40` 压在 float32 上必然钳位），后面还排着一个好点：
+    只断言"没炸"是不够的，要断言这一轮真的把后面的点写完了。
+    """
+    def sink(level, text):
+        raise RuntimeError("log window is gone")
+
+    port = free_port()
+    project = tunnel_project(port)
+    points = project.channels[0].devices[0].points
+    points[0].waveform, points[0].wave_param = "const", {"value": "1e40"}   # 钳位，触发 sink
+    points[2].waveform, points[2].wave_param = "const", {"value": "123"}    # 排在后面的好点
+    with open_backend(project.channels[0], tick_ms=0, log_sink=sink) as backend:
+        assert backend._tick_once(now=0.0) == 2, "sink 炸了就不许少写一个点"
+        client = connect(port)
+        try:
+            assert client.read_holding_registers(
+                4, count=1, device_id=11).registers == [123]
+        finally:
+            client.close()
+
+
+def test_an_unexpected_tick_error_is_reported_and_the_loop_keeps_running(engine_runner,
+                                                                        open_backend,
+                                                                        monkeypatch):
+    """三种异常**之外**的东西逃逸出 `_tick_once` 时，任务一死曲线就静默停了，而通道照旧
+    应答、界面照旧刷新（要点 3 的那道兜底）。
+
+    这里让 writer 头一次写就抛 `RuntimeError`（不在按点兜的三种里）。"下一轮还在跑"要数得
+    出来才算证：`calls` 记的是 writer 被调的次数（连炸掉的那些轮也算），先等日志出现、再数到
+    它还在长，最后要求寄存器里真的写上了曲线值。只看 `task.done()` 证明不了它还在往外写，
+    而只按值断言会被"patch 落地之前那一轮已经写成功过一次"糊过去。结尾那一段是去重仍然管
+    这一类：连着炸十几轮也只留一条，否则兜底本身就成了新的刷屏源。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    point = project.channels[0].devices[0].points[2]            # 状态字 hr4 uint16
+    point.waveform, point.wave_param = "const", {"value": "123"}
+    seen: list[tuple[str, str]] = []
+    calls: list[int] = []
+    armed = {"on": True}
+    with open_backend(project.channels[0], tick_ms=20,
+                      log_sink=lambda level, text: seen.append((level, text))) as backend:
+        writer = backend._writer
+        real_write = writer.write_registers
+
+        def exploding(unit_id, area, address, values):
+            calls.append(1)
+            if armed["on"]:
+                raise RuntimeError("datastore block vanished")
+            return real_write(unit_id, area, address, values)
+
+        monkeypatch.setattr(writer, "write_registers", exploding)
+        wait_for(lambda: seen, what="一句带通道名的整轮报错")
+        assert seen[0][0] == "error" and "tcp" in seen[0][1] \
+            and "RuntimeError" in seen[0][1], seen
+        armed["on"] = False
+        before = len(calls)
+        wait_for(lambda: len(calls) > before + 3, what="炸过一轮之后还有下一轮")
+        wait_for(lambda: (backend.read_registers(11, "hr", 4, 1) or [None])[0] == 123,
+                 what="后面的轮次真的把曲线写进了寄存器")
+        assert backend._tick_task is not None and not backend._tick_task.done()
+        armed["on"] = True
+        before = len(calls)
+        time.sleep(0.2)                        # 十来个 tick 周期，每一轮都炸
+        assert len(calls) > before, "整轮报错之后 loop 不再进下一轮了"
+        assert len(seen) == 1, seen             # 同一种整轮故障 60s 只留一条
+
+
+def test_a_started_channel_routes_waveform_warnings_into_the_session_log(engine_runner):
+    """`Session.start_channel` 必须把 `log_sink` 接到 `publish_log`：接不上时 backend 那套
+    去重日志只活在测试里，界面与无头 CLI 一条都收不到，spec §8 的"运行期拒绝带点位名"
+    就还是空的。
+
+    走的是生产那一条完整路：`Session` 起通道 → 工程里的 `tick_ms` 交下去 → 真 tick 在引擎
+    线程上算出越界值 → 同一线程把 `LogLine` 发进事件流（要点 4：sink 不碰 widget，界面那一
+    路是 Qt bridge，不在本条用例的范围）。断言只认事件流里的东西，不去读 backend 的私有表。
+    """
+    port = free_port()
+    project = tunnel_project(port)
+    project.tick_ms = 50
+    point = project.channels[0].devices[0].points[2]          # 状态字 hr4 uint16
+    point.waveform, point.wave_param = "const", {"value": "70000"}
+    lines: list[LogLine] = []
+
+    def on_event(event: object) -> None:
+        if isinstance(event, LogLine):
+            lines.append(event)
+
+    session = Session(runner=engine_runner)
+    session.subscribe(on_event)
+    session.load(project)
+    try:
+        session.start_channel("tcp")
+        wait_for(lambda: any(line.level == "warning" and "状态字" in line.text
+                             for line in lines),
+                 timeout=5.0, what="钳位那句经 Session 的事件流到了订阅者")
+    finally:
+        session.shutdown()
 
 
 def raw_master(port: int) -> socket.socket:

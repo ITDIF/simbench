@@ -217,8 +217,14 @@ class Session:
         if errors:
             raise ValueError(f"point table has {len(errors)} error(s); refusing to start: "
                              + " | ".join(errors[:3]))
+        # 运行期的报错出口：backend 在 **loop 线程**上直接调 `publish_log(level, text)`，
+        # 与 `packet_sink` 同一个口径（见 `_packet_sink`），这里不投递也不排队——
+        # `publish_log` 只做"往事件流发一条 LogLine"，而 `_publish` 已经吞掉订阅者的异常，
+        # 所以界面那一侧坏了也不会把曲线带停（backend 的 `_emit` 还有同一道兜底）。
+        # 这条线一断，spec §8 的"运行期拒绝带点位名"就只活在测试里，操作员仍然什么都看不见。
         backend = ModbusTcpBackend(channel, packet_sink=self._packet_sink(name),
-                                   tick_ms=self._project.tick_ms)
+                                   tick_ms=self._project.tick_ms,
+                                   log_sink=self.publish_log)
         # 只有这一条路把 `tick_ms` 交给 backend：无头 CLI（`python -m modslave`，M1 的
         # 验收入口）不建 Session，它默认的 `tick_ms=0` 就是不起 tick 任务，M1/M2 的
         # 既有用例形状一个字都没变。
