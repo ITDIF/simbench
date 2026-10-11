@@ -288,17 +288,22 @@ import random as _random
 
 def _random_wave(params: dict[str, str]):
     low, high = sorted((_num(params["min"]), _num(params["max"])))
-    interval, seed = _num(params["interval"]), params.get("seed", "")
+    interval = _num(params.get("interval", "1.0"))     # §5：interval 是选填，默认 1.0
+    seed = params.get("seed", "")
+
     def value(t: float):
         bucket = int(t / interval)
-        rng = _random.Random(f"{seed}:{bucket}") if seed else _random.Random(bucket)
-        picked = rng.uniform(low, high)
-        return round(picked) if _looks_like_int(low) and _looks_like_int(high) else picked
+        # 填了 seed → 同 (seed, bucket) 必须同值，跨进程也要同：种子只由这两者决定。
+        # 没填 seed → §5 要求"不填则不重复"，所以掺一份每进程熵（`Random(bucket)` 单独用
+        # 是**确定**的，两次运行会给出同一条曲线，那正是 spec 不想要的）。
+        key = f"{seed}:{bucket}" if seed else f"{bucket}:{_RUN_SALT}"
+        return _random.Random(key).uniform(low, high)   # 取整不在这里做，归 clamp_to_datatype
     return value
 
-def _looks_like_int(text) -> bool:
-    return str(text).lstrip("-").isdigit()
+_RUN_SALT = f"{os.getpid()}:{_random.SystemRandom().random()}"
 ```
+
+> **Task 1 落地时改的两处**（评审的变异检查逼出来的，实测记录在 `.superpowers` 报告里）：① 原计划的 `round(picked) if _looks_like_int(low) ...` 分支**永不触发**（`low/high` 恒是 `float`，`str(5.0).isdigit()` 为 False），已连 `_looks_like_int` 一起删除；② 原计划那句"同 seed 同值"的断言是自证式（`{**p,"seed":"7"}` 就是 `p`），改成钉 golden 值（`Random("7:2").uniform(0,100) == 25.14189165270887`）。
 
 > `seed` 为空时用 `Random(bucket)`：同一 `bucket` 在同一次运行里稳定，但两次 pytest 之间不重复（spec §5 的"`seed=空`(不填则不重复)"——注意 Python 的 `Random(int)` 是**确定**的，所以"不重复"要靠 `bucket` 之外的熵。**实现时按 spec 的字面意图办**：不填 seed 就每次运行不同 → 用 `Random((bucket, id(value), os.getpid()))` 这类每进程变化的种子，并给这条单独加一条"两次 `waveform_value` 在同 bucket 上仍相等"的断言来保证稳定性，别把稳定性测丢了。）
 
