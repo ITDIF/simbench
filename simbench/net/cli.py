@@ -216,6 +216,24 @@ def _remove_and_record(instance_id: str, ledger: Ledger, ledger_path: Path | Non
             "message": f"已移除 {instance_id}", "detail": output}
 
 
+def _self_command_prefix() -> list[str]:
+    """提权重跑自己时的那条命令：`[0]` 是程序（`-FilePath`），后面是它的 argv 前缀。
+
+    两种形态都得能重启自己，判据只有 `sys.frozen` 一个：
+
+    - **源码运行**：`[0]` 是解释器，argv 是 `-m simbench net …`；
+    - **冻结运行**（PyInstaller 的 onedir / onefile 都置 `sys.frozen`）：`[0]` 就是本程序，
+      `-m simbench` 一个字都不成立（`simbench.exe -m simbench net` 会被 argparse 当成
+      未知参数拒掉），所以 argv 直接从 `net` 起。
+
+    这条不是"猜冻结会怎样"：原来的 `-FilePath '{sys.executable}'` + `-m simbench net` 在
+    源码里成立，冻结后必碎，把两种形态收在这一个函数里才只有一处要改。
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "net"]
+    return [sys.executable, "-m", "simbench", "net"]
+
+
 def _run_elevated(args, cmd: str | list[str], job: dict) -> dict:
     """用管理员身份重跑自己。UAC 由用户确认；结果经 JSON 文件回传。
 
@@ -237,11 +255,14 @@ def _run_elevated(args, cmd: str | list[str], job: dict) -> dict:
     job.update({"cmd": parts[0], "result": str(result_path), "log": str(log_path)})
     job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
 
-    passthrough = ["-m", "simbench", "net", *parts, "--elevated", "--job", str(job_path)]
+    # 谁来跑、怎么把 `net` 叫起来都由这一个函数给（源码 vs 冻结两种形态，见它的说明）：
+    # `command[0]` 是 `-FilePath`，其余才是子进程的 argv——`sys.executable` 只出现一次。
+    command = _self_command_prefix()
+    passthrough = [*command[1:], *parts, "--elevated", "--job", str(job_path)]
     quoted = ",".join("'" + a.replace("'", "''") + "'" for a in passthrough)
     script = (f"$p = Start-Process -Verb RunAs -Wait -PassThru -WindowStyle Hidden "
               f"-WorkingDirectory '{Path.cwd()}' "
-              f"-FilePath '{sys.executable}' -ArgumentList @({quoted}); exit $p.ExitCode")
+              f"-FilePath '{command[0]}' -ArgumentList @({quoted}); exit $p.ExitCode")
     proc = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                           capture_output=True, timeout=600)
 

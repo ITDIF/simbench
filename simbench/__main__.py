@@ -263,5 +263,26 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+_GUI_PASSTHROUGH_FLAGS = ("--check", "--list")
+
+
+def gui_main(argv: list[str] | None = None) -> int:
+    """GUI 可执行文件（`simbench-gui.exe`）的入口：双击=开界面，显式动作仍走命令行。
+
+    为什么按"有没有显式动作"判，而不是按 exe 名字判：`simbench-gui.exe` 是无控制台的，
+    双击它的人要的是界面；但如果他敲的是 `--check x.csv`，他要的是校验结果——那一刻弹出
+    一个空窗口、把结果写进看不见的 stdout，等于两件事都没做成。所以只有**没有任何显式
+    动作**时才自动补 `--gui`：`net` 子命令（网卡那一层）与 `--check` / `--list`（点表
+    问答）都优先。已经带了 `--gui` 就不重复补。
+
+    命令行分发本体一个字符都不动：这里只是把 `argv` 摆成 `main()` 期望的形状。
+    """
+    argv = list(argv if argv is not None else sys.argv[1:])
+    explicit = argv[:1] == ["net"] or any(flag in argv for flag in _GUI_PASSTHROUGH_FLAGS)
+    if not explicit and "--gui" not in argv:
+        argv.insert(0, "--gui")
+    return main(argv)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
