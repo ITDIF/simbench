@@ -482,9 +482,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _after_edit(self, message: str, keep: str | None = None) -> None:
         """结构性改动落地之后：把会话与五个视图对上，并保住"有未保存改动"。
 
-        `use_project` 内部走 `Session.load`，而它会把 `dirty` 清回 False——不补回来的话，
-        "我刚加了一条通道"在标题上不显示、关窗也不问，改动会被静默丢掉。选中的通道也
-        要保住：往第二条通道里加点位，表不该自己跳回第一条。
+        `Session.load` 现在只在**换了一份对象**时清 `dirty`；同一份对象重装载（就是这条路）
+        会留着它——所以"改动被静默丢掉"这条已经从**约定**变成结构上做不到的事（`_mark_dirty`
+        留着只是为了标题上的 `*` 立刻显形，不再承担正确性）。选中的通道也要保住：往第二条
+        通道里加点位，表不该自己跳回第一条。
         """
         current = keep or self.point_model.channel()
         self.use_project(self.session.project, path=self._path, announce=False)

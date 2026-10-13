@@ -152,11 +152,16 @@ class Session:
         """
         with self._lock:
             stuck = self._stop_all_locked()
+            # **同一份对象**再装载一次 = 原地刷新（界面增删之后走的正是这条路）：那些改动
+            # 还在这份工程里，脏标记必须留着——清掉它，标题上的 `*` 就此消失、关窗也不再问，
+            # 一次"加完通道顺手关门"就把改动丢了。换一份**对象**才是换工程（旧改动已经
+            # 不存在了），照旧归零。
+            same_project = project is self._project
             self._project = project
             self._source = str(source) if source else None
             self._channels = {ch.name: ChannelRuntime(ch.name) for ch in project.channels}
             self._rebuild_index_locked()
-            self._dirty = False
+            self._dirty = self._dirty and same_project
             # 旧通道没关掉就得在这里留一句话：它的句柄随 `_channels` 一起换掉了，再没有
             # 第二次"停止"能摸到它，端口会一直占到进程结束。只发日志不发 ChannelState——
             # 通道对象马上是新的了，给一个还没起的通道标红是本末倒置。
@@ -219,8 +224,8 @@ class Session:
         """把脏标记放回"没改过"。只有一个调用理由：**改动已经落盘了**。
 
         主窗的"另存为"取消时不许调它——`*` 消失就等于告诉用户"存好了"，而他的改动
-        还在内存里没写过盘。换工程时 `load()` 自己会把标记归零，那是"这些改动已经不
-        存在了"，与这里不是一件事。
+        还在内存里没写过盘。换工程（`load()` 拿到**另一份对象**）时它自己会把标记归零，
+        那是"这些改动已经不存在了"，与这里不是一件事；同一份对象重装载不清（原地刷新）。
         """
         with self._lock:
             self._dirty = False

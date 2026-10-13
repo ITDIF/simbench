@@ -1177,3 +1177,22 @@ def test_a_broken_subscriber_does_not_break_the_session(session):
     session.wait_idle()
     assert session.channel("tcp-5020").running
     assert any(isinstance(e, PacketEvent) for e in seen)
+
+
+def test_reloading_the_same_project_keeps_the_unsaved_mark(session):
+    """同一份对象重装载 = **原地刷新**：改动还在这份工程里，脏标记不许清。
+
+    界面增删之后走的正是这条路（改完 → `load(同一份)` 刷视图）。清掉的话，标题上的 `*`
+    就此消失、关窗也不再问——"加完通道顺手关门"就把改动丢了。换一份**对象**才是换工程
+    （`test_gui_channel_panel` 的夹具就靠那一条隔离用例之间的"未保存改动"）。
+    """
+    port = free_port()
+    project = loaded(port)
+    session.load(project)
+    assert session.dirty is False
+    project.tick_ms = 200                     # 随便改一处
+    session.mark_dirty()
+    session.load(project)                     # 同一份对象
+    assert session.dirty is True, "原地刷新把'有未保存改动'抹掉了"
+    session.load(loaded(free_port()))         # 另一份对象：换工程
+    assert session.dirty is False
