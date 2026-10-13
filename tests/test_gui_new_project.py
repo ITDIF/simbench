@@ -390,6 +390,7 @@ def test_open_and_import_ask_about_unsaved_changes_first(make_window, monkeypatc
 def test_saving_from_the_ask_writes_the_project(make_window, monkeypatch, tmp_path, qapp):
     """选"保存"就真存：另存为成功之后动作才继续（这里继续到新建对话框）。"""
     window = make_window()
+    window._path = None              # 没有路径才会走"另存为"那一步（有路径=直接写回）
     window.session.mark_dirty()
     answer(monkeypatch, QtWidgets.QMessageBox.Save)
     target = str(tmp_path / "saved.json")

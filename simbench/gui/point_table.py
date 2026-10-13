@@ -55,6 +55,7 @@ COLUMNS: tuple[Column, ...] = (
 )
 
 VALUE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == VALUE_HEADER)
+ADDRESS_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "地址")
 RAW_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == RAW_HEADER)
 STALE_ROLE = QtCore.Qt.UserRole + 1
 
@@ -304,7 +305,11 @@ def _display(row: Row, header: str) -> str:
     except ValueError:
         convention = NO_CONVENTION
     return {
-        "名称": row.name, "区": row.area, "地址": str(row.address),
+        # S7 的 bool 把位一起显示（`6.3`）——点表里的写法就是它，同字节上的两个 bool
+        # 不带位在表上长得一模一样（写对了也看不出来右键的是哪一个）。Modbus 的点
+        # `bit` 恒为 None，这一格与以前逐字相同。
+        "名称": row.name, "区": row.area,
+        "地址": f"{row.address}.{row.bit}" if row.bit is not None else str(row.address),
         "4x": convention, "类型": row.datatype,
         "字序": row.word_order, VALUE_HEADER: row.value_text,
         # S7 那一列装的其实是**字节**（`Row.registers` 在 S7 通道上是字节序列）：

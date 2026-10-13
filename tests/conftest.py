@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import gc
 import os
+import pathlib
 import socket
 
 import pytest
@@ -75,6 +76,28 @@ def qapp():
 
 
 _handed_out: set[int] = set()
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+EXAMPLE_CSV = REPO_ROOT / "examples" / "covi-tunnel.csv"
+
+
+@pytest.fixture(autouse=True)
+def _the_example_point_table_is_never_written(request):
+    """仓库里的示例点表不许被用例写坏：前后各读一次字节，变了就**恢复并报错**。
+
+    教训（2026-10-13）：一条"就地保存"的用例把 `window._path`（= 示例点表）当成写盘目标，
+    它在断言处失败、恢复那一行没跑到，于是仓库里的示例被临时工程覆盖——后面几条用例跟着红，
+    而根因离它们很远（CLI 用例读的就是这个文件，还撞上了子进程读到半截写的状态）。
+    写盘类用例请把目标路径放进 `tmp_path`；这条闸只是**兜底**，报了还是要去改用例。
+    """
+    before = EXAMPLE_CSV.read_bytes()
+    yield
+    after = EXAMPLE_CSV.read_bytes()
+    if after != before:
+        EXAMPLE_CSV.write_bytes(before)
+        pytest.fail("这条用例改了仓库里的示例点表 examples/covi-tunnel.csv；"
+                    "写盘类用例请把目标路径放到 tmp_path")
+
 
 
 def free_port() -> int:

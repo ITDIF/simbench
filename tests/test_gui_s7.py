@@ -207,3 +207,75 @@ def test_the_properties_panel_edits_the_bit_that_was_asked_for(qapp, engine):
         dialog.deleteLater()
     names = [pt.name for pt in project.channels[0].devices[0].points]
     assert names == ["起", "停止位"], names
+
+
+def test_the_table_shows_the_bit_so_two_bools_in_one_byte_look_different(qapp):
+    """同字节两个 bool：点位表的"地址"列分别显示 `6.2` 与 `6.3`（点表/CSV 的写法）。
+
+    不带位显示的话两行一模一样——写对了也看不出右键的是哪一个（数字不撒谎，但少一位
+    就等于没写）。
+    """
+    from PySide6 import QtWidgets as _W
+    from simbench.engine.session import Session
+    from simbench.gui.point_table import ADDRESS_COLUMN, PointTableModel
+    from simbench.engine.point_source import session_source
+    project = Project(channels=[S7Channel("s7-1", devices=[
+        Device("D1", 11, [point("起", "db1", 6, "bool", "false", bit=2),
+                          point("停", "db1", 6, "bool", "false", bit=3),
+                          point("字", "db1", 6, "word", "0")])])])
+    session = Session()
+    session.load(project)
+    model = PointTableModel()
+    model.attach(session_source(session), "s7-1")
+    addresses = [model.index(r, ADDRESS_COLUMN).data() for r in range(model.rowCount())]
+    assert addresses == ["6.2", "6.3", "6"], addresses
+    session.shutdown()
+
+
+def test_the_panel_can_turn_an_s7_point_into_a_bool_and_write_its_bit(qapp, engine):
+    """界面里把 S7 的点位改成 bool 并填位：这是"从界面建 S7 bool 点位"唯一的路。
+
+    改前走不通——面板没有"位"这一格，改成 bool 会被 `validate` 挡回
+    "bool points need a bit"，于是 S7 的位只能靠手写 CSV 才能建出来。
+    """
+    project = Project(channels=[S7Channel("s7-1", devices=[
+        Device("D1", 11, [point("温度", "db1", 0, "word", "0")])])])
+    engine.load(project)
+    host = _Host(engine)
+    dialog = PointPropertiesDialog(host, project, ("s7-1", 11, "db1", 0, None))
+    try:
+        assert dialog.bit_edit.isEnabled() is False, "不是 bool 时这一格该是灰的"
+        dialog.pick_datatype("bool")
+        qapp.processEvents()
+        assert dialog.bit_edit.isEnabled() is True
+        dialog.address_edit.setText("6")
+        dialog.bit_edit.setText("3")
+        assert dialog.apply() is True, dialog.error_lines()
+    finally:
+        dialog.deleteLater()
+        host.deleteLater()
+        qapp.processEvents()
+    pt = project.channels[0].devices[0].points[0]
+    assert (pt.area, pt.address, pt.datatype, pt.bit) == ("db1", 6, "bool", 3)
+
+
+def test_the_panel_refuses_a_bool_without_a_bit_and_points_at_the_right_field(qapp, engine):
+    project = Project(channels=[S7Channel("s7-1", devices=[
+        Device("D1", 11, [point("温度", "db1", 0, "word", "0")])])])
+    engine.load(project)
+    host = _Host(engine)
+    dialog = PointPropertiesDialog(host, project, ("s7-1", 11, "db1", 0, None))
+    try:
+        dialog.pick_datatype("bool")
+        dialog.address_edit.setText("6")
+        assert dialog.apply() is False
+        assert "位不许为空" in dialog.error_lines()[0]
+        # 地址格里照点表写法填 `6.3` 时，那句话要指到"位"那一格，而不是干说"不是整数"
+        dialog.address_edit.setText("6.3")
+        assert dialog.apply() is False
+        assert "位 field" in dialog.error_lines()[0]
+    finally:
+        dialog.deleteLater()
+        host.deleteLater()
+        qapp.processEvents()
+    assert project.channels[0].devices[0].points[0].datatype == "word", "被拒之后本体不许变"

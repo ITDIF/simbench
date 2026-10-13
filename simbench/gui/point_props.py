@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from PySide6 import QtWidgets
 
 from ..project.csv_io import format_wave_param, parse_wave_param
-from ..project.model import (AREAS, DATATYPES, S7_AREAS, S7_TYPES, WAVEFORMS,
+from ..project.model import (AREAS, BOOL, DATATYPES, S7_AREAS, S7_TYPES, WAVEFORMS,
                              WORD_ORDERS, Point, brief_name, channel_transport,
                              parse_s7_area, word_orders_allowed)
 from ..project.validate import error_lines, validate_project
@@ -58,10 +58,10 @@ from .point_table import NO_CONVENTION, conventional
 # 结构性 vs live 安全是裁决的骨架，清单只在这一处定义：面板按它判拒绝与重载，
 # 主窗按它措辞"什么时候生效"（live 安全 = 全字段里不属于结构性的那部分，不另列一份，
 # 两份清单就是两处会漂移的真相）。抄第二份清单的地方就是漂移将要发生的地方。
-STRUCTURAL_FIELDS = ("area", "address", "datatype", "word_order", "initial",
+STRUCTURAL_FIELDS = ("area", "address", "bit", "datatype", "word_order", "initial",
                      "readonly")
 
-_FIELD_LABELS = {"area": "区", "address": "地址", "datatype": "类型",
+_FIELD_LABELS = {"area": "区", "address": "地址", "bit": "位", "datatype": "类型",
                  "word_order": "字序", "initial": "初值", "readonly": "只读"}
 
 _NOTICE_WIDTH = 420
@@ -127,12 +127,18 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         grid = QtWidgets.QGridLayout(self)
         self.name_edit = self._fixed(QtWidgets.QLineEdit(), 180)
         self.address_edit = self._fixed(QtWidgets.QLineEdit(), 64)
+        # S7 的 bool 位（`DBX6.3` 里的那个 3）：它是**地址的一部分**，所以是结构性字段。
+        # 只有"通道是 S7 且类型是 bool"时启用，其余情况**置灰不隐藏**（与本面板其它被收窄
+        # 的选项同一条口径：藏起来会让下面的行集体上移）。
+        self.bit_edit = self._fixed(QtWidgets.QLineEdit(), 48)
+        self.bit_edit.setToolTip("S7 的 bool 位：`DBX6.3` 里的 3（0..7）")
+        self.bit_hint = QtWidgets.QLabel("S7 的 bool 才有")
         self.convention_label = self._fixed(QtWidgets.QLabel(), 88)
         self.initial_edit = self._fixed(QtWidgets.QLineEdit(), 140)
         self.wave_param_edit = self._fixed(QtWidgets.QLineEdit(), 300)
         self.readonly_check = QtWidgets.QCheckBox()
         self.notice = QtWidgets.QLabel(
-            "区/地址/类型/字序/初值/只读：须先停止所属通道才能改，改完重启通道后生效"
+            "区/地址/位/类型/字序/初值/只读：须先停止所属通道才能改，改完重启通道后生效"
             "（重启前从站仍按旧配置应答）；名称/波形/波形参数：应用即写入点表，"
             "正在运行的通道下一拍生效。")
         self.notice.setWordWrap(True)
@@ -150,13 +156,14 @@ class PointPropertiesDialog(QtWidgets.QDialog):
             on_select=lambda _area: self._update_convention())
         self.datatype_buttons = self._radios(
             S7_TYPES if s7 else DATATYPES, columns=6,
-            on_select=self._sync_word_orders)
+            on_select=self._on_datatype_selected)
         self.word_order_buttons = self._radios(WORD_ORDERS)
         self.waveform_buttons = self._radios(WAVEFORMS)
         self.address_edit.textChanged.connect(self._update_convention)
 
         rows = [("名称", self.name_edit), ("区", self._box(self.area_buttons)),
-                ("地址", self._address_row()), ("类型", self._box(self.datatype_buttons)),
+                ("地址", self._address_row()), ("位", self._bit_row()),
+                ("类型", self._box(self.datatype_buttons)),
                 ("字序", self._box(self.word_order_buttons)),
                 ("初值", self.initial_edit), ("波形", self._box(self.waveform_buttons)),
                 ("波形参数", self.wave_param_edit), ("只读", self.readonly_check)]
@@ -242,6 +249,29 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self._tracked.append(self.convention_label)
         return box
 
+    def _bit_row(self) -> QtWidgets.QWidget:
+        """位那一行：一个格子 + 一句说明（置灰时两个都灰，行不消失）。"""
+        box = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.bit_edit)
+        row.addWidget(self.bit_hint)
+        row.addStretch(1)
+        self._tracked.append(self.bit_edit)
+        self._tracked.append(self.bit_hint)
+        return box
+
+    def _on_datatype_selected(self, datatype: str) -> None:
+        """类型一换，两件事跟着重算：字序的可选范围、位那一格能不能填。"""
+        self._sync_word_orders(datatype)
+        self._sync_bit_enabled()
+
+    def _sync_bit_enabled(self) -> None:
+        enabled = (channel_transport(self._channel()) == "s7"
+                   and self._checked(self.datatype_buttons) == BOOL)
+        self.bit_edit.setEnabled(enabled)
+        self.bit_hint.setEnabled(enabled)
+
     def _buttons(self) -> QtWidgets.QHBoxLayout:
         row = QtWidgets.QHBoxLayout()
         apply_button = self._fixed(QtWidgets.QPushButton("应用"), 64)
@@ -312,11 +342,31 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         try:
             address = int(text)
         except ValueError:
+            if channel_transport(self._channel()) == "s7" and "." in text:
+                # 点表/CSV 里 S7 的地址写成 `字节.位`，于是有人会照着往这一格里填——
+                # 指到"位"那一格去，比一句"不是整数"有用。
+                return self._refuse(f"address {text!r} must be the byte only; "
+                                    f"the bit has its own 位 field (write it as "
+                                    f"byte + 位, like 6 and 3 for DBX6.3)")
             return self._refuse(f"address {text!r} is not an integer")
+        bit_text = self.bit_edit.text().strip()
+        if self.bit_edit.isEnabled():
+            if not bit_text:
+                return self._refuse("位不许为空：S7 的 bool 是 `字节.位`（`DBX6.3` 的 3）")
+            try:
+                bit = int(bit_text)
+            except ValueError:
+                return self._refuse(f"bit {bit_text!r} is not an integer")
+        else:
+            # 这一格置灰说明这个点位不该有位（非 S7、或类型不是 bool）：清掉它。
+            # 带位的非 bool 点、带位的 Modbus 点都是 validate 拦下的形状（装载时可能带着），
+            # 而"清掉"是让这份点表合法化的唯一方向。
+            bit = None
         target = {
             "name": self.name_edit.text().strip(),
             "area": self._checked(self.area_buttons),
             "address": address,
+            "bit": bit,
             "datatype": self._checked(self.datatype_buttons),
             "word_order": self._checked(self.word_order_buttons),
             "initial": self.initial_edit.text().strip(),
@@ -426,6 +476,9 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         # 形状（勾选 + 置灰），而面板依旧不替操作员重置字序。
         self._sync_word_orders(point.datatype)
         self.address_edit.setText(str(point.address))
+        self.bit_edit.setText("" if point.bit is None else str(point.bit))
+        # `_load_choice` 走的是 setChecked（不触发 clicked），所以联动要在这里显式补一次
+        self._sync_bit_enabled()
         self.initial_edit.setText(point.initial)
         self.wave_param_edit.setText(format_wave_param(point.wave_param))
         self.readonly_check.setChecked(point.readonly)

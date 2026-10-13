@@ -18,6 +18,8 @@ tcp-502,风机-1,12,运行状态,di,0,bool,ABCD,true,const,,true
 """
 
 ALL_PORTS = {"tcp-502": 502}
+# 旧写法（12 列、端口靠名字尾数猜）：`@tcp:` 段是 2026-10-13 才加的，这条路径要一直能读。
+LEGACY_ROWS = ROWS
 
 
 def test_groups_by_channel_then_device():
@@ -146,13 +148,80 @@ def test_with_notes_true_returns_tuple_and_no_notes_when_ports_given():
 
 
 def test_read_csv_file_forwards_with_notes(tmp_path):
-    """Task 12 的装载口就是这么调的：read_csv_file(path, ports=..., with_notes=True)。"""
+    """Task 12 的装载口就是这么调的：read_csv_file(path, ports=..., with_notes=True)。
+
+    这里用**旧写法**（12 列、端口靠名字尾数）：那条"猜了要说"的 note 就是为它准备的。
+    新写法把端口写在 `@tcp:` 段里，不该再有 note——见下一条用例。
+    """
     path = tmp_path / "p.csv"
-    write_csv_file(read_csv(ROWS, ports=ALL_PORTS), path)
+    path.write_text(LEGACY_ROWS, encoding="utf-8")
     proj, notes = read_csv_file(path, ports={}, with_notes=True)
     assert isinstance(proj, Project)
     assert proj.channels[0].port == 502
     assert any("port" in n for n in notes)
+
+
+def test_a_written_csv_carries_host_and_port_so_nothing_has_to_be_guessed(tmp_path):
+    """导出的 CSV 把 host 与 port 写进通道名（`name@tcp:host:port`）：再读回来逐字一致、没有 note。
+
+    这条修的是一个**静默改配置**的缺陷：原来端口只能靠"通道名尾数"带过去，host 则无处可放
+    ——自定义名字（`网关-1`）导出再导入，端口会变成 1、host 会变回 0.0.0.0。
+    """
+    project = read_csv(ROWS, ports=ALL_PORTS)
+    path = tmp_path / "p.csv"
+    write_csv_file(project, path)
+    assert "tcp-502@tcp:0.0.0.0:502" in path.read_text(encoding="utf-8")
+
+    again, notes = read_csv_file(path, ports={}, with_notes=True)
+    assert notes == [], "端口已经写在文件里，不该再有'猜端口'那条 note"
+    assert [(ch.name, ch.host, ch.port) for ch in again.channels] == \
+           [(ch.name, ch.host, ch.port) for ch in project.channels]
+
+
+def test_the_roundtrip_needs_no_ports_dictionary_any_more():
+    """`ports` 那个拐杖可以不用了：`read_csv(write_csv(proj))` 自己就一致。
+
+    老用例仍然传 `ports`（那是"调用方最优先"那条契约的证据，留着）；这一条证明**不传也对**
+    ——否则"导出再导入"就得靠调用方记住补端口，而那正是现场最会漏的一步。
+    """
+    project = read_csv(ROWS, ports=ALL_PORTS)
+    assert read_csv(write_csv(project)) == project
+
+
+def test_a_name_that_would_read_back_a_different_port_is_carried_explicitly():
+    """名字不含端口时（`网关-1`）：导出写 `网关-1@tcp:127.0.0.1:15020`，往返逐字一致。"""
+    project = Project(channels=[TcpChannel("网关-1", host="127.0.0.1", port=15020,
+                                          devices=[Device("D1", 1, [
+                                              Point("p1", "hr", 0, "uint16")])])])
+    again = read_csv(write_csv(project))
+    channel = again.channels[0]
+    # 逐字段比（不比整个对象：读回来的点会带上 `row`，那是 CSV 的行号，本来就有）
+    assert (channel.name, channel.host, channel.port) == ("网关-1", "127.0.0.1", 15020)
+    assert [(pt.name, pt.address, pt.datatype) for pt in channel.devices[0].points] == \
+        [("p1", 0, "uint16")]
+
+
+def test_the_tcp_mark_is_not_mistaken_for_something_else():
+    """`@tcp:host:port` 必须走 TCP：它长得像 S7 的 `host:port`，也像串口的"带冒号的串口名"。"""
+    text = ROWS.replace("tcp-502,", "tcp-502@tcp:127.0.0.1:15020,")
+    project = read_csv(text)
+    channel = project.channels[0]
+    assert (channel.name, channel.host, channel.port) == ("tcp-502", "127.0.0.1", 15020)
+    assert model.channel_transport(channel) == "tcp"
+
+
+@pytest.mark.parametrize("cell,message", [
+    ("@tcp:0.0.0.0:502", "no name before"),
+    ("tcp-1@tcp:0.0.0.0", "no host:port found"),
+    ("tcp-1@tcp:0.0.0.0:abc", "port 'abc' is not an integer"),
+    ("tcp-1@tcp:0.0.0.0:502 8N1", "one part after"),
+])
+def test_a_malformed_tcp_mark_is_refused_with_the_line_number(cell, message):
+    text = ROWS.replace("tcp-502", cell, 1)
+    with pytest.raises(ValueError) as excinfo:
+        read_csv(text)
+    assert message in str(excinfo.value), str(excinfo.value)
+    assert str(excinfo.value).startswith("line 2:"), str(excinfo.value)
 
 
 # ---- 行号与消息文案：现场要能当场改对 ----
@@ -559,3 +628,14 @@ def test_csv_io_does_not_keep_a_second_bool_table():
     """结构判据：csv_io 里不许再摆第二张表——收敛靠"没有副本"，不靠"两份恰好相等"。"""
     assert "_TRUE" not in vars(csv_io)
     assert "_FALSE" not in vars(csv_io)
+
+
+def test_exporting_a_project_without_points_is_refused_with_a_way_out():
+    """一个点位都没有的工程：CSV 表示不了空通道，所以要**拒**并指到 `.json`，而不是产出一个
+    表头文件（那个文件读回来是 `csv is empty` 的错——等于把问题推给下一个打开它的人）。"""
+    empty = Project(channels=[TcpChannel("网关-1", port=15020)])
+    with pytest.raises(ValueError) as excinfo:
+        write_csv(empty)
+    assert ".json" in str(excinfo.value)
+    with pytest.raises(ValueError):
+        write_csv(Project())                       # 连通道都没有也一样

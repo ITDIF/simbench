@@ -207,10 +207,12 @@ def test_the_tick_only_rewrites_the_title_when_dirty_changes(window):
     assert len(seen) == 2, seen
 
 
-def test_saving_clears_the_star_and_remembers_the_path(window, tmp_path, monkeypatch):
+def test_saving_without_a_path_asks_and_remembers_the_path(window, tmp_path, monkeypatch):
+    """没有路径（新建的工程）时保存要问一次，并把选中的路径记下来。"""
     target = str(tmp_path / "saved.json")
     monkeypatch.setattr(main_window_module, "save_project_as",
                         lambda parent, project, suggested="": target)
+    window._path = None
     window.session.mark_dirty()
     window._tick()
     assert window.windowTitle().endswith("*")
@@ -220,13 +222,82 @@ def test_saving_clears_the_star_and_remembers_the_path(window, tmp_path, monkeyp
     assert window._path == pathlib.Path(target)
 
 
+def test_saving_with_a_path_writes_in_place_and_does_not_ask(window, monkeypatch,
+                                                              tmp_path, qapp):
+    """有路径时"保存"**直接写回**：不再弹文件名对话框（原来每存一次都弹，人就开始点错）。
+
+    这条同时钉住"盘上真有东西"与"状态栏说了一句"——只把 `*` 清掉而没落盘是最坏的一种：
+    界面上一切正常，文件还是旧的。
+
+    **路径先指到 tmp 里的副本**：这条用例会真的写盘，写到仓库里的示例点表上就是把示例改坏
+    （第一次跑时真踩过——用例在断言处失败，恢复那一行没跑到，示例点表被临时工程覆盖）。
+    """
+    asked: list[int] = []
+    monkeypatch.setattr(main_window_module, "save_project_as",
+                        lambda parent, project, suggested="": asked.append(1) or "x")
+    target = tmp_path / "in-place.csv"
+    target.write_text(pathlib.Path(window._path).read_text(encoding="utf-8"),
+                      encoding="utf-8")
+    window._path = target
+    before = target.read_text(encoding="utf-8")
+    window.session.project.tick_ms = 250
+    window.session.mark_dirty()
+    assert window._save_project() == str(target)
+    assert asked == [], "有路径还弹对话框"
+    assert target.read_text(encoding="utf-8") != before, "没真写回"
+    assert "已保存" in window.status.currentMessage()
+    assert window.session.dirty is False
+
+
+def test_save_as_always_asks_even_when_a_path_is_known(window, tmp_path, monkeypatch):
+    """另存为**总是**问：它的语义就是"换一个地方存"。"""
+    target = str(tmp_path / "elsewhere.json")
+    calls: list[str] = []
+    monkeypatch.setattr(main_window_module, "save_project_as",
+                        lambda parent, project, suggested="": calls.append(suggested)
+                        or target)
+    current = str(window._path)                       # 另存为的默认文件名 = 当前路径
+    assert window._save_project(ask=True) == target
+    assert calls == [current], "另存为没把当前路径当默认文件名"
+    assert window._path == pathlib.Path(target)
+
+
 def test_a_cancelled_save_keeps_the_star(window, monkeypatch):
     """用户在另存为里按了取消：改动还在，`*` 就不许消失（不然他以为已经存过了）。"""
     monkeypatch.setattr(main_window_module, "save_project_as",
                         lambda parent, project, suggested="": None)
     window.session.mark_dirty()
-    assert window._save_project() is None
+    assert window._save_project(ask=True) is None
     assert window.session.dirty is True
+
+
+def test_the_file_menu_holds_the_six_actions_with_shortcuts(window):
+    """文件菜单：工具栏那批 QAction 的同一批对象 + 快捷键（"另存为"的家）。
+
+    另做一套菜单专属动作就会有两份行为，迟早漂移；这里逐条比**对象身份**。
+    """
+    menu = [m for m in window.menuBar().findChildren(QtWidgets.QMenu)
+            if m.title() == "文件"]
+    assert len(menu) == 1, [m.title() for m in window.menuBar().findChildren(
+        QtWidgets.QMenu)]
+    actions = menu[0].actions()
+    assert [a.text() for a in actions] == ["新建工程", "打开工程", "导入CSV", "保存工程",
+                                           "另存为…", "导出CSV"]
+    assert [a.shortcut().toString() for a in actions] == \
+        ["Ctrl+N", "Ctrl+O", "Ctrl+I", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+E"]
+    assert [a for a in actions][:1] == [window.act_new]
+    assert actions[3] is window.act_save and actions[5] is window.act_export
+    assert actions[4] is window.act_save_as and window.act_save_as.isEnabled()
+
+
+def test_the_log_view_keeps_only_the_last_lines(window, monkeypatch):
+    """日志窗只留最近 5000 行：跑一晚上的会话不该把内存一路吃上去。"""
+    assert window.log_view.maximumBlockCount() == 5000
+    for index in range(5100):
+        window._log(f"line {index}")
+    assert window.log_view.blockCount() <= 5000
+    text = window.log_view.toPlainText()
+    assert "line 5099" in text and "line 0\n" not in text
 
 
 # ---------- 启停：三处同步 ----------
@@ -763,11 +834,15 @@ def test_discarding_unsaved_edits_closes_and_shuts_the_session_down(window, monk
 
 
 def test_a_cancelled_save_at_close_keeps_the_window_open(window, monkeypatch):
-    """选"保存"又在文件对话框里按取消：不能把没存下来的改动带出窗口。"""
+    """选"保存"又在文件对话框里按取消：不能把没存下来的改动带出窗口。
+
+    工程**没有路径**（新建的、还没存过）——有路径时"保存"是直接写回，没有对话框可取消。
+    """
     monkeypatch.setattr(QtWidgets.QMessageBox, "question",
                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Save))
     monkeypatch.setattr(main_window_module, "save_project_as",
                         lambda parent, project, suggested="": None)
+    window._path = None
     window.session.mark_dirty()
     window.close()
     assert window.isVisible()

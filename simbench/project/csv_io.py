@@ -87,6 +87,12 @@ def write_csv(project: Project) -> str:
     `newline=""` 原样落盘，同一份工程会因平台/路径不同产出不同字节（读回倒是
     两种都全等，实测过）。行尾钉死才有可比对的导出文件，也才谈得上进 git。
     """
+    # 一个点位都没有的工程写出**表头一行**，而读回来是 `csv is empty` 的错——那等于产出一个
+    # 谁也读不回来的文件（新建一个空通道、导一次、再想导入就撞上）。CSV 是点表：空通道在它
+    # 里面没有表示法，所以这里就说清楚，并指到工程文件（`.json`）那条路上。
+    if not any(True for _ in project.iter_points()):
+        raise ValueError("this project has no point; a CSV is a point table and cannot "
+                         "express an empty channel — save it as .json instead")
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(HEADER)
@@ -183,11 +189,16 @@ def _require_bool(text: str, what: str) -> bool:
 
 
 def _csv_channel_name(channel) -> str:
-    """导出时把串口参数烘进通道名（导入按同一语法还原）：CSV 往返不丢参数，也不新增列。
+    """导出时把"那台设备在哪儿"烘进通道名（导入按同一语法还原）：往返不丢参数，也不新增列。
 
-    全默认的串口只写名字与串口名（`com-485-1@COM3`）；改了波特率或帧格式才把那一段接上
-    （帧格式要有位置，所以波特率一起写出来）。TCP 通道原样回名字——既有导出字节不变。
-    段之间用空格：串口名本身不许含空格（validate 拦），所以这里不会与 CSV 的引号规则打架。
+    三种写法（互不重叠，导入侧按同一个顺序问）：
+
+    * 串口：`com-485-1@COM3 19200 8E1`（全默认只写 `名字@串口名`）
+    * S7：`s7-1@192.168.0.10:102 0/1`（全默认的 rack/slot 不写）
+    * TCP：`tcp-5020@tcp:0.0.0.0:5020`（2026-10-13 加的；不写的话端口只能靠名字尾数带过去、
+      host 则无处可放——自定义名字的工程导出再导入就是**静默改配置**）
+
+    段之间用空格：串口名/主机名本身不许含空格（validate 拦），所以这里不会与 CSV 的引号规则打架。
     """
     if channel_transport(channel) == "s7":
         # `s7-1@192.168.0.10:102 0/1`（全默认的 rack/slot 不写，与串口那条同一个口径）
@@ -195,8 +206,15 @@ def _csv_channel_name(channel) -> str:
         if (channel.rack, channel.slot) != (S7_DEFAULTS["rack"], S7_DEFAULTS["slot"]):
             spec = f"{spec} {channel.rack}/{channel.slot}"
         return f"{channel.name}{SERIAL_MARK}{spec}"
-    if channel_transport(channel) != "rtu":
-        return channel.name
+    if channel_transport(channel) == "tcp":
+        # TCP 也把监听地址写进 `@` 段，但**带一个 `tcp:` 前缀**：`name@tcp:host:port`。
+        # 不写成 `name@host:port` —— 那个形状是 S7 的（`s7-1@192.168.0.10:102`），两种传输
+        # 撞成同一个写法，导入时只能靠猜，而猜错的后果是静默走错传输（见 `parse_tcp_name`）。
+        #
+        # 为什么 TCP 也要写：不写的话，端口只能靠"通道名尾数"那条隐式约定带过去（host 则
+        # 无处可放）——自定义名字（`网关-1`）导出再导入端口会变成 1、host 会变回 0.0.0.0，
+        # 这是**静默改配置**。显式写出来，文件长一点，但往返逐字一致。
+        return f"{channel.name}{SERIAL_MARK}tcp:{channel.host}:{channel.port}"
     default_frame = format_frame(SERIAL_DEFAULTS["bytesize"], SERIAL_DEFAULTS["parity"],
                                  SERIAL_DEFAULTS["stopbits"])
     frame = format_frame(channel.bytesize, channel.parity, channel.stopbits)
@@ -206,6 +224,47 @@ def _csv_channel_name(channel) -> str:
         if frame != default_frame:
             fields.append(frame)
     return f"{channel.name}{SERIAL_MARK}{' '.join(fields)}"
+
+
+TCP_SCHEME = "tcp:"
+
+
+def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel] | None:
+    """`<通道名>@tcp:<host>:<port>` -> `(名字, TcpChannel)`；不是这个写法回 None。
+
+    为什么 TCP 要一个显式前缀：`name@host:port` 这个形状**已经是 S7 的**，两种传输共用同一个
+    写法就分不出来了，而"分不出来"意味着导入时要靠区/类型去猜传输——猜错就是静默走错路。
+    加上前缀之后四种写法互不重叠：`@tcp:…`（TCP）、`@…://…`（串口 URL）、`@…:…`（S7）、
+    `@…`（串口名）。
+
+    只做**转换**：端口不是数、host 为空这种形状错在这里带行号拒掉；host 是不是合法地址、
+    端口范围这些判定留给 `validate`。
+    """
+    if SERIAL_MARK not in raw:
+        return None
+    name, _, spec = raw.partition(SERIAL_MARK)
+    name = name.strip()
+    fields = spec.split()
+    if not fields or not fields[0].lower().startswith(TCP_SCHEME):
+        return None
+    if not name:
+        raise ValueError(f"line {index}: channel {brief(raw)} has no name before "
+                         f"{SERIAL_MARK!r} (write it as name{SERIAL_MARK}tcp:host:port)")
+    if len(fields) > 1:
+        raise ValueError(f"line {index}: channel {brief(raw)} must be written as "
+                         f"name{SERIAL_MARK}tcp:host:port (one part after "
+                         f"{SERIAL_MARK!r})")
+    body = fields[0][len(TCP_SCHEME):]
+    host, sep, port_text = body.rpartition(":")
+    if not sep or not host:
+        raise ValueError(f"line {index}: channel {brief(raw)}: TCP channels are written "
+                         f"as name{SERIAL_MARK}tcp:host:port (no host:port found)")
+    try:
+        port = int(port_text)
+    except ValueError:
+        raise ValueError(f"line {index}: channel {brief(raw)}: port "
+                         f"{brief(port_text)} is not an integer") from None
+    return name, TcpChannel(name=name, host=host, port=port)
 
 
 def parse_serial_name(raw: str, index: int) -> tuple[str, SerialChannel] | None:
@@ -342,9 +401,15 @@ def _channel_for(channels: dict, raw_name: str, ports: dict[str, int],
     同一个通道名第二次出现时只做一致性检查：参数写法与第一次冲突就带行号拒掉——
     静默取第一个等于让 CSV 里一半的行在描述另一台设备。
     """
-    wanted_s7 = parse_s7_name(raw_name, index)
-    parsed = None if wanted_s7 is not None else parse_serial_name(raw_name, index)
-    if wanted_s7 is not None:
+    # 顺序要紧：先问 `@tcp:`（它长得像 S7 的 host:port，不问在前会被 S7 那条路收下），
+    # 再问 S7，最后问串口。
+    wanted_tcp = parse_tcp_name(raw_name, index)
+    wanted_s7 = None if wanted_tcp is not None else parse_s7_name(raw_name, index)
+    parsed = (None if wanted_tcp is not None or wanted_s7 is not None
+              else parse_serial_name(raw_name, index))
+    if wanted_tcp is not None:
+        name, wanted = wanted_tcp
+    elif wanted_s7 is not None:
         name, wanted = wanted_s7
     elif parsed is not None:
         name, wanted = parsed
@@ -360,16 +425,21 @@ def _channel_for(channels: dict, raw_name: str, ports: dict[str, int],
     if name in channels:
         existing = channels[name]
         if wanted is not None and channel_transport(existing) != channel_transport(wanted):
-            raise ValueError(f"line {index}: channel {brief(name)} already appeared "
-                             f"without {SERIAL_MARK!r} (as a TCP channel)")
+            raise ValueError(f"line {index}: channel {brief(name)} already appeared as a "
+                             f"{channel_transport(existing)} channel, now with "
+                             f"{_csv_channel_name(wanted)}")
         if wanted is not None and _channel_params(existing) != _channel_params(wanted):
-            label = "serial" if channel_transport(wanted) == "rtu" else "S7"
+            label = {"rtu": "serial", "s7": "S7"}.get(channel_transport(wanted), "TCP")
             raise ValueError(
                 f"line {index}: channel {brief(name)} appears with two different "
                 f"{label} settings ({_csv_channel_name(existing)} vs "
                 f"{_csv_channel_name(wanted)})")
         return existing
     if wanted is not None:
+        if name in ports and channel_transport(wanted) == "tcp":
+            # `ports`（调用方给的端口）比文件里写的更优先——与原来"调用方最优先"同一条契约，
+            # 只是现在文件里也可能带端口了。
+            wanted.port = ports[name]
         channels[name] = wanted
         return wanted
     if name in ports:
@@ -384,8 +454,11 @@ def _channel_for(channels: dict, raw_name: str, ports: dict[str, int],
 
 def _channel_params(channel) -> tuple:
     """通道参数的可比形式（同一个名字第二次出现时比"说的是不是同一台设备"）。"""
-    if channel_transport(channel) == "s7":
+    transport = channel_transport(channel)
+    if transport == "s7":
         return (channel.host, channel.port, channel.rack, channel.slot)
+    if transport == "tcp":
+        return (channel.host, channel.port)
     return _serial_params(channel)
 
 

@@ -39,7 +39,7 @@ from .channel_panel import ChannelPanel
 from .device_tree import DeviceTree
 from .dialogs import (
     IssueDialog, ProjectFileError, choose_offset, export_csv_path, format_issues,
-    import_csv, open_project, read_point_table, save_project_as,
+    import_csv, open_project, read_point_table, save_project_as, save_project_to,
 )
 from .new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
 from .net_panel import NetPanel
@@ -55,6 +55,7 @@ _NOTICE_MS = 8000                       # 拒绝理由要在状态栏留够一�
 # 线程正卡在 `runner.call` 上等引擎回话——互等成环，整个软件冻死）。
 _GC_EVERY_S = 5.0
 _STATUS_SLOT_WIDTH = 320                # 状态摘要的定宽槽（实测最长两条通道 ≈ 200px）
+_LOG_LINES = 5000                       # 日志窗只留最近多少行（与报文窗的 5000 帧同一量级）
 _TREE_STRETCH, _TABLE_STRETCH = 1, 4
 _FIRST_SPLIT = [600, 400]   # 上栏:下栏 首屏比例（见 _build_layout）
 _STATUS_WORD = {"stopped": "停止", "starting": "启动中", "running": "运行",
@@ -97,6 +98,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(self._build_layout())
         self._build_toolbar()
+        self._build_menu()
         self._build_status_bar()
 
         self.tabs.addTab(self.packet_panel, "报文监视")
@@ -151,6 +153,11 @@ class MainWindow(QtWidgets.QMainWindow):
         view = QtWidgets.QPlainTextEdit()
         view.setReadOnly(True)
         view.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        # 只留最近 5000 行（与报文窗那个环形缓冲同一个量级）：编辑、状态变化、运行期报错
+        # 都往这里写，跑一晚上的会话是几万行——那是"跑得越久越占内存"的典型形状，
+        # 而且它一条也没用了（几十小时前的报错没人回头看）。
+        view.setMaximumBlockCount(_LOG_LINES)
+        view.setToolTip(f"只保留最近 {_LOG_LINES} 行")
         # 等宽字体：异常里带出来的引擎栈与"[refused] name=..."这类行按列对着读才不费眼
         view.setFont(theme.mono_font())
         return view
@@ -231,6 +238,25 @@ class MainWindow(QtWidgets.QMainWindow):
         action.setToolTip(text)
         self._icon_names.append((action, icon))
         return action
+
+    def _build_menu(self) -> None:
+        """"文件"菜单：工具栏那排按钮的家谱，也是"另存为"与快捷键的家。
+
+        为什么要它：工具栏已经 9 个动作（每个都要配图标与定宽槽的断言），而"保存"与
+        "另存为"是**两件事**——塞进菜单既给得出快捷键，也不用再加两个按钮。
+        菜单项与工具栏按钮是**同一批 QAction 对象**（行为只有一份，不会两处漂移）。
+        """
+        menu = self.menuBar().addMenu("文件")
+        self.act_save_as = QtGui.QAction("另存为…", self)
+        self.act_save_as.setToolTip("总是问路径（保存是有路径就直接写回）")
+        self.act_save_as.triggered.connect(
+            lambda _checked=False: self._save_project(ask=True))
+        for action, shortcut in ((self.act_new, "Ctrl+N"), (self.act_open, "Ctrl+O"),
+                                 (self.act_import, "Ctrl+I"), (self.act_save, "Ctrl+S"),
+                                 (self.act_save_as, "Ctrl+Shift+S"),
+                                 (self.act_export, "Ctrl+E")):
+            action.setShortcut(shortcut)
+            menu.addAction(action)
 
     def _build_status_bar(self) -> None:
         self.status = self.statusBar()
@@ -594,10 +620,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return                                 # 用户取消：什么都没发生
         self.use_project(project, path)
 
-    def _save_project(self) -> str | None:
+    def _save_project(self, ask: bool = False) -> str | None:
+        """保存。`ask=True` 是"另存为"（总要问路径）；否则**有路径就直接写回**。
+
+        原来无条件走 `save_project_as`：已经存过、路径都知道了，再点一次"保存"还是弹
+        文件名对话框——一天存十次就问十次，人开始点错（`xx (2).json` 就是这么来的）。
+        没有路径时才问（新建的工程第一次保存）。
+        """
         try:
-            path = save_project_as(self, self.session.project,
-                                   str(self._path) if self._path else "")
+            if self._path is not None and not ask:
+                path = str(save_project_to(self.session.project, self._path))
+                self.status.showMessage(f"已保存 {self._path.name}", _NOTICE_MS)
+            else:
+                path = save_project_as(self, self.session.project,
+                                       str(self._path) if self._path else "")
         except ProjectFileError as exc:
             self._log(f"[error] 保存失败：{exc}")
             self.status.showMessage("保存失败，原因见日志页", _NOTICE_MS)
@@ -620,7 +656,9 @@ class MainWindow(QtWidgets.QMainWindow):
             target = self._path.with_suffix(".csv")
         try:
             write_csv_file(self.session.project, target)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError 是"这份工程 CSV 表示不了"（一个点位都没有）：那也是一句人话，
+            # 不是 traceback——从 Qt 槽里逃出去的表现是"点了没反应"。
             self._log(f"[error] 导出 CSV 失败：{exc}")
             self.status.showMessage("导出 CSV 失败，原因见日志页", _NOTICE_MS)
             return

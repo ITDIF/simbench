@@ -135,6 +135,23 @@ def export_csv_path(parent=None, suggested: str = "") -> str | None:
     return path or None
 
 
+def save_project_to(project, path) -> pathlib.Path:
+    """把工程写回**已经知道的那个路径**（按后缀分派到 json/csv）。
+
+    "保存"与"另存为"是两件事：另存为要问路径（`save_project_as`），保存不该问——一天里
+    存十次就弹十次文件名对话框，人就会开始点错（`xx (2).json` 就是这么来的）。
+    """
+    target = pathlib.Path(path)
+    try:
+        if target.suffix.lower() == ".json":
+            save_project(project, str(target))
+        else:
+            write_csv_file(project, target)
+    except (ValueError, OSError) as exc:
+        raise ProjectFileError(target, exc) from exc
+    return target
+
+
 def save_project_as(parent, project, suggested: str = ""):
     """返回落盘路径或 None（用户取消）。路径回传给主窗记住。"""
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
