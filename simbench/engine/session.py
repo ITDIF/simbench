@@ -48,6 +48,9 @@ from .runner import EngineRunner
 _START_TIMEOUT = 10.0
 _STOP_TIMEOUT = 10.0
 _WRITE_TIMEOUT = 5.0
+# 整批回读的上限（见 `_snapshot_for`）：GUI 心跳每 100ms 调一次，等太久等于把界面卡住。
+# 正常一次回读是毫秒级，2 秒只可能意味着引擎线程没回话。
+_READ_TIMEOUT = 2.0
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,9 @@ class Session:
         self._points: dict[tuple[str, int], dict[tuple[str, int], Point]] = {}
         self._rows_meta: dict[str, list[tuple[int, str, Point]]] = {}
         self._dirty = False
+        # "整批回读超时"那条错只报一次（每 100ms 一条能把日志窗刷干净，而"表全是灰的"本身
+        # 就是看得见的信号）。见 `_snapshot_for`。
+        self._read_failed = False
         self._runner.subscribe(self._on_engine_event)
         if packet_store is not None:
             # 必须包这一层 isinstance：Session 的事件流里除 PacketEvent 还有 ChannelState，
@@ -162,6 +168,7 @@ class Session:
             self._channels = {ch.name: ChannelRuntime(ch.name) for ch in project.channels}
             self._rebuild_index_locked()
             self._dirty = self._dirty and same_project
+            self._read_failed = False
             # 旧通道没关掉就得在这里留一句话：它的句柄随 `_channels` 一起换掉了，再没有
             # 第二次"停止"能摸到它，端口会一直占到进程结束。只发日志不发 ChannelState——
             # 通道对象马上是新的了，给一个还没起的通道标红是本末倒置。
@@ -382,16 +389,67 @@ class Session:
             runtime = self._channels.get(channel)
             meta = list(self._rows_meta.get(channel, ()))
         running = bool(runtime and runtime.running)
-        backend = runtime.backend if running else None
         s7 = self._is_s7(channel)
+        # 跑着的时候，**整批**回读在引擎线程上一次做完（见 `_snapshot`）。没跑就没有快照：
+        # 那时显示的是点表初值，一次跨线程调用都不发。
+        snapshot = self._snapshot_for(runtime, meta, s7, channel) if running else {}
         out: list[Row] = []
         for unit_id, device, pt in meta:
-            regs, failed = self._read_back(runtime, pt, unit_id, s7)
+            entry = snapshot.get((unit_id, pt.area, pt.address, pt.bit))
+            regs, failed, waveform = entry if entry is not None else (None, True, True)
             value_text, registers = _render(pt, regs, s7)
             out.append(Row(channel, device, unit_id, pt.name, pt.area, pt.address,
                            pt.datatype, pt.word_order, value_text, registers,
                            pt.readonly, pt.waveform, stale=failed and running,
-                           source=_source_of(backend, unit_id, pt, s7), bit=pt.bit))
+                           source="waveform" if waveform else "manual", bit=pt.bit))
+        return out
+
+    def _snapshot_for(self, runtime, meta, s7: bool, channel: str) -> dict:
+        """整批快照（寄存器 + 归属）在引擎线程上取一次；超时/失败就交回空表。
+
+        空表的意思是"这一跳整批没读到"：`rows()` 把每一行标成 `stale`（界面灰显），与
+        "设备真报了这个值"分得开。**不把异常抛进 GUI 心跳**——10Hz 的界面炸一次就没了。
+
+        只报一次错（`self._read_failed`）：引擎不回话时每 100ms 一条日志会把日志窗刷干净，
+        而"表全是灰的"本身就是看得见的信号。
+        """
+        try:
+            snapshot = self._runner.call(
+                lambda: self._snapshot(runtime, meta, s7), _READ_TIMEOUT,
+                f"read rows of channel {channel}")
+        except Exception as exc:                    # noqa: BLE001
+            if not self._read_failed:
+                self._read_failed = True
+                self.publish_log(
+                    "error", f"channel {channel}: the engine did not answer the row read "
+                             f"within {_READ_TIMEOUT:g}s ({exc}); the table shows stale "
+                             f"values until it answers again")
+            return {}
+        self._read_failed = False
+        return snapshot
+
+    async def _snapshot(self, runtime, meta, s7: bool) -> dict:
+        """**在引擎线程上**取整批快照：`{(unit, 区, 地址, 位): (寄存器|None, 失败?, 归波形?)}`。
+
+        为什么要有它（而不是让 `rows()` 一个一个直读）：运行态——寄存器缓冲与 `SourceStore`
+        ——按设计只由 loop 线程读写（`backend/ownership.py` 开头那段、spec §13 的跨线程那一课）。
+        直读单个 int 不会读出半个值，但**多寄存器的值**（float32/uint64 跨两格）在两格之间被
+        tick 改写时，界面上会出现一帧"谁都没写过"的数——正是本项目最防的那类假象。
+        收成一次之后，这一跳要么全看到、要么整批标 `stale`。
+
+        写成 `async` 是接口要求（`EngineRunner.call` 收的是**协程工厂**，不是同步函数）：
+        里面一个 `await` 都没有，因为要的就是"在 loop 线程上同步做完"。
+        """
+        backend = runtime.backend
+        if backend is None:
+            return {}
+        key = 0 if s7 else None
+        out: dict = {}
+        for unit_id, _device, pt in meta:
+            regs, failed = self._read_back(runtime, pt, unit_id, s7)
+            waveform = backend.source_is_waveform(
+                key if key is not None else unit_id, pt.area, pt.address, bit=pt.bit)
+            out[(unit_id, pt.area, pt.address, pt.bit)] = (regs, failed, waveform)
         return out
 
     def manual_count(self, channel: str) -> int:
@@ -407,14 +465,12 @@ class Session:
             meta = list(self._rows_meta.get(channel, ()))
         if runtime is None or not runtime.running or runtime.backend is None:
             return 0
-        backend = runtime.backend
-        # 归属键按传输取：S7 固定 0（它按区/DB/字节寻址，事件里也没有 unit 这一维）。
-        # 这里与 `rows()` 的 source 列、`restore_waveform` 必须是同一个键，否则
-        # "界面说已停、计数说 0"这种自相矛盾就会出现。
-        key = 0 if self._is_s7(channel) else None
-        return sum(1 for unit_id, _device, pt in meta
-                   if not backend.source_is_waveform(key if key is not None else unit_id,
-                                                     pt.area, pt.address, bit=pt.bit))
+        # 与 `rows()` 同一条路：从引擎线程取一次整批快照，再在本地数。取不到（引擎没回话）
+        # 回 `None`——"不知道"与"0 处接管"是两件事，界面宁可不说那个数，也不能报一个假的 0。
+        snapshot = self._snapshot_for(runtime, meta, self._is_s7(channel), channel)
+        if not snapshot:
+            return None
+        return sum(1 for entry in snapshot.values() if not entry[2])
 
     def restore_waveform(self, channel: str, unit_id: int, area: str,
                          address: int, bit: int | None = None) -> bool:

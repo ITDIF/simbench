@@ -7,7 +7,7 @@
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\pip install -r requirements.txt      # 现场只要这一份
 
 # 桌面界面（点表可省，装载留给界面）
 .\.venv\Scripts\python.exe -m simbench --gui examples\covi-tunnel.csv
@@ -82,6 +82,12 @@ setuptools>=81 移除的 `pkg_resources`）。**没装也能用 Modbus**：只�
 
 ```powershell
 .\packaging\build.ps1
+```
+
+打包要 PyInstaller（**只在开发机上**需要）：
+
+```powershell
+.\.venv\Scripts\pip install -r requirements-dev.txt   # pytest / pys7 / pyinstaller
 ```
 
 产物在 `dist\` 下（同一个目录、共用 `_internal\`，演示点表在 `dist\simbench\examples\`）：

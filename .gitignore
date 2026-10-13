@@ -5,3 +5,4 @@ __pycache__/
 *.log
 build/
 dist/
+packaging/*.ico

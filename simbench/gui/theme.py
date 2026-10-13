@@ -614,12 +614,15 @@ def icon_size() -> QtCore.QSize:
     return QtCore.QSize(_ICON_SIZE, _ICON_SIZE)
 
 
-def app_icon() -> QtGui.QIcon:
+def app_icon(size: int = 128) -> QtGui.QIcon:
     """窗口/任务栏图标：深蓝底圆角方块 + 一条波形（和工具栏那个 `wave` 同一个形状）。
 
     两种模式共用一张：任务栏底很少是界面底色，跟着主题变反而更不好认。
+
+    `size` 是**画**出来的边长（不是把 128 那张拉伸）：`packaging/make_icon.py` 用它生成
+    exe 图标那几档尺寸，放大位图在 256 上会糊。
     """
-    size = 128
+    size = int(size)
     pix = QtGui.QPixmap(size, size)
     pix.fill(QtCore.Qt.transparent)
     painter = QtGui.QPainter(pix)

@@ -685,9 +685,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.session.restore_waveform(channel, unit_id, area, address, bit):
             return
         remaining = self.session.manual_count(channel)
-        self.status.showMessage(
-            f"已交还波形，人工接管还剩 {remaining} 处" if remaining
-            else "已交还波形，人工接管已全部交还", _NOTICE_MS)
+        if remaining is None:
+            # 引擎这一跳没回话（`manual_count` 明说"不知道"）：不许拿 0 顶替，
+            # 那会变成"已全部交还"——一句很可能不成立的话。
+            message = "已交还波形（接管计数这一跳没读到，下一跳再看）"
+        elif remaining:
+            message = f"已交还波形，人工接管还剩 {remaining} 处"
+        else:
+            message = "已交还波形，人工接管已全部交还"
+        self.status.showMessage(message, _NOTICE_MS)
 
     def _show_point_props(self, key: tuple) -> None:
         """右键"属性…"：逐点编辑点表锁死的字段，成功后把"什么时候生效"说清楚。

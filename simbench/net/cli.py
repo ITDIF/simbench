@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -241,13 +242,19 @@ def _run_elevated(args, cmd: str | list[str], job: dict) -> dict:
     一条命令行的，参数里带空格（网卡名"simbench 模拟网卡"就有）会被拆成两个参数，
     子进程 argparse 直接报错退出 2——实测踩过。写 JSON 文件就把引号问题整个绕开了。
     """
-    result_path = Path(args.result) if args.result else Path.cwd() / "_simbench_net_result.json"
-    log_path = Path(tempfile.gettempdir()) / "simbench_net_elevated.log"
+    # 临时文件的名字里带 **pid**：固定名字（`simbench_net_job.json`）在两个实例同时用时会互相
+    # 覆盖，而"读到上一次剩下的结果"会让人以为这次提权成功了。结果文件默认也放临时目录——
+    # 原来默认落在**当前工作目录**（`Path.cwd()/_simbench_net_result.json`），那会在别人的目录里
+    # 留下一个没人认领的文件。
+    stem = f"simbench_net_{os.getpid()}"
+    result_path = (Path(args.result) if args.result
+                   else Path(tempfile.gettempdir()) / f"{stem}_result.json")
+    log_path = Path(tempfile.gettempdir()) / f"{stem}_elevated.log"
     for stale in (result_path, log_path):
         if stale.exists():
             stale.unlink()
 
-    job_path = Path(tempfile.gettempdir()) / "simbench_net_job.json"
+    job_path = Path(tempfile.gettempdir()) / f"{stem}_job.json"
     # 子命令是**一段**（`up`）还是**两段**（`device create`）由调用方给：两段那种必须原样
     # 出现在子进程的命令行上（否则 argparse 认不出 device 下面的动作），而任务文件里的
     # `cmd` 只能记第一段，重放时才落得回 `_cmd_device` 那条分发上。

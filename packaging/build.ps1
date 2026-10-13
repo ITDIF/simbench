@@ -24,6 +24,12 @@ if (-not $Python) {
     $Python = if (Test-Path $candidate) { $candidate } else { "python" }
 }
 
+& $Python -c "import PyInstaller" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "PyInstaller 没装：先跑 pip install -r requirements-dev.txt（打包工具在开发依赖里）"
+    exit 1
+}
+
 Push-Location $root
 try {
     $pyiArgs = @("-m", "PyInstaller", "--noconfirm", "--clean", (Join-Path $PSScriptRoot "simbench.spec"))

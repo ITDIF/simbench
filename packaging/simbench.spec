@@ -20,14 +20,27 @@
 - `simbench-gui.exe`：无控制台（双击开界面）；
 - 两者共用同一份 `_internal/`（这就是选 onedir 的理由：不每次解压，缺 DLL 时看得见）。
 另外 `dist/simbench-onefile.exe` 是**单文件**形态（拷给同事方便），启动慢是已知代价。
+
+三个 exe 都带**图标**与**版本资源**（资源管理器属性页里能看见产品名/版本）：图标由
+`make_icon.py` 在构建时按 `theme.app_icon()` 那张画生成（六档尺寸，各自画、不拉伸）。
 """
 
 import pathlib
+import sys
 
 from PyInstaller.utils.hooks import collect_all
 
 HERE = pathlib.Path(SPECPATH)
 ROOT = HERE.parent
+
+# 图标与版本资源：图标由 `make_icon.py` **在构建时按同一张画法**生成（见那个文件的说明），
+# 版本资源是一份静态的 VSVersionInfo（`version_info.txt`）。两者都只对 Windows 有意义，
+# 但这份 spec 本来就只服务 Windows（`net/` 那层是 Windows 专用的）。
+sys.path.insert(0, str(HERE))
+import make_icon                                    # noqa: E402
+
+ICON = str(make_icon.ensure_icon())
+VERSION = str(HERE / "version_info.txt")
 
 # `collect_all` 的返回值就是 Analysis 的三个参数：数据 / 二进制 / 隐藏 import。
 snap7_datas, snap7_binaries, snap7_hidden = collect_all("snap7")
@@ -54,6 +67,8 @@ exe_cli = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
     name="simbench",
+    icon=ICON,
+    version=VERSION,
     debug=False,
     strip=False,
     upx=False,
@@ -63,6 +78,8 @@ exe_gui = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
     name="simbench-gui",
+    icon=ICON,
+    version=VERSION,
     debug=False,
     strip=False,
     upx=False,
@@ -81,6 +98,8 @@ coll = COLLECT(
 exe_onefile = EXE(
     pyz, a.scripts, a.binaries, a.datas, [],
     name="simbench-onefile",
+    icon=ICON,
+    version=VERSION,
     debug=False,
     strip=False,
     upx=False,

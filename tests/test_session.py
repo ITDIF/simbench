@@ -1072,6 +1072,58 @@ def test_restore_on_a_stopped_channel_is_a_named_refusal_not_an_attribute_error(
     assert any("not running" in l.text and "风机状态" in l.text for l in lines), lines
 
 
+def test_rows_reads_the_whole_table_in_one_cross_thread_call(session, monkeypatch):
+    """跑着时 `rows()` 只跨**一次**线程（整批快照）；没跑时一次都不跨。
+
+    钉的是"运行态只在 loop 线程读写"那条规矩（`backend/ownership.py` 开头那一段）：原来
+    `rows()` 逐个点直读后端缓冲，属于跨线程直读——单个 int 安全，但 float32/uint64 这种
+    **跨两格**的值在两格之间被 tick 改写时，界面上会出现一帧"谁都没写过"的数。
+    收成一次快照之后，这一跳要么全看到、要么整批标 `stale`。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    calls: list[str] = []
+    real_call = session._runner.call
+
+    def counting(factory, seconds, what):
+        calls.append(what)
+        return real_call(factory, seconds, what)
+
+    monkeypatch.setattr(session._runner, "call", counting)
+    assert len(session.rows("tcp-5020")) == 9
+    assert [row.stale for row in session.rows("tcp-5020")] == [False] * 9
+    assert calls == [], "没跑的时候一次跨线程调用都不该发"
+
+    session.start_channel("tcp-5020")
+    calls.clear()
+    assert len(session.rows("tcp-5020")) == 9
+    assert len(calls) == 1, calls
+    assert calls[0].startswith("read rows of channel tcp-5020")
+
+
+def test_a_wedged_engine_marks_the_rows_stale_and_says_so_only_once(session, monkeypatch):
+    """引擎不回话：整批按"没读到"处理（界面灰显），**只报一次**错，值不假装是新的。
+
+    每 100ms 一条日志能把日志窗刷干净，而"表全是灰的"本身就是看得见的信号；
+    `manual_count` 这时回 `None`（"不知道"），不许拿 0 顶替成"已全部交还"。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    logs: list[LogLine] = []
+    session.subscribe(lambda event: isinstance(event, LogLine) and logs.append(event))
+    monkeypatch.setattr(session._runner, "call",
+                        lambda *a, **k: (_ for _ in ()).throw(TimeoutError("engine wedged")))
+
+    rows = session.rows("tcp-5020")
+    assert len(rows) == 9 and all(row.stale for row in rows), "没读到就必须整批标灰"
+    assert all(row.stale for row in session.rows("tcp-5020")), "第二跳也还是灰的"
+    errors = [line for line in logs if line.level == "error"]
+    assert len(errors) == 1, [line.text for line in errors]
+    assert "did not answer" in errors[0].text
+    assert session.manual_count("tcp-5020") is None
+
+
 def test_dirty_flag_tracks_edits(session):
     session.load(loaded(free_port()))
     session.start_channel("tcp-5020")

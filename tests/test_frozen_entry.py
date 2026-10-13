@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -87,7 +88,8 @@ def _capture_relaunch(monkeypatch, tmp_path, frozen: bool):
 
 def test_relaunch_argv_when_running_from_source(monkeypatch, tmp_path):
     script, argv = _capture_relaunch(monkeypatch, tmp_path, frozen=False)
-    job = str(pathlib.Path(tempfile.gettempdir()) / "simbench_net_job.json")
+    job = str(pathlib.Path(tempfile.gettempdir())
+              / f"simbench_net_{os.getpid()}_job.json")
     assert _argument_list(script) == ["-m", "simbench", "net", "device", "create",
                                       "--elevated", "--job", job]
     assert argv[:1] == ["powershell"]
@@ -97,7 +99,8 @@ def test_relaunch_argv_when_running_from_source(monkeypatch, tmp_path):
 def test_relaunch_argv_when_frozen_drops_the_module_flag(monkeypatch, tmp_path):
     """冻结后 `-m simbench` 必须消失，`net` 直接跟在 exe 后面。"""
     script, _ = _capture_relaunch(monkeypatch, tmp_path, frozen=True)
-    job = str(pathlib.Path(tempfile.gettempdir()) / "simbench_net_job.json")
+    job = str(pathlib.Path(tempfile.gettempdir())
+              / f"simbench_net_{os.getpid()}_job.json")
     assert _argument_list(script) == ["net", "device", "create", "--elevated", "--job", job]
     assert "-m" not in script
     assert r"-FilePath 'C:\apps\simbench\simbench.exe'" in script
@@ -142,3 +145,48 @@ def test_gui_entry_really_runs_check_on_a_real_table(capsys):
     """走真 `main` 一次：`--check` 那条路不建 Qt 也不开端口，结果必须在 stdout 上。"""
     assert cli.gui_main(["--check", CSV]) == 0
     assert "point table is valid" in capsys.readouterr().out
+
+
+def test_relaunch_temp_files_are_unique_per_process(monkeypatch, tmp_path):
+    """提权用的 job / 日志 / 结果文件都带 pid：固定名字在两个实例同时用时互相覆盖，
+
+    而"读到上一次剩下的结果"会让现场以为这次提权成功了（提权这条路本来就看不见对话框以外
+    的任何东西）。结果文件的默认位置也从**当前工作目录**挪到临时目录——它是个中间产物，
+    不该在别人的目录里留下。
+    """
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(net_cli.tempfile, "gettempdir",
+                        lambda: str(tmp_path))
+    monkeypatch.setattr(net_cli.subprocess, "run",
+                        lambda *a, **k: _FakeProc(seen, a[0]))
+
+    class _Args:
+        result = None
+
+    net_cli._run_elevated(_Args(), "up", {})
+    job_path = seen["job_path"]
+    assert job_path.name == f"simbench_net_{os.getpid()}_job.json"
+    assert job_path.parent == tmp_path
+    import json as _json
+    payload = _json.loads(pathlib.Path(job_path).read_text(encoding="utf-8"))
+    assert payload["result"] == str(tmp_path / f"simbench_net_{os.getpid()}_result.json")
+    assert payload["log"] == str(tmp_path / f"simbench_net_{os.getpid()}_elevated.log")
+
+
+class _FakeProc:
+    """假的 `subprocess.run`：只把拼出来的命令行与 job 路径记下来，顺手把结果写成"成功"。"""
+
+    def __init__(self, seen, argv):
+        seen["arguments"] = argv
+        self.returncode = 0
+        self.stdout = b""
+        self.stderr = b""
+        script = argv[-1]
+        body = script.split("-ArgumentList @(", 1)[1].split("); exit", 1)[0]
+        parts = [part.strip().strip("'") for part in body.split(",")]
+        job = pathlib.Path(parts[parts.index("--job") + 1])
+        seen["job_path"] = job
+        import json as _json
+        payload = _json.loads(job.read_text(encoding="utf-8"))
+        pathlib.Path(payload["result"]).write_text(
+            _json.dumps({"ok": True, "message": "done"}), encoding="utf-8")
