@@ -28,6 +28,7 @@ import time
 
 from PySide6 import QtGui, QtCore, QtWidgets
 
+from ..engine import ports
 from ..engine.point_source import session_source
 from ..project import edit
 from ..project.csv_io import port_from_name, write_csv_file
@@ -56,6 +57,10 @@ _NOTICE_MS = 8000                       # 拒绝理由要在状态栏留够一�
 _GC_EVERY_S = 5.0
 _STATUS_SLOT_WIDTH = 320                # 状态摘要的定宽槽（实测最长两条通道 ≈ 200px）
 _LOG_LINES = 5000                       # 日志窗只留最近多少行（与报文窗的 5000 帧同一量级）
+# "这个端口现在空着吗"的探针（新建工程 / 添加通道算默认端口时用）。放成模块级常量是为了
+# **用例能换掉它**：不换的话，"新建一个 TCP 工程得到 tcp-5020"这类断言就取决于跑测试的
+# 机器上 5020 空不空——那种红最难查。
+PORT_PROBE = ports.is_free
 _TREE_STRETCH, _TABLE_STRETCH = 1, 4
 _FIRST_SPLIT = [600, 400]   # 上栏:下栏 首屏比例（见 _build_layout）
 _STATUS_WORD = {"stopped": "停止", "starting": "启动中", "running": "运行",
@@ -318,7 +323,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """工具栏"新建工程"：空白起步，或 TCP / 串口 / S7 骨架起步。"""
         if not self._confirm_discard():
             return
-        dialog = NewProjectDialog(self)
+        dialog = NewProjectDialog(self, probe=PORT_PROBE)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         self.use_project(dialog.project, path=None, announce=False)
@@ -331,12 +336,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status.showMessage("空工程：设备树上右键『添加通道』", _NOTICE_MS)
 
     def _add_channel(self) -> None:
-        # 加通道要走 `Session.load()`（通道集合变了），而它第一步停掉**所有**在跑的通道：
-        # 正在给网关服务的那一路会掉线，所以有通道在跑就整体拒绝（口径 6）。
-        if self._guard_running(self.session.channel_names()):
-            return
-        dialog = AddChannelDialog(self, self.session.project)
+        """加一路通道。**在跑的别的通道不受影响**（`Session.add_channel` 只动一个键）。
+
+        对话框里那一步已经 `edit.add_channel`（带校验与回滚）；这里只让会话跟上，
+        再把视图重画——不走 `load()`，所以不需要"先全部停止"。
+        """
+        dialog = AddChannelDialog(self, self.session.project, probe=PORT_PROBE)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        if not self._edit_call("添加通道", lambda: self.session.add_channel(dialog.channel)):
             return
         self._after_edit(f"已添加通道 {dialog.channel.name}", keep=dialog.channel.name)
 
@@ -355,7 +363,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         self._after_edit(f"已添加设备 {dialog.device.name}"
-                         f"（unit {dialog.device.unit_id}）")
+                         f"（unit {dialog.device.unit_id}）", reindex=channel)
 
     def _add_point(self, key: tuple) -> None:
         """点位表右键"添加点位…"：落在**右键那一行所属的设备**上。"""
@@ -388,25 +396,32 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(f"[refused] 添加点位：{channel} / unit {unit_id} "
                       f"已经不在这份工程里了")
             return
-        self._after_edit(f"已添加点位 {point.name}（{channel} unit {unit_id}）")
+        self._after_edit(f"已添加点位 {point.name}（{channel} unit {unit_id}）",
+                         reindex=channel)
         self._show_point_props((channel, unit_id, point.area, point.address, point.bit))
 
     def _remove_channel(self, channel: str) -> None:
-        if self._guard_running(self.session.channel_names()):
-            return
+        """删一路通道：**只停它自己**（别的通道照旧服务），先问一次再动手。"""
         try:
             target = self.session.project.find_channel(channel)
         except KeyError:
             self._log(f"[refused] 删除通道：{channel} 已经不在这份工程里了")
             return
         points = sum(len(device.points) for device in target.devices)
+        running = self.session.channel(channel) is not None \
+            and self.session.channel(channel).running
+        note = "\n\n这一路正在运行，删除会先把它停掉（其它通道不受影响）。" if running else ""
         if not self._confirm(f"删除通道 {channel}？",
                              f"连同 {len(target.devices)} 个设备、{points} 个点位一起删除，"
-                             f"删掉就回不来了。"):
+                             f"删掉就回不来了。{note}"):
             return
-        if self._edit_call("删除通道",
-                           lambda: edit.remove_channel(self.session.project, channel)):
-            self._after_edit(f"已删除通道 {channel}")
+        if not self._edit_call("删除通道",
+                               lambda: edit.remove_channel(self.session.project, channel)):
+            return
+        if not self._edit_call("删除通道",
+                              lambda: self.session.remove_channel(channel)):
+            return
+        self._after_edit(f"已删除通道 {channel}")
 
     def _remove_device(self, channel: str, unit_id: int) -> None:
         if self._guard_running([channel]):
@@ -424,7 +439,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._edit_call("删除设备",
                            lambda: edit.remove_device(self.session.project, channel,
                                                       unit_id)):
-            self._after_edit(f"已删除设备 {device.name}（{channel} unit {unit_id}）")
+            self._after_edit(f"已删除设备 {device.name}（{channel} unit {unit_id}）",
+                             reindex=channel)
 
     def _remove_point(self, key: tuple) -> None:
         channel, unit_id, area, address, bit = key
@@ -452,7 +468,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._edit_call(f"删除点位 {point.name}",
                            lambda: edit.remove_point(self.session.project, channel,
                                                      unit_id, area, address, bit)):
-            self._after_edit(f"已删除点位 {point.name}（{channel} unit {unit_id}）")
+            self._after_edit(f"已删除点位 {point.name}（{channel} unit {unit_id}）",
+                             reindex=channel)
 
     # ---------- 结构性改动共用的几步 ----------
 
@@ -492,9 +509,12 @@ class MainWindow(QtWidgets.QMainWindow):
         except edit.EditRefused as exc:
             self._show_refused(what, exc.reasons)
             return False
-        except KeyError as exc:
-            self._log(f"[refused] {what}：目标已经不在这份工程里了（{exc}）")
-            self.status.showMessage("目标已不在工程里", _NOTICE_MS)
+        except (KeyError, ValueError) as exc:
+            # KeyError：目标已经不在这份工程里（换工程那一瞬间）。
+            # ValueError：会话拒绝了这次对账（`reindex` 不许动在跑的那一路、
+            # `add_channel`/`remove_channel` 要求工程先改对）——那也是一句人话。
+            self._log(f"[refused] {what}：{exc}")
+            self.status.showMessage(f"{what}被拒：{_one_line(str(exc))}", _NOTICE_MS)
             return False
         return True
 
@@ -505,22 +525,56 @@ class MainWindow(QtWidgets.QMainWindow):
         if reasons:
             self.status.showMessage(f"{what}被拒：{_one_line(str(reasons[0]))}", _NOTICE_MS)
 
-    def _after_edit(self, message: str, keep: str | None = None) -> None:
-        """结构性改动落地之后：把会话与五个视图对上，并保住"有未保存改动"。
+    def _after_edit(self, message: str, keep: str | None = None,
+                    reindex: str | None = None) -> None:
+        """结构性改动落地之后：**让会话跟上**（只动该动的那一份），再把五个视图重画。
 
-        `Session.load` 现在只在**换了一份对象**时清 `dirty`；同一份对象重装载（就是这条路）
-        会留着它——所以"改动被静默丢掉"这条已经从**约定**变成结构上做不到的事（`_mark_dirty`
-        留着只是为了标题上的 `*` 立刻显形，不再承担正确性）。选中的通道也要保住：往第二条
-        通道里加点位，表不该自己跳回第一条。
+        `reindex` 给"改动落在哪一路"（加/删设备与点位）：`Session.reindex` 只重建读写索引，
+        跑着的**兄弟**通道照旧服务。加/删通道由调用方自己做（`add_channel` /
+        `remove_channel`，它们只动一个键），所以那种情况不传 `reindex`。
+
+        为什么不再走 `use_project`（它内部是 `Session.load`）：那条路第一步停掉**所有**在跑
+        的通道——加一个点位就把正在给网关服务的那一路停掉，是新的现场事故（这正是"在跑的
+        时候不许增删"那条限制的来源）。现在只动该动的那一份。
+
+        选中的通道也要保住：往第二条通道里加点位，表不该自己跳回第一条。
         """
-        current = keep or self.point_model.channel()
-        self.use_project(self.session.project, path=self._path, announce=False)
+        if reindex is not None:
+            self.session.reindex(reindex)
+        self._refresh_views(keep=keep)
         self._mark_dirty()
+        self._log(f"[edit] {message}")
+
+    def _refresh_views(self, keep: str | None = None) -> None:
+        """按**当前**工程重画五个视图：不停通道、不清报文、不碰 dirty。
+
+        与 `use_project` 的分工：那个是"换了一份工程"（停所有通道、清报文、路径/脏标记跟着
+        走），这个是"同一份工程被改了"——在跑的那几路必须连状态一起保住（树上还是 ●），
+        报文窗里已经收到的帧也不该被清掉。
+        """
+        project = self.session.project
         names = self.session.channel_names()
+        states = {name: self._states.get(name, "stopped") for name in names}
+        current = keep or self.point_model.channel()
+        self.tree.rebuild(project)
+        if names:
+            self.point_model.attach(session_source(self.session), current)
+        else:
+            self.point_model.detach()
+        self.channels.rebuild(project)
+        self._states = states
+        for name, state in states.items():
+            # rebuild 之后控件是新的：状态要重新贴一遍，否则在跑的那一路会显示成"停止"
+            self.tree.set_status(name, state)
+            self.channels.set_status(name, state)
+        self._shown_error = ""
+        self._refresh_title()
+        self.status_label.setText(self._summary())
+        for line in format_issues(self.session.issues()):
+            self._log(f"[issue] {line}")
         target = current if current in names else (names[0] if names else "")
         if target:
             self._select_channel(target)
-        self._log(f"[edit] {message}")
 
     def _select_channel(self, channel: str) -> None:
         """把树的选中项挪到某个通道（表跟着树走）。名字不在工程里就什么都不做。"""

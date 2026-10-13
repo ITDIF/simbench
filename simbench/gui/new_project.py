@@ -19,6 +19,7 @@ from functools import partial
 
 from PySide6 import QtCore, QtWidgets
 
+from ..engine import ports
 from ..project import edit
 from ..project.model import Device
 from .channel_form import ChannelForm, starting_values
@@ -76,19 +77,43 @@ class _EditDialog(QtWidgets.QDialog):
 class NewProjectDialog(_EditDialog):
     """新建工程：起步形态（空白 / TCP / 串口 / S7）+ 骨架参数。成功后 `project` 就绪。"""
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None, probe=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("新建工程")
         self.project = None
+        # 端口探针：默认走 `engine.ports.is_free`（绑一次看看），用例可以注入替身——
+        # 对话框不该为了算一个默认值去真占端口。
+        self._probe = probe or ports.is_free
         column = QtWidgets.QVBoxLayout(self.form_area)
         self.form = ChannelForm(self.form_area, kinds=("blank", "tcp", "rtu", "s7"),
-                                start=edit.BLANK)
+                                start=edit.BLANK,
+                                provider=lambda kind: starting_values(
+                                    kind, probe=self._probe))
+        self.form.kind_changed = self._note_bumped_port
         column.addWidget(self.form)
+        self._note_bumped_port(edit.BLANK)
+
+    def _note_bumped_port(self, kind: str) -> None:
+        """默认端口被系统占着而顺延了的时候，在提示框里说一句。
+
+        为什么说：`tcp-5020` 这个名字自带端口，顺延之后名字也会跟着变成 `tcp-5021`——
+        不解释一句，操作员会以为工具把端口搞错了。
+        """
+        if kind not in ("tcp", "s7"):
+            return
+        start = edit.DEFAULT_TCP_PORT if kind == "tcp" else edit.DEFAULT_S7_PORT
+        plain = edit.next_port(edit.Project(), start)          # 只避开工程内冲突的那个值
+        chosen = self.form.second_edit.text().strip()
+        if chosen and chosen != str(plain):
+            self.error_view.setPlainText(
+                f"{start} 现在被别的程序占着（或已被本工程用掉），默认端口顺延到 {chosen}；"
+                f"要改就改左边那一格")
 
     def apply(self) -> list[str]:
         # 新建工程对着**一份空工程**分配名字与端口：它要替换掉当前这份，避不避开当前
         # 那份的端口都无所谓，而"从零算"才能与表单里的起手值对得上。
-        built = edit.new_project(self.form.kind(), **self.form.values())
+        built = edit.new_project(self.form.kind(), probe=self._probe,
+                                 **self.form.values())
         self.project = built
         return []
 
@@ -96,18 +121,21 @@ class NewProjectDialog(_EditDialog):
 class AddChannelDialog(_EditDialog):
     """往**当前工程**里加一条通道。成功后 `channel` 就绪（已经落进工程了）。"""
 
-    def __init__(self, parent, project) -> None:
+    def __init__(self, parent, project, probe=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("添加通道")
         self.project = project
         self.channel = None
+        self._probe = probe or ports.is_free
         column = QtWidgets.QVBoxLayout(self.form_area)
         self.form = ChannelForm(self.form_area, kinds=edit.TRANSPORTS, start="tcp",
-                                provider=partial(starting_values, project=project))
+                                provider=partial(starting_values, project=project,
+                                                 probe=self._probe))
         column.addWidget(self.form)
 
     def apply(self) -> list[str]:
-        channel = edit.default_channel(self.project, self.form.kind(), **self.form.values())
+        channel = edit.default_channel(self.project, self.form.kind(),
+                                       probe=self._probe, **self.form.values())
         edit.add_channel(self.project, channel)
         self.channel = channel
         return []

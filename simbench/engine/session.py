@@ -25,7 +25,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..backend import make_backend
+from ..backend import BackendStartError, make_backend
 from ..backend.events import ChannelState, LogLine, PacketEvent
 from ..backend.modbus_base import ModbusBackendBase
 from ..codec import s7_codec
@@ -178,6 +178,45 @@ class Session:
                                  f"while loading the point table; its port is still held: "
                                  f"{runtime.last_error}")
         return validate_project(project)
+
+    def add_channel(self, channel) -> None:
+        """加**一路**通道的运行时：只给这一路建 runtime 并重建索引，**不碰别的通道**。
+
+        为什么要有它：`load()` 换的是整份工程，第一步 `_stop_all_locked()` 会把正在给网关
+        服务的那一路一起停掉——界面里"有通道在跑时不许加通道"那条拒绝就是这么来的。
+        这里只动 `self._channels` 里的一个键。
+
+        顺序口径：**先把工程改对**（`project.edit.add_channel`，带校验与回滚），再让它跟上
+        ——认不出来的名字直接拒（否则会出现一个"有 runtime、点表里没有"的通道）。
+        """
+        with self._lock:
+            if not any(ch.name == channel.name for ch in self._project.channels):
+                raise ValueError(
+                    f"channel {channel.name} is not in the project; add it there first "
+                    f"(simbench.project.edit.add_channel)")
+            self._channels[channel.name] = ChannelRuntime(channel.name)
+            self._rebuild_index_locked()
+
+    def remove_channel(self, name: str) -> None:
+        """删**一路**通道的运行时：先停它（停不掉就拒绝），再摘掉并重建索引。
+
+        别的通道一律不碰。停不掉就拒绝的理由与 `_stop_one` 一样：句柄一摘，那个端口就再也
+        没有第二次"停止"能摸到它了。
+        """
+        with self._lock:
+            runtime = self._channels.get(name)
+            if runtime is None:
+                raise KeyError(name)
+            if any(ch.name == name for ch in self._project.channels):
+                raise ValueError(f"channel {name} is still in the project; remove it there "
+                                 f"first (simbench.project.edit.remove_channel)")
+            if runtime.running and not self._stop_one(runtime):
+                raise BackendStartError(
+                    f"channel {name} did not stop, so it was not removed: "
+                    f"{runtime.last_error}")
+            self._channels.pop(name, None)
+            self._rows_meta.pop(name, None)
+            self._rebuild_index_locked()
 
     def reindex(self, channel: str) -> None:
         """按当前工程重建读写索引，**不停任何通道**（点位属性面板的结构性改动用它）。

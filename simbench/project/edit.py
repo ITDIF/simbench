@@ -61,7 +61,7 @@ def _channel_names(project) -> set[str]:
     return {ch.name for ch in project.channels}
 
 
-def next_channel_name(project, transport: str) -> str:
+def next_channel_name(project, transport: str, probe=None) -> str:
     """`tcp-5020` / `rtu-1` / `s7-1` 这类默认名，重名就递增。
 
     TCP 的名字里带端口是**既有约定**（CSV 没有端口列，导入时按名字尾数认：
@@ -70,7 +70,9 @@ def next_channel_name(project, transport: str) -> str:
     """
     used = _channel_names(project)
     if transport == "tcp":
-        port = next_port(project, DEFAULT_TCP_PORT)
+        # 名字里的端口要跟**真正会用**的那个一致（探针一起传下去）：名字是 `tcp-5020` 而
+        # 端口是 5021 的话，导出的 CSV 与人对名字的期待都会对不上。
+        port = next_port(project, DEFAULT_TCP_PORT, probe)
         return f"tcp-{port}"
     stem = "rtu" if transport == "rtu" else "s7"
     serial = 1
@@ -79,8 +81,12 @@ def next_channel_name(project, transport: str) -> str:
     return f"{stem}-{serial}"
 
 
-def next_port(project, start: int = DEFAULT_TCP_PORT) -> int:
-    """`start` 起第一个没被**任何**通道占用的端口。
+def next_port(project, start: int = DEFAULT_TCP_PORT, probe=None) -> int:
+    """`start` 起第一个没被**任何**通道占用、（给了 `probe` 时）系统上也真空着的端口。
+
+    `probe(port) -> bool` 由调用方注入（界面给的是 `engine.ports.is_free`）：这一层不许
+    import backend，而"这个端口现在有没有人占"要真去绑一次才知道。不给 probe 就只避开
+    工程内的冲突（既有行为不变）。
 
     为什么不按 host 分开算：`0.0.0.0:5020` 与 `127.0.0.1:5020` 在静态校验里是两个不同的
     键（`validate` 判的是 (host, port)），但绑起来第二个必失败——`0.0.0.0` 已经把所有
@@ -89,7 +95,7 @@ def next_port(project, start: int = DEFAULT_TCP_PORT) -> int:
     """
     used = {ch.port for ch in project.channels}
     port = int(start)
-    while port in used:
+    while port in used or (probe is not None and not probe(port)):
         port += 1
     if port > PORT_MAX:
         raise EditRefused([f"no free port from {start} up (past {PORT_MAX})"])
@@ -220,13 +226,19 @@ def default_area(transport: str) -> str:
     return "db1" if transport == "s7" else "hr"
 
 
-def default_channel(project, transport: str, name: str | None = None, **overrides):
-    """建一条默认通道。`overrides` 原样盖到字段上（界面表单交过来的就是这些）。"""
-    name = name if name else next_channel_name(project, transport)
+def default_channel(project, transport: str, name: str | None = None, probe=None,
+                    **overrides):
+    """建一条默认通道。`overrides` 原样盖到字段上（界面表单交过来的就是这些）。
+
+    `probe` 只在**没给端口**时用得上（给了就照给的来）：它是"这个端口系统上现在空着吗"，
+    由界面从 `engine.ports` 注进来（见 `next_port`）。
+    """
+    name = name if name else next_channel_name(project, transport, probe)
     if transport == "tcp":
         return TcpChannel(name=name,
                           host=overrides.get("host", "0.0.0.0"),
-                          port=overrides.get("port", next_port(project, DEFAULT_TCP_PORT)))
+                          port=overrides.get("port",
+                                             next_port(project, DEFAULT_TCP_PORT, probe)))
     if transport == "rtu":
         return SerialChannel(name=name,
                              port=overrides.get("port", SERIAL_DEFAULTS["port"]),
@@ -238,13 +250,14 @@ def default_channel(project, transport: str, name: str | None = None, **override
     if transport == "s7":
         return S7Channel(name=name,
                          host=overrides.get("host", S7_DEFAULTS["host"]),
-                         port=overrides.get("port", next_port(project, DEFAULT_S7_PORT)),
+                         port=overrides.get("port",
+                                            next_port(project, DEFAULT_S7_PORT, probe)),
                          rack=overrides.get("rack", S7_DEFAULTS["rack"]),
                          slot=overrides.get("slot", S7_DEFAULTS["slot"]))
     raise EditRefused([f"unknown transport {transport!r}"])
 
 
-def new_project(transport: str, **values) -> Project:
+def new_project(transport: str, probe=None, **values) -> Project:
     """从零建一份工程：`BLANK` 回空工程，否则一条通道 + 一个设备 + 一个点位的骨架。
 
     整份**必须零 error**（走的还是同一条"改 → 验 → 不行就抛"的管线，只是一步一步来）：
@@ -257,7 +270,7 @@ def new_project(transport: str, **values) -> Project:
     project = Project()
     if transport == BLANK:
         return project
-    channel = default_channel(project, transport, **values)
+    channel = default_channel(project, transport, probe=probe, **values)
     add_channel(project, channel)
     device = Device(name=next_device_name(channel), unit_id=next_unit_id(channel))
     add_device(project, channel.name, device)

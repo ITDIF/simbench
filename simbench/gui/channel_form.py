@@ -71,7 +71,7 @@ def form_values(kind: str, channel) -> dict:
             "third": ""}
 
 
-def starting_values(kind: str, project=None) -> dict:
+def starting_values(kind: str, project=None, probe=None) -> dict:
     """起手值：按 `project.edit` 的默认通道算（不另抄一份默认值），没给工程就当空工程。
 
     "按现有工程算"这件事很要紧：往一份已经有 `tcp-5020` 的工程里再加一条通道，起手值
@@ -79,7 +79,8 @@ def starting_values(kind: str, project=None) -> dict:
     """
     if kind == edit.BLANK:
         return {"name": "", "first": "", "second": "", "third": ""}
-    return form_values(kind, edit.default_channel(project or edit.Project(), kind))
+    return form_values(kind, edit.default_channel(project or edit.Project(), kind,
+                                                 probe=probe))
 
 
 class ChannelForm(QtWidgets.QWidget):
@@ -90,6 +91,8 @@ class ChannelForm(QtWidgets.QWidget):
         super().__init__(parent)
         self._kinds = tuple(kinds)
         self._provider = provider or (lambda kind: starting_values(kind))
+        # 换类型之后的回调（对话框用它更新"端口顺延了"那句说明）；默认什么都不做。
+        self.kind_changed = lambda _kind: None
         self._buttons: dict[str, QtWidgets.QPushButton] = {}
         self._tracked: list[QtWidgets.QWidget] = []
 
@@ -191,6 +194,7 @@ class ChannelForm(QtWidgets.QWidget):
             widget.setEnabled(usable)
         # 第三格只对串口/S7 有意义：TCP 行留空并置灰（与通道面板那一行同口径）
         self.third_edit.setEnabled(usable and kind in ("rtu", "s7"))
+        self.kind_changed(kind)
 
     def values(self) -> dict:
         """表单里的值 -> `edit.default_channel(project, kind, **values)` 的参数。

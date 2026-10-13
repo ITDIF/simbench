@@ -26,6 +26,7 @@ from simbench.gui.main_window import MainWindow
 from simbench.gui.new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
 from simbench.project import edit
 from simbench.project import json_io
+from simbench.project.model import Device, Point, TcpChannel
 from tests.conftest import free_port
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -95,6 +96,13 @@ def no_modal_dialogs(monkeypatch):
     monkeypatch.setattr(main_window_module, "IssueDialog", Issues)
     monkeypatch.setattr(main_window_module, "PointPropertiesDialog", Props)
     return shown
+
+
+@pytest.fixture(autouse=True)
+def ports_all_free(monkeypatch):
+    """GUI 用例里默认"端口都空着"：不换掉探针的话，"新建 TCP 工程得到 tcp-5020"这类断言
+    就取决于跑测试的机器上 5020 空不空。探针本身另有两条用例直接验（注入自己的替身）。"""
+    monkeypatch.setattr(main_window_module, "PORT_PROBE", lambda _port: True)
 
 
 @pytest.fixture
@@ -205,24 +213,57 @@ def test_the_channel_dialog_prefills_around_what_is_already_there(make_window, q
     assert dialog.form.second_edit.text() == "5021"
 
 
-def test_a_channel_added_while_another_is_running_is_refused(
+def test_a_channel_added_while_another_is_running_does_not_disturb_it(
         make_window, monkeypatch, qapp):
-    """加通道要走 `Session.load`，而它第一步停掉**所有**在跑的通道：先拒绝，并点名。
+    """**在跑的通道上加一条新通道**：允许，而且原来那一路照旧在跑。
 
-    对话框的 `exec` 换成记录器：护栏万一回归，真对话框会弹出来把用例挂住——那种失败
-    比"红一条"难查得多。所以这里断言的是"它压根没被打开"。
+    这条原来是"拒绝并点名"——因为加通道走的是 `Session.load()`，而它第一步停掉所有在跑的
+    通道。现在走 `Session.add_channel()`（只动一个键），所以那条限制连同它的拒绝一起没了。
     """
     window = make_window(loaded(free_port()))
     window._start_all()
     qapp.processEvents()
-    before = copy.deepcopy(window.session.project)
-    opened: list[int] = []
-    monkeypatch.setattr(AddChannelDialog, "exec", lambda self, *a: opened.append(1) or 0)
-    window._add_channel()
+    assert window.session.channel("tcp-5020").running
+    port = free_port()
+    drive(monkeypatch, AddChannelDialog, "tcp", name_edit="tcp-b",
+          second_edit=str(port))
+    window.tree.add_channel_requested.emit()
     qapp.processEvents()
-    assert opened == [], "护栏没拦住：添加通道对话框被打开了"
-    assert window.session.project == before
-    assert "正在运行" in window.log_view.toPlainText()
+    assert [ch.name for ch in window.session.project.channels] == ["tcp-5020", "tcp-b"]
+    assert window.session.channel("tcp-5020").running, "加一条通道把在跑的那一路带停了"
+    assert window.tree.state_of("tcp-5020") == "running", "树上那一格被重画成停止了"
+    assert window.status_label.text().startswith("tcp-5020:运行")
+    # 新的那一路也真的能起来（起得来才算加对了）
+    window.channels._start("tcp-b")
+    qapp.processEvents()
+    assert window.session.channel("tcp-b").running
+    window._stop_all()
+    qapp.processEvents()
+
+
+def test_editing_a_stopped_channel_leaves_a_running_sibling_alone(
+        make_window, monkeypatch, qapp):
+    """往**已停**的通道里加点位时，正在服务的兄弟通道不许被停掉。
+
+    这条是新建工程那一轮的口径 6（"兄弟通道在跑 → 走 reindex"）——但当时实现走的是
+    `use_project` → `Session.load`，会把兄弟一起停掉。现在改走 `reindex`，这里钉住它。
+    """
+    project = loaded(free_port())
+    project.channels.append(TcpChannel(name="tcp-b", host="127.0.0.1", port=free_port(),
+                                      devices=[Device("D2", 21, [
+                                          Point("p", "hr", 0, "uint16", initial="0")])]))
+    window = make_window(project)
+    window.channels._start("tcp-b")                     # 只起兄弟那一路
+    qapp.processEvents()
+    assert window.session.channel("tcp-b").running
+    assert not window.session.channel("tcp-5020").running
+    window.tree.add_point_requested.emit("tcp-5020", 11)
+    qapp.processEvents()
+    assert window.session.channel("tcp-b").running, "编辑另一路时把在跑的那一路停掉了"
+    assert window.tree.state_of("tcp-b") == "running"
+    assert len(edit.find_device(window.session.project, "tcp-5020", 11).points) == 9
+    window._stop_all()
+    qapp.processEvents()
 
 
 def test_adding_a_device_from_the_tree_extends_the_channel(make_window, monkeypatch, qapp):
@@ -345,16 +386,29 @@ def test_removing_the_only_channel_leaves_an_empty_project(make_window, monkeypa
     assert window.session.dirty is True
 
 
-def test_a_running_channel_is_named_when_a_removal_is_refused(make_window, monkeypatch, qapp):
-    window = make_window(loaded(free_port()))
+def test_removing_a_running_channel_stops_only_that_one(make_window, monkeypatch, qapp):
+    """删一路**正在跑**的通道：确认里说清要停它，删完它就没了、别的通道不动。"""
+    project = loaded(free_port())
+    project.channels.append(TcpChannel(name="tcp-b", host="127.0.0.1", port=free_port(),
+                                      devices=[Device("D2", 21, [
+                                          Point("p", "hr", 0, "uint16", initial="0")])]))
+    window = make_window(project)
     window._start_all()
     qapp.processEvents()
-    before = copy.deepcopy(window.session.project)
-    answer(monkeypatch, QtWidgets.QMessageBox.Yes)   # 就算确认了也不许删
+    assert window.session.channel("tcp-5020").running
+    asked: list[str] = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question",
+                        staticmethod(lambda _parent, _title, text, *a, **k:
+                                     asked.append(text) or QtWidgets.QMessageBox.Yes))
     window.tree.remove_channel_requested.emit("tcp-5020")
     qapp.processEvents()
-    assert window.session.project == before
-    assert "tcp-5020" in window.log_view.toPlainText()
+    assert "正在运行" in asked[0], asked          # 确认里说清会停掉它
+    assert [ch.name for ch in window.session.project.channels] == ["tcp-b"]
+    assert window.session.channel("tcp-5020") is None
+    assert window.session.channel("tcp-b").running, "删一路把别的带停了"
+    assert window.tree.state_of("tcp-b") == "running"
+    window._stop_all()
+    qapp.processEvents()
 
 
 # ---------- 7. 未保存改动：四个动作一起问 ----------
@@ -706,3 +760,38 @@ def test_points_added_to_an_s7_channel_land_on_fresh_bytes_and_serve_a_master(
         client.disconnect()
         window._stop_all()
         qapp.processEvents()
+
+
+def test_the_default_port_steps_aside_when_it_is_occupied_on_this_machine(qapp):
+    """默认端口先探一次系统：5020 被别的程序占着就顺延到 5021，并说清为什么。
+
+    探针是**注入**的（用例不该为了算一个默认值去真占端口）：这里给一个"只有 5020 忙"的替身。
+    """
+    probe = lambda port: str(port) != "5020"
+    dialog = NewProjectDialog(None, probe=probe)
+    try:
+        dialog.form.pick("tcp")
+        assert dialog.form.second_edit.text() == "5021"
+        assert dialog.form.name_edit.text() == "tcp-5021", "名字该跟着端口走"
+        assert "5020" in dialog.error_view.toPlainText(), "没说明为什么不是 5020"
+    finally:
+        dialog.deleteLater()
+
+    added = AddChannelDialog(None, edit.Project(), probe=probe)
+    try:
+        added.form.pick("tcp")
+        assert added.form.second_edit.text() == "5021"
+    finally:
+        added.deleteLater()
+
+
+def test_a_free_default_port_is_left_alone(qapp):
+    """5020 空着就不动它：顺延只在真需要时发生（探针说空，就给 5020）。"""
+    dialog = NewProjectDialog(None, probe=lambda _port: True)
+    try:
+        dialog.form.pick("tcp")
+        assert (dialog.form.second_edit.text(), dialog.form.name_edit.text()) == \
+            ("5020", "tcp-5020")
+        assert dialog.error_view.toPlainText() == ""
+    finally:
+        dialog.deleteLater()
