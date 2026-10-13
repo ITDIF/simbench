@@ -15,7 +15,10 @@ import pathlib
 
 import simbench
 
-LIBRARY_ONLY = ("pymodbus", "serial")        # 只许出现在 backend/
+# 只许出现在 backend/：pymodbus 与 pyserial 是 Modbus 两条路的原生依赖，snap7 是 S7 的。
+# snap7 进这张表是 S7 里程碑 Task 8 的收尾项——它本来只在 backend/s7_server.py 里 import，
+# 但不写进守卫就等于"靠人记得住"，而下一个想在 gui 里直接摸 DLL 的人不会被拦。
+LIBRARY_ONLY = ("pymodbus", "serial", "snap7")
 GUI_ONLY = ("PySide6", "PyQt5")              # 只许出现在 gui/（M2 才落地）
 BACKEND = "backend"
 GUI_PACKAGE = "gui"
@@ -118,6 +121,17 @@ def test_backend_actually_ownes_the_library_imports():
     # `modbus_rtu.py` 也 import pymodbus（RTU 从站），一并列进"该有的人"里：
     # 少了它，这一条只证明"TCP 那半边还在"，串口那半边的依赖被删掉也不会红。
     assert {"simdev.py", "raw_writer.py", "modbus_tcp.py", "modbus_rtu.py"} <= importers
+
+
+def test_the_s7_library_also_only_lives_in_backend():
+    """同一把尺子量 snap7：`snap7` 只许出现在 `backend/`（S7 后端是唯一 import 它的地方），
+    且 `backend/` 里**真有人** import 它（守卫不许是空跑——删掉依赖或改目录都要在这里红）。"""
+    offenders = _offenders(None, ("snap7",), skip_packages=(BACKEND,))
+    assert offenders == [], offenders
+    scanned = _scanned_files(BACKEND)
+    assert scanned, "backend/ 一个文件都没扫到，这条守卫是空跑"
+    assert "s7_server.py" in {file.name for file in scanned
+                              if "snap7" in _imported_modules(file)}
 
 
 def test_project_and_codec_do_not_touch_gui():
