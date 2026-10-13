@@ -133,6 +133,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.remove_device_requested.connect(self._remove_device)
         self.session.subscribe(self.bridge.forward)
 
+        self._fit_to_screen()
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(_TICK_MS)
         self.timer.timeout.connect(self._tick)
@@ -243,6 +244,28 @@ class MainWindow(QtWidgets.QMainWindow):
         action.setToolTip(text)
         self._icon_names.append((action, icon))
         return action
+
+    def _fit_to_screen(self) -> None:
+        """起手尺寸 = **当前屏幕可用区域的一半**，并居中。
+
+        为什么不按布局的 `sizeHint` 起手：那个尺寸是"控件刚好装得下"（本机实测 1058×317），
+        又矮又宽，看着像一条带子；整屏铺满在小屏/多显示器上又太霸道。取一半是现场最省事的
+        一档——左右还能摆一个主站工具或浏览器。
+
+        两个细节：屏幕用 `self.screen()`（还没 show 时是主屏）的**可用区域**（去掉任务栏），
+        按整屏算的话窗口会被任务栏盖掉一条边；装不下的窄屏交给 Qt——它按布局的最小尺寸
+        （`minimumSizeHint`）兜底，不会把控件压没，也不会让"一半"变成 0。
+        """
+        screen = self.screen()
+        if screen is None:                          # 极端情况下没有屏幕信息：不猜尺寸
+            return
+        area = screen.availableGeometry()
+        hint = self.minimumSizeHint()
+        self.resize(max(area.width() // 2, hint.width()),
+                    max(area.height() // 2, hint.height()))
+        frame = self.frameGeometry()
+        frame.moveCenter(area.center())
+        self.move(frame.topLeft())
 
     def _build_menu(self) -> None:
         """"文件"菜单：工具栏那排按钮的家谱，也是"另存为"与快捷键的家。
