@@ -30,7 +30,7 @@ from simbench.gui import main_window as main_window_module
 from simbench.gui import theme
 from simbench.gui.channel_panel import STATUS_LABELS
 from simbench.gui.main_window import MainWindow
-from simbench.gui.point_table import COLUMNS, VALUE_COLUMN
+from simbench.gui.point_table import COLUMNS, RAW_COLUMN, VALUE_COLUMN
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -132,6 +132,25 @@ def test_the_value_column_is_sized_for_the_widest_value_it_shows(window):
     assert max(len(value) for value in values) == 17, values
     assert COLUMNS[VALUE_COLUMN].width == 132
     assert window.point_table.columnWidth(VALUE_COLUMN) == 132
+
+
+def test_the_raw_column_is_sized_for_the_widest_register_string(window):
+    """"原始寄存器"那一列按**最宽的内容**给，与"当前值"那一列同一条口径。
+
+    最宽的是 4 个寄存器的点（uint64/int64/float64）：`0000 0000 4148 4E28`，19 个字符。
+    本机（Microsoft YaHei UI 9pt）实测 advance 123 + 单元格左右各 4px = 131，列宽给 134。
+    原来 150 谁也没量过，白占 19px。谁把列宽改回去、或者表里换了个更宽的寄存器串
+    （8 格），这条就红。
+
+    与"当前值"那条同一个写法：只钉**前提与字面量**，不拿 `fontMetrics()` 现量——
+    offscreen 那套兜底字体把每个字形按 1em 算（19 个字符量出来 247px），照它加宽会得到
+    一个部署环境里宽得离谱的列。
+    """
+    assert RAW_COLUMN == 7
+    assert COLUMNS[RAW_COLUMN].header == "原始寄存器"
+    assert len("0000 0000 4148 4E28") == 19
+    assert COLUMNS[RAW_COLUMN].width == 134
+    assert window.point_table.columnWidth(RAW_COLUMN) == 134
 
 
 def test_the_theme_never_overrides_a_state_color():

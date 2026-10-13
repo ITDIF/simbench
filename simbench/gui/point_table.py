@@ -22,6 +22,7 @@ from ..project.model import S7_TYPES
 from ..engine.session import Row
 
 VALUE_HEADER = "当前值"
+RAW_HEADER = "原始寄存器"
 
 
 @dataclass(frozen=True)
@@ -38,16 +39,23 @@ COLUMNS: tuple[Column, ...] = (
     Column("4x", 82, numeric=True),
     Column("类型", 74),
     Column("字序", 60),
-    # 132 而不是 110：字号从 9pt 提到 10pt 之后，示例点表里那个 17 位的 uint64
-    # （累计电量）在 110px 里会被 Qt 截成 `7262385979038…`——这一列是操作员拿去和点表
-    # 核对的那个数，少一位就没法核。槽位跟着字号走，见 `tests/test_gui_theme.py`。
+    # 132 而不是 110：示例点表里那个 17 位的 uint64（累计电量）在 110px 里会被 Qt 截成
+    # `7262385979038…`——这一列是操作员拿去和点表核对的那个数，少一位就没法核。
+    # 132 是**量出来的**（本机 Microsoft YaHei UI 9pt）：`72623859790382856` 的 advance 是
+    # 120，加单元格左右各 4px 的 margin 是 128，132 留 4px 余量——再瘦就会截。
+    # 见 `tests/test_gui_theme.py` 那条（它钉的是"最宽内容是 17 位 + 列宽 132"这个前提，
+    # 不拿 `fontMetrics()` 现量：offscreen 的兜底字体把每个字形按 1em 算，量出来 221px）。
     Column(VALUE_HEADER, 132),
-    Column("原始寄存器", 150),
+    # 原始寄存器：最宽的内容是**4 个寄存器**的 uint64（`0000 0000 4148 4E28`，19 个字符）
+    # 或 int64/float64，advance 123 + 8 = 131；原来的 150 是没人量过的，虚 19px。
+    # S7 那一列打的是字节（`41 48 00 00`，67px），比这更窄。
+    Column(RAW_HEADER, 134),
     Column("波形", 96),
     Column("只读", 46),
 )
 
 VALUE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == VALUE_HEADER)
+RAW_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == RAW_HEADER)
 STALE_ROLE = QtCore.Qt.UserRole + 1
 
 _CONVENTION = {"co": "0x", "di": "1x", "ir": "3x", "hr": "4x"}

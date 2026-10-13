@@ -71,6 +71,10 @@ class ChannelPanel(QtWidgets.QWidget):
         theme.make_card(self)
         self._grid = QtWidgets.QGridLayout(self)
         self._grid.setContentsMargins(4, 2, 4, 2)
+        # 尾部留一个空的**拉伸列**（第 7 列，前面只用到第 6 列）。不给它的话，多出来的
+        # 宽度会全部落进第一格"通道名"里，整行被摊成"名字贴最左、参数与按钮贴最右"两撮，
+        # 中间一大片空白（截图照出来的）。有了它，行内容左对齐、余量在行尾。
+        self._grid.setColumnStretch(7, 1)
         self.last_error = ""
 
     # ---------- 结构 ----------

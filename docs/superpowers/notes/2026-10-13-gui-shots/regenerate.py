@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import pathlib
+import socket
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -77,6 +78,15 @@ def main() -> int:
     dialog.close()
     dialog.deleteLater()
 
+    # 跑起来的状态：原始寄存器那一列要**真数据**才看得出宽度够不够（4 个寄存器的 uint64
+    # 是最宽的一条）。端口用空闲的，不去抢现场那个 5020。
+    session.project.channels[0].port = _free_port()
+    window.use_project(session.project, CSV)
+    window._start_all()
+    shoot(window, "14-main-running.png")
+    window._stop_all()
+    _settle(app)
+
     window.act_theme.setChecked(True)
     window._toggle_theme(True)
     shoot(window, "12-main-dark.png")
@@ -88,6 +98,13 @@ def main() -> int:
 
     session.shutdown()
     return 0
+
+
+def _free_port() -> int:
+    """挑一个空闲端口：截图脚本不许去抢点表里写死的那个 5020（现场可能真在用）。"""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def _settle(app) -> None:

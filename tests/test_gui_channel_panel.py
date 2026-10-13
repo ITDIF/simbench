@@ -119,6 +119,23 @@ def test_rebuild_replaces_the_rows_instead_of_doubling_them(built):
 
 # ---------- 独立启停 ----------
 
+def test_the_row_packs_its_widgets_to_the_left(built):
+    """行内容左对齐：通道名与第一格之间不许留一块空白（多出来的宽度归**行尾**）。
+
+    原来没有尾部拉伸列，宽度全落进第一格"通道名"里——截图里整行被摊成"名字贴最左、
+    参数与按钮贴最右"两撮，中间一大片空。这里按几何量，不靠肉眼：名字与第一格挨着，
+    且第一格仍在面板的左半边。
+    """
+    panel, _session, qapp = built
+    qapp.processEvents()
+    assert panel.rows(), "这条用例要的是'有行可量'"
+    for row in panel.rows():
+        gap = row.host_edit.geometry().left() - row.name_label.geometry().right()
+        assert 0 <= gap <= 16, (row.channel, gap)
+        assert row.host_edit.geometry().left() < panel.width() // 2, (
+            f"{row.channel}: 第一格被推到右半边了，说明宽度还是全落在通道名那一格上")
+
+
 def test_start_is_per_channel(built):
     panel, session, qapp = built
     rows = by_channel(panel)
