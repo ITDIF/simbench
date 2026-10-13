@@ -93,8 +93,18 @@ def test_bit_helpers_refuse_dirty_input():
         read_bit(b"\x00", True)           # bool 不算下标
     with pytest.raises(ValueError, match="outside 0..7"):
         write_bit(bytearray(1), 8, True)
-    with pytest.raises(ValueError, match="needs a bytearray"):
+    with pytest.raises(ValueError, match="needs a writable buffer"):
         write_bit(b"\x00", 0, True)       # bytes 不可写：改了也看不见，等于静默失败
+
+
+def test_bit_helpers_accept_the_ctypes_buffer_a_real_area_uses():
+    """S7 的区域缓冲是 ctypes 数组（snap7 与共享内存），位读写必须认它——只认 bytearray
+    的话，真后端上的每一次位写都会静默失败（实测踩过）。"""
+    import ctypes
+    buffer = (ctypes.c_ubyte * 2)()
+    write_bit(buffer, 3, True)
+    assert bytes(buffer) == bytes([0x08, 0x00])
+    assert read_bit(buffer, 3) is True and read_bit(buffer, 0) is False
 
 
 def test_span_bytes_follows_the_point_table():

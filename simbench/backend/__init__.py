@@ -14,6 +14,7 @@ from ..project.model import channel_transport
 from .modbus_base import BackendStartError
 from .modbus_rtu import ModbusRtuBackend
 from .modbus_tcp import ModbusTcpBackend
+from .s7_server import S7Backend
 
 
 class UnsupportedTransportError(RuntimeError):
@@ -36,5 +37,10 @@ def make_backend(channel, *, packet_sink=None, on_connection=None, tick_ms: int 
         return ModbusRtuBackend(channel, packet_sink=packet_sink,
                                 on_connection=on_connection, tick_ms=tick_ms,
                                 log_sink=log_sink)
+    if transport == "s7":
+        # S7 也没有"额外监听"那一维：一个 `host:port` 而已。
+        return S7Backend(channel, packet_sink=packet_sink,
+                         on_connection=on_connection, tick_ms=tick_ms,
+                         log_sink=log_sink)
     raise UnsupportedTransportError(
         f"channel {channel.name}: unknown channel type {transport!r}")

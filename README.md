@@ -31,6 +31,25 @@ com-485-1@COM3 19200 8E1,COVI-1,11,回路温度,hr,0,uint16,ABCD,25,const,,false
 通道行上改，也可以写进 `project.json`。真机（USB-485）上的冒烟步骤见
 `docs/superpowers/plans/2026-10-12-modslave-m5-rtu.md` 的 Task 8.3。
 
+**S7（ISO-on-TCP / S7comm）通道**也在点表里写：
+
+```csv
+channel,device,unit_id,name,area,address,datatype,word_order,initial,waveform,wave_param,readonly
+s7-1@192.168.0.10:102 0/1,D1,11,温度,db1,0,real,ABCD,12.5,const,,false
+s7-1@192.168.0.10:102 0/1,D1,11,启动,db1,6.3,bool,ABCD,true,const,,false
+```
+
+语义与 Modbus 那两条不同：`area` 是 S7 的区（`db<n>` / `mk` / `pe` / `pa`）、`address` 是
+**字节偏移**（`bool` 写成 `字节.位`，如 `6.3` = `DBX6.3`）、`datatype` 用 S7 的名字
+（`bool/byte/char/word/int/dword/dint/real/string`）、**没有字序**（一律大端，填了别的字序只给
+一条警告）。通道名语法 `name@host:port[ rack/slot]`；`rack/slot` 省略时是 `0/1`。
+
+S7 支持需要 `snap7.dll`（随 `python-snap7==1.3` 的 wheel 来，LGPL-3.0）：
+`pip install "python-snap7==1.3" "setuptools<81"`（后者是因为 1.3 会 import 已被
+setuptools>=81 移除的 `pkg_resources`）。**没装也能用 Modbus**：只有起 S7 通道时才会报一句
+带安装提示的错。注意 S7 这一路的报文窗只有**主站请求事件行**（原生库不交出原始字节，
+见计划 §3 的口径 5）。
+
 系统网络（专用网卡 + 设备 IP）那一层是 `python -m simbench net ...`：`show` / `check` /
 `device show` 只读；`up` / `clean` / `device create|remove` 会动系统网络（要提权）；
 `init` 从点表和 IP 清单生成声明骨架。
@@ -49,4 +68,4 @@ com-485-1@COM3 19200 8E1,COVI-1,11,回路温度,hr,0,uint16,ABCD,25,const,,false
 ```
 
 串行跑：这套件绑真实临时端口，两份并行结果不可信。设计口径、里程碑与各轮偏离记录在
-`docs/superpowers/`（spec 一份 + M1/M2/M4/M5 四份实现计划 + `notes/` 下的实测脚本与输出）。
+`docs/superpowers/`（spec 一份 + M1/M2/M4/M5/S7 五份实现计划 + `notes/` 下的实测脚本与输出）。

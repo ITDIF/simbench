@@ -17,11 +17,13 @@
 
 from __future__ import annotations
 
+import ctypes
 import struct
 
 from ..project.model import (
     BOOL, FLOAT32, INT16, INT32, UINT16, UINT32, brief, parse_value, s7_span_bytes,
 )
+from .waveform import clamp_to_datatype
 
 # S7 类型 -> 等价的 Modbus 类型名：只为了让范围检查复用 `parse_value` 那一份（边界不抄两遍）
 _MIRROR = {"word": UINT16, "int": INT16, "dword": UINT32, "dint": INT32,
@@ -35,6 +37,29 @@ def span_bytes(datatype: str, initial: str = "") -> int:
     """这个类型占几个字节（bool 也回 1；string 按初值长度）。与 `model.s7_span_bytes` 同一处真相。"""
     _check_datatype(datatype)
     return s7_span_bytes(datatype, initial)
+
+
+def clamp_to_type(value, datatype: str):
+    """把波形算出来的值钳进这个 S7 类型的区间，返回 `(值, 是否钳过)`。
+
+    与 Modbus 那条 `clamp_to_datatype` 同口径（越界写出去的错值比报一条日志严重得多）：
+    数值类型复用那一份边界（镜像回等价的 Modbus 名），`byte` 是 S7 独有（0..255）另写，
+    `bool`/`char`/`string` 没有区间。
+    """
+    _check_datatype(datatype)
+    if datatype == BOOL:
+        return bool(value), False
+    if datatype in ("char", "string"):
+        return value, False
+    if datatype == "byte":
+        if value != value:                       # NaN：钳到下界并报告，别把 NaN 写进区域
+            return 0, True
+        if value < 0:
+            return 0, True
+        if value > 255:
+            return 255, True
+        return int(value), False
+    return clamp_to_datatype(value, _MIRROR[datatype])
 
 
 def encode(value, datatype: str, length: int | None = None) -> bytes:
@@ -70,7 +95,7 @@ def read_bit(data, bit_index: int) -> bool:
     """取某一位（`bit_index` 是**绝对位号** = 字节偏移*8 + 位，与 `Point.bit` 一起算出来）。"""
     # 位读写面对的是**整块区域缓冲**（长度随点表），不是"一个 bool 的 1 字节"：
     # 所以这里只要求"是字节、非空"，不能套 `_check_data` 那个按类型定长的检查。
-    if not isinstance(data, (bytes, bytearray)):
+    if not _is_buffer(data):
         raise ValueError(f"bits need bytes, got {type(data).__name__}: {brief(data)}")
     raw = bytes(data)
     if not raw:
@@ -83,9 +108,15 @@ def read_bit(data, bit_index: int) -> bool:
 
 
 def write_bit(buffer, bit_index: int, value) -> None:
-    """写某一位，**只动那一位**（邻居位保持不变）。`buffer` 必须是可写的 bytearray。"""
-    if not isinstance(buffer, bytearray):
-        raise ValueError(f"bit write needs a bytearray, got {type(buffer).__name__}")
+    """写某一位，**只动那一位**（邻居位保持不变）。
+
+    `buffer` 收两类可写缓冲：`bytearray`（测试与纯内存）与 **ctypes 数组**——S7 后端的区域
+    缓冲就是后者（snap7 的服务端与共享那块内存，改它就是改主站读到的值）。`bytes` 仍然拒：
+    不可变，写进去等于静默失败。
+    """
+    if not _is_writable_buffer(buffer):
+        raise ValueError(f"bit write needs a writable buffer (bytearray or ctypes array), "
+                         f"got {type(buffer).__name__}")
     if not _is_index(bit_index):
         raise ValueError(f"bit index must be an int, got {brief(bit_index)}")
     if not 0 <= bit_index < len(buffer) * 8:
@@ -116,6 +147,15 @@ def _check_data(data, datatype: str, length: int | None) -> bytes:
     if datatype == "string" and not raw:
         raise ValueError("string needs at least 1 byte")
     return raw
+
+
+def _is_buffer(data) -> bool:
+    """可读的字节缓冲：bytes/bytearray/ctypes 数组（S7 的区域缓冲是最后那种）。"""
+    return isinstance(data, (bytes, bytearray, ctypes.Array))
+
+
+def _is_writable_buffer(buffer) -> bool:
+    return isinstance(buffer, (bytearray, ctypes.Array))
 
 
 def _is_index(value) -> bool:

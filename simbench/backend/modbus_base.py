@@ -128,8 +128,9 @@ class ModbusBackendBase:
         # 值归属只在 loop 线程写（`Session` 把 GUI 的命令用 runner.call 投回来）；
         # 读（`source_is_waveform`）给主线程的 10Hz 刷新用，与 `_read_back` 同口径。
         self._sources = SourceStore()
-        # 摊平的点位表（`[(unit_id, Point)]`）：每次 tick / 每条写报文都只遍历这一份，
-        # 不再爬 project 对象树——与 `Session.load()` 一次建索引同一个理由。
+        # 摊平的点位表（`[(定位键, Point)]`）：Modbus 的定位键是 **unit_id**，S7 一路填 0
+        # （它不上线 unit id，寻址全靠点自己的区/DB/地址）。每次 tick / 每条写报文都只遍历
+        # 这一份，不再爬 project 对象树——与 `Session.load()` 一次建索引同一个理由。
         self._wave_points: list[tuple[int, Point]] = []
 
     async def start(self) -> None:
@@ -144,11 +145,9 @@ class ModbusBackendBase:
         configure_library_logging()
         # 摊平要在监听起来**之前**：`_await_ready` 里有 await，其间到的第一条写报文
         # 就会对着空表判"这一点不归我管"，接管漏判漏得没有声音。
-        self._wave_points = [(dev.unit_id, pt) for dev in self.channel.devices
-                             for pt in dev.points]
-        devices = build_sim_devices(Project(channels=[self.channel]))
-        server = self._create_server(devices)
-        task = asyncio.create_task(server.serve_forever())
+        self._wave_points = self._flatten_points()
+        server = self._create_server(self._devices())
+        task = self._start_server(server)
         try:
             await self._await_ready(server, task)
             self._extra_servers = await self._open_extra(server)
@@ -158,12 +157,13 @@ class ModbusBackendBase:
             # shutdown 一次，额外那几个监听则连收的人都没有（端口占到进程结束）。
             await self._close_extra()
             with contextlib.suppress(Exception):
-                await server.shutdown()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(task, _STOP_TIMEOUT)
+                await self._shutdown_server(server)
+            if task is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(task, _STOP_TIMEOUT)
             raise
         self._server = server
-        self._writer = RawRegisterWriter(server.context)
+        self._writer = self._make_writer(server)
         self._task = task
         self.started_at = time.monotonic()
         # 曲线的 0 相位与监听同时起（spec §5：`t` 是引擎启动后的单调秒，不是系统时间）。
@@ -181,9 +181,49 @@ class ModbusBackendBase:
         """起之前先自己确认"这个资源归我们"；拿不到就抛 `BackendStartError` 的子类。"""
         raise NotImplementedError
 
+    def _make_writer(self, server):
+        """读写入口背后的那层（Modbus：`RawRegisterWriter(server.context)`；S7 回 None）。
+
+        S7 的读写在区域缓冲上直接做（`_write_point` / 事件里的 `_own_intersecting`），
+        没有"寄存器写入器"这一层——`server.context` 那个属性在 snap7 的服务端上也不存在。
+        """
+        return RawRegisterWriter(server.context)
+
+    def _flatten_points(self) -> list[tuple[int, Point]]:
+        """把点表摊平成 `[(定位键, Point)]`：Modbus 用 **unit_id**（写寄存器要用它），
+        S7 固定用 0——它按区/DB/字节寻址，主站的事件里也没有 unit 这一维。
+
+        为什么是钩子：这张表的**键**决定归属记账对不对（`own` 与 `is_waveform` 必须用同一个
+        键）。S7 后端一开始自己在 `__init__` 里建了 `[(0, pt)]`，却被 `start()` 这行覆盖成
+        `unit_id`，于是"主站写过的点没被标成 manual"——曲线下一拍就把主站的值顶回去
+        （实测踩过，属于 spec §7 那类事故）。
+        """
+        return [(dev.unit_id, pt) for dev in self.channel.devices for pt in dev.points]
+
+    def _devices(self):
+        """这一路的数据面（Modbus：`build_sim_devices` 摊出来的 `SimDevice` 列表；S7 回 None）。
+
+        为什么是钩子：`build_sim_devices` 是 **Modbus** 的 SimDevice 构造器，喂进 S7 的点位
+        （区名 `db1`、类型 `real`）会当场 `ValueError: unknown area`——两种传输的数据面本来
+        就不同（一边是寄存器块，一边是区域缓冲），在这里分开比在构造器里加 if 干净。
+        """
+        return build_sim_devices(Project(channels=[self.channel]))
+
     def _create_server(self, devices):
-        """建这一路的 pymodbus server（同步；`devices` 已经由点表摊平）。"""
+        """建这一路的 server（同步；`devices` 是 `_devices()` 给的，S7 拿到的恒为 None）。"""
         raise NotImplementedError
+
+    def _start_server(self, server):
+        """让 server 开始服务，返回它的长活任务（没有长活任务的实现回 None）。
+
+        默认是 **pymodbus 那一套**（TCP 与 RTU 两个后端共用）：`create_task(serve_forever())`。
+        S7 覆盖成 snap7 的同步 `start_to()`（没有任务可等，回 None）。
+        """
+        return asyncio.create_task(server.serve_forever())
+
+    async def _shutdown_server(self, server) -> None:
+        """收 server。默认（pymodbus）：`await server.shutdown()`；S7：`stop()` + `destroy()`。"""
+        await server.shutdown()
 
     async def _await_ready(self, server, task) -> None:
         """等"真的起来了"：起不来就把真实异常抛出去，不许"start 成功但外面连不上"。"""
@@ -238,7 +278,7 @@ class ModbusBackendBase:
         self._writer = None
         self._task = None
         if server is not None:
-            await server.shutdown()
+            await self._shutdown_server(server)
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.wait_for(task, _STOP_TIMEOUT)
@@ -292,18 +332,10 @@ class ModbusBackendBase:
                             time.monotonic() - self.started_at,
                             pdu_offset=self._pdu_offset)
         for unit_id, area, address, count in write_targets(event) or ():
-            for point_unit, pt in self._wave_points:
-                # `readonly` 的点跳过：主站写它会被协议拒（异常码 2），但 rx 照样解成"写"，
-                # 不过滤就变成"一次没成功的写把曲线停了"——而引擎侧的 raw_writer 写得进
-                # 只读点，症状比"主站压根写不到"更难查。
-                if point_unit != unit_id or pt.area != area or pt.readonly:
-                    continue
-                # 区间**重叠**判定，不是"点的基础格落在写区间内"：主站从 4 格 uint64 的中间
-                # 那一格写起时（FC16 addr=6 qty=2 打占 5..8 的点），按基础地址判一个点都命中
-                # 不了，5 还留在波形手上，下一 tick 就把主站刚写的 6/7 一起顶掉。
-                if pt.address < address + count and address < pt.address + pt.span:
-                    self._sources.own(self.channel_name, unit_id, area, pt.address,
-                                      count=pt.span, who="master")
+            # 标记这一步与 S7 共用（`_own_intersecting`）：三条口径（只读点跳过、点表外不理、
+            # 重叠判定）都写在那一处，这里只把 Modbus 的"跨度"告诉它。
+            self._own_intersecting(unit_id, area, address, count,
+                                   span_of=lambda pt: pt.span)
 
     def _trace_connect(self, is_new: bool) -> None:
         """连接建立/断开回调：实测一次"连上→读→关"正好是 ("open", "close") 两次。"""
@@ -339,11 +371,11 @@ class ModbusBackendBase:
         去重表的时间戳，所以"60s 只留一条"也能被 `_tick_once(now=61.0)` 这样验，
         不必有人真睡一分钟。
         """
-        writer = self._require_writer()
+        self._require_ready()
         written = 0
         t = now - self._tick_started
-        for unit_id, pt in self._wave_points:
-            if not self._sources.is_waveform(self.channel_name, unit_id, pt.area,
+        for key, pt in self._wave_points:
+            if not self._sources.is_waveform(self.channel_name, key, pt.area,
                                              pt.address):
                 continue                                  # spec §7：被接管就一个字都不写
             if pt.waveform in ("", "const") and not pt.wave_param:
@@ -351,38 +383,78 @@ class ModbusBackendBase:
             stage = "compute"
             try:
                 value = waveform_value(pt.waveform, pt.wave_param, t)
-                # 先把值钳进 datatype 的区间再编码——写一个被 `& 0xFFFF` 截过的错值比不报
+                # 先把值钳进这个点位类型的区间再编码——写一个被 `& 0xFFFF` 截过的错值比不报
                 # 日志严重（主站读到的是"合法但完全错误"的遥测量）。报告必须排在这个 try
                 # **之内**：那句日志自己出故障时，代价不许越过"这一个点的这一轮"（spec §8
                 # 只要求运行期有一条日志，没要求拿整轮写入去换），
                 # `_emit` 里那道 sink 兜底是同一件事的另一半。
-                value, clamped = clamp_to_datatype(value, pt.datatype)
+                # "钳到哪个类型的哪个区间"是**传输相关**的（Modbus 是 uint16/float32 那套、
+                # S7 是 word/real 那套），所以走钩子。
+                value, clamped = self._clamp(value, pt)
                 if clamped:
-                    self._report_clamp(unit_id, pt, value, now)
+                    self._report_clamp(key, pt, value, now)
                 # 从这里起再炸就不是"算值"的问题了：分类只影响日志那一句怎么说，
                 # 而两种错要改的东西不一样（曲线参数 vs 点表的类型）。
                 stage = "encode"
-                registers = encode(value, pt.datatype, pt.word_order)
-                if area_is_bit(pt.area):
-                    # 两边的"地址 0"含义不同（位区误用 `write_registers` 现在直接抛
-                    # ValueError；实测它曾把 0x0002 点成**线圈 1**），所以两个入口不许混用。
-                    wrote = writer.write_bits(unit_id, pt.area, pt.address,
-                                              bool(registers[0]))
-                else:
-                    wrote = writer.write_registers(unit_id, pt.area, pt.address,
-                                                   list(registers))
+                wrote = self._write_point(key, pt, value)
             except (KeyError, ZeroDivisionError, ValueError) as exc:
                 # 逐点兜：未知波形名是 KeyError、`period=0`/`speed=0` 是 ZeroDivisionError、
                 # 参数与编码是 ValueError（Task 1 实测三种都会到这里来）。只跳过这一个点——
                 # 异常冒进 asyncio 任务就是"波形停了而通道还在跑"，而整轮中断还会让同通道
                 # 其余点位一起冻住。这三种**不许往窄里收**，也不许像 Task 3 那样只 `continue`：
                 # 一个坏点从此不刷新而日志一句都没有，操作员只剩"挨个点位猜哪个坏了"这条路。
-                self._report_failure(stage, unit_id, pt, exc, now)
+                self._report_failure(stage, key, pt, exc, now)
                 continue
             if not wrote:
                 continue          # 地址不在块内（点表与 SimDevice 不一致）：静默跳下一个点
             written += 1
         return written
+
+    # ---------- 传输相关的三个钩子（Modbus 的默认实现就是原来那段代码） ----------
+
+    def _require_ready(self) -> None:
+        """写之前先确认这一路是起着的。Modbus：有 writer；S7 子类覆盖（它没有 writer）。"""
+        self._require_writer()
+
+    def _clamp(self, value, pt):
+        """把算出来的值钳进这个点位类型的区间，返回 `(值, 是否钳过)`。
+
+        Modbus 默认走 `clamp_to_datatype`（uint16/float32 那套区间）；S7 子类覆盖成 S7 类型
+        那一套（word/real/...）——两套区间不一样，硬塞进一个函数就是靠 if 缝两种语义。
+        """
+        return clamp_to_datatype(value, pt.datatype)
+
+    def _write_point(self, key, pt, value) -> bool:
+        """把这个点的值写进从站内存，返回是否真写进去。
+
+        Modbus 默认：编码成 reg16 序列 + `raw_writer` 写寄存器/位。S7 子类覆盖成"编码成
+        字节 + 写区域缓冲"。`key` 是摊平表里的定位键（Modbus 是 unit_id、S7 是 0）。
+        """
+        registers = encode(value, pt.datatype, pt.word_order)
+        if area_is_bit(pt.area):
+            # 两边的"地址 0"含义不同（位区误用 `write_registers` 现在直接抛 ValueError；
+            # 实测它曾把 0x0002 点成**线圈 1**），所以两个入口不许混用。
+            return self._require_writer().write_bits(key, pt.area, pt.address,
+                                                     bool(registers[0]))
+        return self._require_writer().write_registers(key, pt.area, pt.address,
+                                                      list(registers))
+
+    def _own_intersecting(self, key, area, address, count, span_of) -> None:
+        """把 `[address, address+count)` 碰到的点整段标成 manual —— 两条传输共用的那一步。
+
+        Modbus 传 `span_of=lambda pt: pt.span`（寄存器格数）、S7 传字节数；`count` 是主站这次
+        动的范围（Modbus 是报文里的数量、S7 是事件里的长度）。三条老口径都在这里收口：
+        只读点跳过（主站写它会被协议拒，但 rx 照样解成"写"，不过滤就变成"一次没成功的写把
+        曲线停了"）；点表里没有的格子一律不理；区间**重叠**判定而不是"基础格落在区间内"
+        （主站从 4 格 uint64 的中间那一格写起时，按基础地址判一个点都命中不了）。
+        """
+        for point_key, pt in self._wave_points:
+            if point_key != key or pt.area != area or pt.readonly:
+                continue
+            span = span_of(pt)
+            if pt.address < address + count and address < pt.address + span:
+                self._sources.own(self.channel_name, key, area, pt.address,
+                                  count=span, who="master")
 
     def _emit(self, level: str, kind: str, key: tuple, text: str,
               now: float) -> None:
