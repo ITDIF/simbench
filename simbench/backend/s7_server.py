@@ -42,9 +42,11 @@ try:                       # 延迟可用性：装不上依赖不该拦住"只�
         # 标成将移除（每次 import 都刷一条 UserWarning）。我们自己知道这条的来源与约束
         # （见 README/requirements），这里压掉它——不认识它的操作员会被这条吓一跳。
         warnings.simplefilter("ignore", UserWarning)
+        from snap7 import common as _snap7_common
         from snap7 import server as _snap7_server
         from snap7 import types as _snap7_types
 except Exception:                                   # noqa: BLE001
+    _snap7_common = None
     _snap7_server = None
     _snap7_types = None
 
@@ -100,7 +102,24 @@ class S7Backend(ModbusBackendBase):
         if _snap7_server is None:
             raise BackendStartError(f"channel {self.channel_name}: S7 support is not "
                                     f"installed; {DEPENDENCY_HINT}")
-        server = _snap7_server.Server()
+        try:
+            # 先把**原生库**单独加载一遍，再建 Server。为什么多这一步：`Server.__init__`
+            # 里 `load_library()` 失败时它已经把 `self.pointer` 挂上了、却没有 `self.library`，
+            # 而 `Server.__del__` 是 `self.destroy()` → `if self.library:` —— 于是解释器退出
+            # 时还会多打一行 `Exception ignored ... has no attribute 'library'`（库里的事，
+            # 它自己的 bug）。先探一下就不建那个半成品对象了；`Snap7Library` 是单例，
+            # 探过之后 `Server()` 不会再加载第二次。
+            #
+            # 这一条为什么必须收成一句人话：模块装上了、**原生库**却没加载起来（`snap7.dll`
+            # 被删、被打包漏掉、换机器时没跟着走）——snap7 是在**用的时候**才 `load_library()`，
+            # 所以它炸在 import 之后，`_snap7_server is None` 那道闸拦不到它。冻结包里最容易
+            # 出现的正是这一种（源码装得上、产物漏一个文件）。
+            _snap7_common.load_library()
+            server = _snap7_server.Server()
+        except (AttributeError, RuntimeError) as exc:
+            raise BackendStartError(
+                f"channel {self.channel_name}: snap7.dll cannot be loaded ({exc}); "
+                f"{DEPENDENCY_HINT}") from exc
         self._areas = _build_areas(self.channel)
         for _name, _db, area_code, index, buffer, _points in self._areas:
             server.register_area(area_code, index, buffer)

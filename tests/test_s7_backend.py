@@ -232,3 +232,24 @@ def test_starting_without_the_dependency_reports_one_line(engine_runner, monkeyp
     with pytest.raises(BackendStartError) as excinfo:
         engine_runner.call(lambda: backend.start(), _CALL_TIMEOUT, "s7 start fails")
     assert "python-snap7" in str(excinfo.value)
+
+
+def test_a_missing_native_library_reports_one_line_too(monkeypatch):
+    """模块在、`snap7.dll` 不在：同样一句人话，不是 RuntimeError 甩 traceback。
+
+    这一条是打包形态最容易出现的形状（源码装得上、产物漏一个文件），而 snap7 是在
+    **用的时候**才 `load_library()`，所以它不算"没装依赖"那一类（`_snap7_server is None`），
+    必须单独接住。
+    """
+    from simbench.backend import s7_server
+
+    class _NoLibrary:
+        def Server(self):                                  # noqa: N802 —— 照 snap7 的名字
+            raise RuntimeError("can't find snap7 library. If installed, try running ldconfig")
+
+    monkeypatch.setattr(s7_server, "_snap7_server", _NoLibrary())
+    backend = S7Backend(channel(free_port()))
+    with pytest.raises(BackendStartError) as excinfo:
+        backend._create_server(None)
+    message = str(excinfo.value)
+    assert "python-snap7" in message and "snap7.dll" in message
