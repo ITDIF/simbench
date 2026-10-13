@@ -30,7 +30,7 @@ import time
 import warnings
 from typing import Any
 
-from ..codec.s7_codec import clamp_to_type, encode, span_bytes, write_bit
+from ..codec.s7_codec import clamp_to_type, encode, read_bit, span_bytes, write_bit
 from ..project.model import S7_AREAS, channel_transport, parse_s7_area, s7_summary
 from .modbus_base import BackendStartError, ModbusBackendBase
 # S7 也是 TCP 端口：归属判定与 TCP 同一套两级探针（bind + connect），不另写一份。
@@ -149,20 +149,56 @@ class S7Backend(ModbusBackendBase):
         return clamp_to_type(value, pt.datatype)
 
     def _write_point(self, key, pt, value) -> bool:
-        """引擎侧写值 = 改那块区域缓冲（主站下一次读就看得见，实测过）。"""
+        """引擎侧写值（波形 tick）= 改那块区域缓冲（主站下一次读就看得见，实测过）。"""
+        try:
+            raw = encode(value, pt.datatype, span_bytes(pt.datatype, pt.initial))
+        except ValueError:
+            return False                     # 编不出来（坏点表）：tick 的逐点兜会记一条日志
+        return self.write_point_bytes(pt, raw)
+
+    def read_point_bytes(self, pt) -> bytes | None:
+        """读一个点占的那几个字节（`bool` 回一个字节的 `00`/`01`）。
+
+        没起、或这个点的地址不在任何一块已注册的缓冲里，一律回 `None`——调用方（`Session`）
+        据此把那一格标 `stale`，不许拿初值冒充"读到了"。
+        """
         entry = self._area_of(pt)
-        if entry is None:
+        if entry is None or self._server is None:
+            return None
+        _name, _db, _code, _index, buffer, _points = entry
+        if pt.datatype == "bool":
+            if pt.bit is None:
+                return None
+            index = pt.address * 8 + pt.bit
+            if index >= len(buffer) * 8:
+                return None
+            with self._area_lock(entry):
+                return b"\x01" if read_bit(buffer, index) else b"\x00"
+        span = span_bytes(pt.datatype, pt.initial)
+        if pt.address + span > len(buffer):
+            return None
+        with self._area_lock(entry):
+            return bytes(buffer[pt.address:pt.address + span])
+
+    def write_point_bytes(self, pt, raw: bytes) -> bool:
+        """把一个点占的那几个字节写进区域缓冲：`bool` 只动那一位，其余整段覆盖。
+
+        `Session.set_point`（界面改值）与波形 tick 都走这一条——两条路对"写进哪里"必须
+        是同一个答案（各写一份迟早漂）。
+        """
+        entry = self._area_of(pt)
+        if entry is None or self._server is None:
             return False
         _name, _db, _code, _index, buffer, _points = entry
         if pt.datatype == "bool":
             if pt.bit is None:
                 return False
             with self._area_lock(entry):
-                write_bit(buffer, pt.address * 8 + pt.bit, value)
+                write_bit(buffer, pt.address * 8 + pt.bit,
+                          bool(raw[0]) if raw else False)
             return True
-        raw = encode(value, pt.datatype, span_bytes(pt.datatype, pt.initial))
         if pt.address + len(raw) > len(buffer):
-            return False                     # 地址不在块内（点表与缓冲不一致）：静默跳过
+            return False                     # 地址不在块内（点表与缓冲不一致）
         with self._area_lock(entry):
             ctypes.memmove(ctypes.byref(buffer, pt.address), raw, len(raw))
         return True

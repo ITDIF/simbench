@@ -28,8 +28,10 @@ from dataclasses import dataclass
 from ..backend import make_backend
 from ..backend.events import ChannelState, LogLine, PacketEvent
 from ..backend.modbus_base import ModbusBackendBase
+from ..codec import s7_codec
 from ..codec.point_codec import decode, encode
-from ..project.model import Point, Project, area_is_bit
+from ..project.model import (Point, Project, area_is_bit, channel_transport,
+                             s7_span_bytes)
 from ..project.validate import Issue, error_lines, validate_project
 from .packets import PacketStore
 from .runner import EngineRunner
@@ -371,14 +373,15 @@ class Session:
             meta = list(self._rows_meta.get(channel, ()))
         running = bool(runtime and runtime.running)
         backend = runtime.backend if running else None
+        s7 = self._is_s7(channel)
         out: list[Row] = []
         for unit_id, device, pt in meta:
-            regs, failed = self._read_back(runtime, pt, unit_id)
-            value_text, registers = _render(pt, regs)
+            regs, failed = self._read_back(runtime, pt, unit_id, s7)
+            value_text, registers = _render(pt, regs, s7)
             out.append(Row(channel, device, unit_id, pt.name, pt.area, pt.address,
                            pt.datatype, pt.word_order, value_text, registers,
                            pt.readonly, pt.waveform, stale=failed and running,
-                           source=_source_of(backend, unit_id, pt)))
+                           source=_source_of(backend, unit_id, pt, s7)))
         return out
 
     def manual_count(self, channel: str) -> int:
@@ -395,8 +398,13 @@ class Session:
         if runtime is None or not runtime.running or runtime.backend is None:
             return 0
         backend = runtime.backend
+        # 归属键按传输取：S7 固定 0（它按区/DB/字节寻址，事件里也没有 unit 这一维）。
+        # 这里与 `rows()` 的 source 列、`restore_waveform` 必须是同一个键，否则
+        # "界面说已停、计数说 0"这种自相矛盾就会出现。
+        key = 0 if self._is_s7(channel) else None
         return sum(1 for unit_id, _device, pt in meta
-                   if not backend.source_is_waveform(unit_id, pt.area, pt.address))
+                   if not backend.source_is_waveform(key if key is not None else unit_id,
+                                                     pt.area, pt.address))
 
     def restore_waveform(self, channel: str, unit_id: int, area: str,
                          address: int) -> bool:
@@ -425,9 +433,13 @@ class Session:
                              f"channel {channel} is not running; the waveform was not "
                              f"resumed")
             return False
+        # 跨度与归属键都按传输取：S7 是 (0, 字节数)，Modbus 是 (unit_id, 寄存器格数)。
+        s7 = self._is_s7(channel)
+        key = 0 if s7 else unit_id
+        span = _span_of(pt, s7)
         try:
             restored = self._runner.call(
-                lambda: _arestore(runtime.backend, unit_id, area, address, pt.span),
+                lambda: _arestore(runtime.backend, key, area, address, span),
                 _WRITE_TIMEOUT,
                 f"restore waveform {area} {address} (unit {unit_id})")
         except Exception as exc:                    # noqa: BLE001
@@ -439,7 +451,7 @@ class Session:
             self.publish_log("info",
                              f"point {pt.name} ({area} {address}, unit {unit_id}) on "
                              f"channel {channel} handed back to the waveform; "
-                             f"{pt.span} register(s) released")
+                             f"{span} {'byte(s)' if s7 else 'register(s)'} released")
         else:
             # 没在 manual 上就别谎报"恢复了"：那句日志会是操作员唯一能看见的证据
             self.publish_log("info",
@@ -477,6 +489,9 @@ class Session:
             # 不在点表（含未知 area、未知 unit、越界地址）一律在这里挡住：
             # 放进 backend 就会变成 `unknown area 'xx'` 那种像模拟器 bug 的话。
             return WriteResult(False, f"{area} address {address} is not in the point table")
+        s7 = self._is_s7(channel)
+        if s7:
+            return self._set_s7_point(runtime, pt, text, channel, unit_id, area, address)
         try:
             registers = encode(text, pt.datatype, pt.word_order)
         except ValueError as exc:
@@ -524,15 +539,58 @@ class Session:
             return WriteResult(False, f"engine write failed: {exc}")
         if not ok:
             return WriteResult(False, f"{area} address {address} is outside the point table")
-        regs, failed = self._read_back(runtime, pt, unit_id)
+        regs, failed = self._read_back(runtime, pt, unit_id, s7)
         if failed or regs is None:
             # 写成功但读不回来：这不是"值没变"，是回读通道出了毛病。宁可说"没读到"，
             # 也不许回一个初值冒充当前值（那一格会被当成"设备报了这个值"）。
             return WriteResult(False, f"read-back failed for {area} {address}")
-        value_text, registers_out = _render(pt, regs)
+        value_text, registers_out = _render(pt, regs, s7)
         with self._lock:
             self._dirty = True
         return WriteResult(True, "", value_text, registers_out)
+
+    def _set_s7_point(self, runtime, pt, text: str, channel: str, unit_id: int,
+                      area: str, address: int) -> WriteResult:
+        """S7 的改值：按 S7 类型编成字节 → 写进区域缓冲 → 回读一次。
+
+        与 Modbus 那条**分开**而不是在一条里塞 if：跨度单位（字节 vs 寄存器格）、编码器
+        （`s7_codec` vs `point_codec`）、写入口（`write_point_bytes` vs `write_registers`）
+        三处都不同，缝在一起就得靠 if 把两种语义粘着——一处的单位错就是"15 位还算得出来、
+        16 位少写一格"这类看不见的错。
+        """
+        span = _span_of(pt, True)
+        try:
+            raw = s7_codec.encode(text, pt.datatype, span)
+        except ValueError as exc:
+            message = str(exc)
+            if "at most" in message:
+                # 与 Modbus 那条同一句"该改哪里"：跨度归点表初值管，不在这个编辑框里
+                message = (f"{message}; widen it via the point's 初值 "
+                           f"and restart the channel")
+            return WriteResult(False, message)
+        try:
+            ok = self._runner.call(
+                lambda: _awrite_s7(runtime.backend, pt, raw),
+                _WRITE_TIMEOUT, f"write {area} {address} (unit {unit_id}) "
+                                f"on channel {channel}")
+        except Exception as exc:                    # noqa: BLE001
+            return WriteResult(False, f"engine write failed: {exc}")
+        if not ok:
+            return WriteResult(False, f"{area} address {address} is outside the point table")
+        regs, failed = self._read_back(runtime, pt, unit_id, True)
+        if failed or regs is None:
+            return WriteResult(False, f"read-back failed for {area} {address}")
+        value_text, registers_out = _render(pt, regs, True)
+        with self._lock:
+            self._dirty = True
+        return WriteResult(True, "", value_text, registers_out)
+
+    def _is_s7(self, channel: str) -> bool:
+        """这一路是不是 S7（读/写/归属三处都要按传输分派，判定只在这里一次）。"""
+        try:
+            return channel_transport(self._project.find_channel(channel)) == "s7"
+        except KeyError:
+            return False
 
     # ---------- 事件 ----------
 
@@ -623,7 +681,7 @@ class Session:
                 if not self._stop_one(runtime)]
 
     def _read_back(self, runtime: ChannelRuntime | None, pt: Point,
-                   unit_id: int) -> tuple[list[int] | None, bool]:
+                   unit_id: int, s7: bool = False) -> tuple[list[int] | None, bool]:
         """回读一个点位当前的寄存器，返回 `(regs, failed)`。
 
         `failed` 与"regs 是 None"不是一回事，必须分开说：
@@ -639,6 +697,12 @@ class Session:
         if runtime is None or runtime.backend is None:
             return None, False
         try:
+            if s7:
+                # S7 回的是**字节**（bool 也回一个字节的 0/1）：`_render` 那一侧按 S7 类型解。
+                raw = runtime.backend.read_point_bytes(pt)
+                if raw is None or not raw:
+                    return None, True
+                return list(raw), False
             if area_is_bit(pt.area):
                 bits = runtime.backend.read_bits(unit_id, pt.area, pt.address, 1)
                 if bits is None or not bits:
@@ -673,7 +737,12 @@ def _detail(backend) -> str:
     return backend.describe()
 
 
-def _source_of(backend, unit_id: int, pt: Point) -> str:
+def _span_of(pt: Point, s7: bool) -> int:
+    """这个点占多大：Modbus 是寄存器格数，S7 是字节数（归属与交还都用它）。"""
+    return s7_span_bytes(pt.datatype, pt.initial) if s7 else pt.span
+
+
+def _source_of(backend, unit_id: int, pt: Point, s7: bool = False) -> str:
     """这一行的值当前归谁驱动：`waveform` / `manual`。
 
     `backend` 为空（通道没起）一律回 `waveform`：那时那一格显示的是点表初值，标"已停"
@@ -681,11 +750,13 @@ def _source_of(backend, unit_id: int, pt: Point) -> str:
     """
     if backend is None:
         return "waveform"
-    return "waveform" if backend.source_is_waveform(unit_id, pt.area, pt.address) \
+    key = 0 if s7 else unit_id          # S7 的归属键固定 0（见 `manual_count` 的注释）
+    return "waveform" if backend.source_is_waveform(key, pt.area, pt.address) \
         else "manual"
 
 
-def _render(pt: Point, regs: list[int] | None) -> tuple[str, tuple[int, ...]]:
+def _render(pt: Point, regs: list[int] | None,
+            s7: bool = False) -> tuple[str, tuple[int, ...]]:
     """寄存器 -> 界面文案。回读失败（regs 为 None/空）时回落 CSV 初值。
 
     回落本身有两种含义——①通道没起，本来就该显示初值；②通道在跑但读不到，显示初值
@@ -699,7 +770,12 @@ def _render(pt: Point, regs: list[int] | None) -> tuple[str, tuple[int, ...]]:
     if not regs:
         return pt.initial, ()
     try:
-        value = decode(list(regs), pt.datatype, pt.word_order)
+        if s7:
+            # `regs` 在 S7 这一路装的是**字节**（`_read_back` 的约定），按 S7 类型解
+            value = s7_codec.decode(bytes(regs), pt.datatype,
+                                    s7_span_bytes(pt.datatype, pt.initial))
+        else:
+            value = decode(list(regs), pt.datatype, pt.word_order)
     except ValueError:
         return pt.initial, tuple(regs)
     if isinstance(value, bool):
@@ -718,6 +794,19 @@ async def _awrite(backend, unit_id, area, address, registers):
     ok = backend.write_registers(unit_id, area, address, registers)
     if ok:
         backend.mark_manual(unit_id, area, address, count=len(registers), who="gui")
+    return ok
+
+
+async def _awrite_s7(backend, pt, raw):
+    """S7 的写 + 接管，一次投递做完（两步都只在 loop 线程发生）。
+
+    归属键与跨度和事件那条路**必须一致**（0 / 字节数），否则界面改过的点在主站的
+    写事件里算另一段，`manual_count` 与"恢复波形"就会各说各话。
+    """
+    ok = backend.write_point_bytes(pt, raw)
+    if ok:
+        backend.mark_manual(0, pt.area, pt.address,
+                            count=s7_span_bytes(pt.datatype, pt.initial), who="gui")
     return ok
 
 

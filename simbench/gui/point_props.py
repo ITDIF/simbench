@@ -49,8 +49,9 @@ from dataclasses import dataclass
 from PySide6 import QtWidgets
 
 from ..project.csv_io import format_wave_param, parse_wave_param
-from ..project.model import AREAS, DATATYPES, WAVEFORMS, WORD_ORDERS, Point, \
-    brief_name, word_orders_allowed
+from ..project.model import (AREAS, DATATYPES, S7_AREAS, S7_TYPES, WAVEFORMS,
+                             WORD_ORDERS, Point, brief_name, channel_transport,
+                             parse_s7_area, word_orders_allowed)
 from ..project.validate import error_lines, validate_project
 from .point_table import NO_CONVENTION, conventional
 
@@ -80,6 +81,18 @@ class _Group:
     columns: int
     on_select: Callable[[str], None] | None
 
+
+
+def _s7_area_options(current: str) -> tuple[str, ...]:
+    """S7 点位的区选项：三个字母区 + **当前那个 `db<n>`**。
+
+    DB 号枚举不完（1..4095），所以只能把点表里现有的那一个补进来选中——M4 定过的老规矩：
+    存储值落不在合法选项里时原样补成一项并选中，面板不崩、也不悄悄改值。换一个 DB 号要走
+    点表（CSV/工程文件），不在这个面板里。
+    """
+    if parse_s7_area(current) is not None and current not in S7_AREAS:
+        return (*S7_AREAS, current)
+    return S7_AREAS
 
 
 class PointPropertiesDialog(QtWidgets.QDialog):
@@ -126,10 +139,16 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self.error_view.setReadOnly(True)
         self.error_view.setFixedSize(_NOTICE_WIDTH, _ERROR_VIEW_HEIGHT)
 
+        # 区/类型的选项按**点所属通道的传输**给：S7 点位上是 `db<n>`/mk/pe/pa 与 S7 的
+        # 类型名。给成 Modbus 那一套的话，操作员选一下就把 `hr`/`uint16` 写进 S7 点位里
+        # （validate 会拦，但那是一次无谓的往返，而且"选项里能选的就是错的"本身就在骗人）。
+        s7 = channel_transport(self._channel()) == "s7"
         self.area_buttons = self._radios(
-            AREAS, on_select=lambda _area: self._update_convention())
+            _s7_area_options(self._real.area) if s7 else AREAS,
+            on_select=lambda _area: self._update_convention())
         self.datatype_buttons = self._radios(
-            DATATYPES, columns=6, on_select=self._sync_word_orders)
+            S7_TYPES if s7 else DATATYPES, columns=6,
+            on_select=self._sync_word_orders)
         self.word_order_buttons = self._radios(WORD_ORDERS)
         self.waveform_buttons = self._radios(WAVEFORMS)
         self.address_edit.textChanged.connect(self._update_convention)
@@ -201,6 +220,10 @@ class PointPropertiesDialog(QtWidgets.QDialog):
                                   group.columns, value or "(空)", group.on_select)
         buttons[value] = button
         group.box.setFixedSize(group.box.sizeHint())   # 多一项要算进容器尺寸
+
+    def _channel(self):
+        """这个点位所属的通道对象（区/类型的选项要按它的传输给）。"""
+        return self._project.find_channel(self._key[0])
 
     def _box(self, buttons: dict) -> QtWidgets.QWidget:
         """某组单选按钮的摆位容器（`_radios` 建好时按 dict 的 id 登记的）。"""

@@ -181,6 +181,43 @@ def test_a_write_the_server_refused_does_not_take_the_point_over(engine_runner):
         engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "s7 stop")
 
 
+def test_a_second_master_snap7s_own_client_agrees(engine_runner):
+    """第二个**独立实现**的主站（snap7 自己的客户端）跑同一张表：两个主站都通过才算数。
+
+    pys7 是纯 Python 的一个实现、snap7 的客户端是 C 库自带的那一个——只对一个通过的
+    "兼容"很容易是"两边恰好都这么写"。这一条同时钉住 `get_cpu_state()` 能拿到（服务端答
+    这个请求），而 SZL 那类请求它不答（pys7 的 `get_cpu_status()` 会超时，见计划 D8）。
+    """
+    from snap7 import client as s7client
+
+    port = free_port()
+    backend = open_s7(engine_runner, channel(port))
+    client = s7client.Client()
+    try:
+        client.connect("127.0.0.1", 0, 1, port)     # 成功回 None，失败才抛
+        assert client.get_connected() is True
+        assert client.get_cpu_state() == "S7CpuStatusRun"
+        # 读初值：real 4 字节 + word 2 字节 + 位那一格
+        assert client.db_read(1, 0, 4) == bytes([0x41, 0x48, 0x00, 0x00])
+        assert client.db_read(1, 4, 2) == bytes([0x00, 0x0B])
+        assert client.read_area(s7client.Areas.DB, 1, 6, 1) == bytes([0x08])
+        # 写回（寄存器 + 位），再读回来
+        client.db_write(1, 4, bytearray(b"\x04\xD2"))
+        assert client.db_read(1, 4, 2) == bytes([0x04, 0xD2])
+        client.write_area(s7client.Areas.DB, 1, 6, bytearray(b"\x00"))
+        assert client.read_area(s7client.Areas.DB, 1, 6, 1) == bytes([0x00])
+        # M 区独立
+        client.mb_write(0, 1, bytearray(b"\x01"))
+        assert client.mb_read(0, 1) == bytes([0x01])
+        # 没注册的 DB：服务端拒
+        with pytest.raises(Exception) as excinfo:
+            client.db_read(2, 0, 1)
+        assert "Item not available" in str(excinfo.value), str(excinfo.value)
+    finally:
+        client.disconnect()
+        engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "s7 stop")
+
+
 def test_describe_and_endpoints():
     backend = S7Backend(S7Channel("s7-1", host="192.168.0.10", port=102, rack=0, slot=2))
     assert backend.describe() == "192.168.0.10:102 rack 0 slot 2"

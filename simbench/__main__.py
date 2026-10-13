@@ -15,7 +15,7 @@ import sys
 
 from .backend import BackendStartError, UnsupportedTransportError, make_backend
 from .csv_io_entry import load_point_table
-from .project.model import channel_transport, serial_summary
+from .project.model import channel_transport, s7_summary, serial_summary
 from .project.validate import error_lines, validate_project
 
 
@@ -48,8 +48,11 @@ def _line(direction: str, raw: bytes, unit, function, summary: str, mono: float)
 
 
 def _print_table(channel) -> None:
-    if channel_transport(channel) == "rtu":
+    transport = channel_transport(channel)
+    if transport == "rtu":
         print(f"channel {channel.name} ({serial_summary(channel)})")
+    elif transport == "s7":
+        print(f"channel {channel.name} ({s7_summary(channel)})")
     else:
         print(f"channel {channel.name} ({channel.host}:{channel.port})")
     for dev in channel.devices:

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..engine.point_source import PointSource
+from ..project.model import S7_TYPES
 from ..engine.session import Row
 
 VALUE_HEADER = "当前值"
@@ -274,7 +275,12 @@ def _display(row: Row, header: str) -> str:
         "名称": row.name, "区": row.area, "地址": str(row.address),
         "4x": convention, "类型": row.datatype,
         "字序": row.word_order, VALUE_HEADER: row.value_text,
-        "原始寄存器": " ".join(f"{r:04X}" for r in row.registers),
+        # S7 那一列装的其实是**字节**（`Row.registers` 在 S7 通道上是字节序列）：
+        # 按两位十六进制打，别把 0x41 打成 0041——那看着像 16 位寄存器，会把现场带偏。
+        # 判据用 datatype：S7 的类型名（real/word/...）与 Modbus 的（float32/uint16/...）
+        # 不相交，且 validate 强制"类型与传输匹配"，所以这个判据是可靠的。
+        "原始寄存器": " ".join(f"{b:02X}" if row.datatype in S7_TYPES else f"{r:04X}"
+                             for b, r in [(v, v) for v in row.registers]),
         # spec §7：被人工接管的点，波形列显示"已停"而不是波形名——"曲线还在跑"和
         # "这格的值是人/主站写进去的"在排查下发问题时是两个完全不同的答案。
         # 文案占原来那一列，列宽与列序一个都不动（界面口径：装不下改文案，不加宽不截断）。

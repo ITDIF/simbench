@@ -41,6 +41,9 @@ v1 明确不做（接口留缝，见 §9）：
 - 报文录制/回放
 - 主站（客户端）角色
 - 私有 TCP/串口协议
+- **S7（ISO-on-TCP / S7comm）通道**：v1 之后作为独立里程碑补做（2026-10-13，见 §11 第 7 条）。
+  点表用现有 12 列表达 S7 的区/地址/类型，协议栈用 snap7 的原生服务端（`snap7.dll`，
+  随 `python-snap7==1.3` 的 wheel 来，LGPL-3.0）
 - 状态字按位编辑：v1 用 `reg16` 手填整值，不做"一个寄存器拆成 16 个按位点位"
   （纯界面增量，见 §9；拆位会与"地址重叠即报错"的校验规则冲突）
 
@@ -103,16 +106,20 @@ exe 打包（PyInstaller）不在 v1，风险见 §13。
 ```
 gui/        PySide6：设备树 + 点位表 + 报文窗 + 启停控制 + CSV/工程对话框
 engine/     Session：唯一对 GUI 暴露的门面（启停/改值/拉取行 + 事件订阅），线程由 EngineRunner 持有
-backend/    ModbusTcpBackend（pymodbus 只出现在这里）；`Backend` 抽象与 ModbusRtuBackend 是 M5 的缝（§9）
-codec/      point_codec：点位值 ↔ 原始寄存器序列（数据类型 × 字序）
+backend/    三条传输的后端：ModbusTcpBackend / ModbusRtuBackend（pymodbus）与 S7Backend（snap7）；
+            与传输无关的那一半（波形 tick、值归属、报文/日志钩子、启停顺序）在
+            `modbus_base.py` 的 `ModbusBackendBase`（**不 import pymodbus/snap7**），
+            子类只填探针/建 server/等起来/切帧解析/数据面这几个钩子
+codec/      point_codec：点位值 ↔ 原始寄存器序列（数据类型 × 字序）；
+            s7_codec：S7 点位值 ↔ 字节序列（大端、无字序、bool 一位）
 project/    数据模型（Project/Channel/Device/Point）+ project.json + CSV 读写 + 校验
 net/        系统网络层（网卡现状/差异/专用网卡/设备 IP）；唯一允许跑 PowerShell 与 netsh 的包（§14）
 ```
 
 依赖方向单向：`gui → engine → backend → project/codec`，`net` 是旁路（谁都可以调它，它
-不 import `pymodbus`/`PySide6`，也不 import `engine`/`gui`）。`codec` 与 `project` 不 import
-`pymodbus`，也不 import `PySide6`；`backend` 不 import `PySide6`；`subprocess` 只许出现在
-`net/`。
+不 import `pymodbus`/`snap7`/`PySide6`，也不 import `engine`/`gui`）。`codec` 与 `project` 不
+import `pymodbus`/`snap7`，也不 import `PySide6`；`backend` 不 import `PySide6`；`subprocess`
+只许出现在 `net/`。
 
 线程模型（**2026-10-13 全面审查时按落地形状改写**；此前这一节写的是目标形状，"命令队列"
 与 `packet_event / validation_error` 这几个名字在实际代码里都不存在）：Qt 主线程 + 一个引擎
@@ -193,6 +200,17 @@ word_order, initial, waveform, wave_param, readonly
   导出时把参数按同一语法烘回名字里（全默认时只写 `com-485-1@COM3`），
   **CSV 往返不丢串口参数**；`@`、波特率与帧格式的解析/渲染各只此一份
   （`project/csv_io.parse_serial_name` / `_csv_channel_name`），界面不另抄一套。
+- **S7 通道**同样写在通道名里：`name@host:port[ rack/slot]`（例 `s7-1@192.168.0.10:102 0/1`，
+  `rack/slot` 省略时是 `0/1`）。与串口那条共用 `@`，靠"第一段里有没有 `://`、有没有 `:`"
+  分开（pyserial 的 URL 与纯端口名是串口，`host:port` 是 S7）；导出时把 host:port 与
+  rack/slot 按同一语法烘回名字，**往返不丢参数**。点了 S7 的名字却漏了端口（`s7-1@host`）
+  配上一行的 S7 区/类型时带行号拒掉——它与"串口名叫 host"语法一模一样，只问通道名分不出来。
+- **S7 的点位**：`area` = `db<n>` / `mk` / `pe` / `pa`；`address` 是**字节偏移**，`bool`
+  写成 `字节.位`（`6.3` = `DBX6.3`，模型里存成 `address` + `bit` 两个字段）；
+  `datatype` 用 S7 的名字 `bool/byte/char/word/int/dword/dint/real/string`；
+  **类型必须与传输匹配**（S7 通道上写 `uint16`、Modbus 通道上写 `real` 都是错误）。
+  S7 没有字序：`word_order` 非 `ABCD` 只给一条"会被忽略"的警告。`string` 是**裸 ASCII 定长**
+  （长度按点表初值算），与真 S7 STRING（前两字节是最大/当前长度）不同——这一点在使用说明里写明。
 - 串口通道的帧格式写作 `8E1`（数据位 / 校验 N|E|O / 停止位），
   `project/model.parse_frame` 只做**转换**（形状不对回 None），"9N1 这种形状对、值不合法"
   留给 §8 的白名单报。
@@ -322,6 +340,15 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
   `9600` → int），白名单、"两个通道抢同一个串口"这类**判定**全在 §8 那一份里：
   先写回工程再验，验出新增的错就整体回滚（连输入框一起退回，`gui/channel_panel.py`）。
   "连接数"那一栏对串口不显示（串口没有"连接"这件事，显示它就是演戏）
+- **S7 行（2026-10-13）**：与串口行同一套定宽槽——前两格是 **host / port**（惯例 102），
+  第三格是 **rack/slot**（`0/1`），TCP 行那一格留空并置灰。写回沿用"面板只做转换、判定全在
+  validate、验不过连输入框一起退回"那条路。
+- **S7 的报文窗**：只有**主站请求**那一行（方向列是 `RX`：它是主站发下来的），
+  "原始字节"列**留空**（snap7 的原生服务端不把原始报文交出来），摘要写
+  `读 db1 4B @0` / `写 db1 2B @4` 这样"读/写 + 区 + 长度 + 偏移"。列宽与列序一律不动。
+- **点表的"原始寄存器"列**在 S7 行上打的是**字节**（两位十六进制，`41 48 00 00`）：
+  `Row.registers` 在 S7 这一路装的是字节序列；判据用 `datatype`（S7 的类型名与 Modbus 的
+  不相交，且校验强制"类型与传输匹配"），列头不改。
 - 报文窗：环形缓冲 5000 条 + 暂停滚动按钮
 - **已实现口径（M2，别再按布局图猜）**：报文过滤是 **4 个平铺可勾选标签**
   `全部/请求/响应/异常`（`gui/packet_view.py` 里**一个 `QComboBox` 都不许有**，换个地方塞下拉
@@ -372,7 +399,12 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
   的值进来，真跑起来是收发全乱、报文窗一片 CRC 错）、`parity` 不在 N/E/O、`bytesize` 不是
   7/8、`stopbits` 不是 1/2、`timeout` 不是正数、**两个通道配同一个串口**（现象是"一路能收
   一路全错帧"，而 Windows 只会说 Access is denied）、通道名含 `@`（§5 的保留字符）；
-  以及**运行期**的串口打不开（不存在 / 被别的程序占着 / 驱动没装好）。
+  以及**运行期**的串口打不开（不存在 / 被别的程序占着 / 驱动没装好）；**S7 那一族**：
+  host 不许含 `:`/`/`/`@`/空格（会把 §5 的通道名语法拆坏）、port 1..65535、
+  rack 0..7、slot 1..31、与 TCP 抢同一个 `host:port` 判重复；点位：区名（`db<n>` 的
+  n 在 1..4095 / mk / pe / pa）、S7 类型、字节地址 0..65535、`bool` 必须带位且位在 0..7
+  （非 bool 不许带位）、**重叠按位判**（同一字节里的两个 bool 合法，`word@0` 与 `bool@0.0`
+  撞上）；`word_order` 非 ABCD 只给警告。
   任一条不满足就**整个工程不启动**，把所有错误一次性列成清单，不做第一个错就崩。
 - **运行期**：USB-485 被拔 → 该通道状态置错、树节点标红、日志一条，**不自动重连**
   （现场拔插常是人有意的，静默重连会让人误判设备在线），提供"重启通道"按钮。
@@ -475,7 +507,21 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
    代码注释里。手动冒烟那一条（真网卡 + 真主站按 `设备IP:端口` 连）仍留在人手上：本机
    `simbench 模拟网卡` 已建好（ifIndex 67），声明示例见 §14.1。
 
-已确认按 M1→M2→M3→M4→M5→M6 顺序（M6 与 M5 互不依赖，谁先都能做）。
+7. **S7（ISO-on-TCP / S7comm）通道（已完成，2026-10-13）**：路线是 snap7 的原生服务端
+   （`snap7.dll` 随 `python-snap7==1.3` 的 wheel 来，LGPL-3.0；1.3 会 import 已被
+   setuptools>=81 移除的 `pkg_resources`，所以钉 `setuptools<81`）。落地：`project` 层的
+   `S7Channel`/CSV 语法/JSON 键/校验、`codec/s7_codec.py`、`backend/s7_server.py`
+   （多 DB/区缓冲、事件 → 报文事件行与值归属）、`make_backend` 的 s7 分支、
+   `Session` 的读写按传输分派、通道面板的 S7 行与属性面板的 S7 选项。计划与偏离表
+   （D1–D12）在 `docs/superpowers/plans/2026-10-13-s7-server.md`，实测记录（含事件码布局、
+   `register_area` 的两套区代码、只用 Modbus 也能跑）在
+   `docs/superpowers/notes/2026-10-13-s7-probes.md`。验收**不需要硬件**：`pys7`（纯 Python）
+   + snap7 自带客户端两个独立主站跑同一张表。**注意**：snap7 的服务端不答 SZL 那类请求
+   （`pys7.get_cpu_status()` 会超时，snap7 客户端的 `get_cpu_state()` 正常）；真上位机若探
+   SZL 会看到超时，这是"不做 SZL 全表"那条口径的直接后果。
+
+已确认按 M1→M2→M3→M4→M5→M6 顺序（M6 与 M5 互不依赖，谁先都能做）；S7 是 v1 之后的独立里程碑
+（与 M5/M6 之后落地，见上面第 7 条）。
 
 **实现计划范围**：第一份计划覆盖 M1–M4，交付一个 TCP 从站 + GUI + CSV + 报文监视 + 预设波形
 的完整可用工具，全程可自动化验证。M5（RTU）单独出第二份计划，因为它需要你在笔记本 + USB-485
@@ -642,6 +688,16 @@ M5 内确认（**第一条已清零，第二条转人工冒烟**）：
   `could not open port 'COM99': FileNotFoundError`）只剩一条 warning，而项目自己的
   `configure_library_logging(ERROR)` 连那条也压掉 —— 所以 RTU 后端必须先自己开一次串口
   （`check_serial_is_free`）把原话拿到手。
+
+S7 内确认（**已清零**，结论都有用例钉住）：
+
+- **一个 snap7 服务端能挂多个 DB**：`register_area(srvAreaDB, <DB号>, buffer)`，未注册的 DB
+  回 `Item not available`、注册了但越界回 `OUT_OF_RANGE`；MK/PE/PA 各自独立。
+- **主站的写落进我们那块缓冲、我们改缓冲主站也读得到** ⇒ 波形 tick 与值归属复用既有机制。
+- **拿不到原始报文**：事件回调只给 `EvtCode`（`0x20000`=读、`0x40000`=写）与
+  `EvtParam1..4`（区代码/DB/起始字节/长度），所以报文窗只有事件行（§7 那条）。
+- **两套区代码**：`register_area` 要的是服务端侧（DB=5/MK=2/PE=0），事件里是客户端侧
+  （132/131/129/130）——混用会 `KeyError`（实测踩过）。
 
 ## 13. 风险
 
