@@ -54,6 +54,33 @@ setuptools>=81 移除的 `pkg_resources`）。**没装也能用 Modbus**：只�
 `device show` 只读；`up` / `clean` / `device create|remove` 会动系统网络（要提权）；
 `init` 从点表和 IP 清单生成声明骨架。
 
+## 打包成 exe（现场不用装 Python）
+
+```powershell
+.\packaging\build.ps1
+```
+
+产物在 `dist\` 下（同一个目录、共用 `_internal\`，演示点表在 `dist\simbench\examples\`）：
+
+| 文件 | 用途 |
+|---|---|
+| `dist\simbench\simbench.exe` | 控制台：`--check` / `--list` / 无头监听 / `net` 子命令 |
+| `dist\simbench\simbench-gui.exe` | 无控制台：双击开界面，点表路径可以跟在后面 |
+| `dist\simbench-onefile.exe` | 单文件形态（拷给同事方便；启动要解压，慢 3–4 倍，**不是**发布形态） |
+
+用法与源码运行一一对应，只是把 `python -m simbench` 换成 exe：
+
+```powershell
+.\dist\simbench\simbench.exe examples\covi-tunnel.csv --check
+.\dist\simbench\simbench.exe examples\covi-tunnel.csv --port 5020
+.\dist\simbench\simbench.exe net show
+.\dist\simbench\simbench-gui.exe
+```
+
+`simbench-gui.exe` 那一个**没有控制台**，所以文字结果（校验清单、报文日志、报错）在它里面
+是看不见的——要看那些就用 `simbench.exe`。冻结产物的十条冒烟记录（含 S7 通道走真
+`snap7.dll`、缺 DLL 时的报错形态、冷启动与体积）在 `packaging\SMOKE.md`。
+
 ## 两个环境变量
 
 | 变量 | 作用 | 默认 |

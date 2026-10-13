@@ -32,7 +32,7 @@ v1 做：
 - 点位值：GUI 双击直接改，写入即生效到寄存器
 - 预设波形：const / ramp / sine / random / step
 - 报文监视窗（原始 hex + 解析摘要）、通道启停独立、计数与连接状态
-- 交付：源码 + venv requirements.txt，M1–M5 期间不做 exe
+- 交付：源码 + venv requirements.txt；打包（PyInstaller）在 v1 之后单列里程碑做完了（§11 第 8 条）
 
 v1 明确不做（接口留缝，见 §9）：
 
@@ -99,7 +99,7 @@ pytest-asyncio
 ```
 
 M1 第一步是建 venv + 装依赖 + 跑一个最小 TCP 从站脚本确认 pymodbus 起得来，再动模型代码。
-exe 打包（PyInstaller）不在 v1，风险见 §13。
+exe 打包（PyInstaller）不在 v1，作为独立里程碑在 v1 之后做完（§11 第 8 条、§13 最后一条）。
 
 ## 4. 架构
 
@@ -520,6 +520,21 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
    （`pys7.get_cpu_status()` 会超时，snap7 客户端的 `get_cpu_state()` 正常）；真上位机若探
    SZL 会看到超时，这是"不做 SZL 全表"那条口径的直接后果。
 
+
+8. **打包（PyInstaller）（已完成，2026-10-13）**：v1 之后最后一块工程尾巴（§13 那条"v1 不验证
+   打包会留一个尾巴"）。落地 `packaging/`：`simbench.spec`（一次分析、两个 EXE + 一个 onefile）、
+   `entry.py`（两个 exe 共用，按有没有控制台分派）、`build.ps1`（一条命令打全套）、
+   `smoke.py`（拿真主站打产物的十条冒烟）。产物：`dist/simbench/simbench.exe`（控制台）、
+   `dist/simbench/simbench-gui.exe`（无控制台，两个共用 `_internal/`）、
+   `dist/simbench-onefile.exe`（单文件，**不是**发布形态）。冻结后只有两处会碎，都修了：
+   ① 提权重跑自己的 `-m simbench`（改成 `sys.frozen` 分派，`net/cli.py::_self_command_prefix`）；
+   ② `snap7.dll` 漏了时的一行报错（snap7 是"用到才加载"，import 期的闸门拦不到）。
+   验收：`packaging/smoke.py` **11/11 通过**（--check / --list / 缺文件 / net show / TCP / RTU /
+   S7 / GUI 两条 / onefile 两条），三条通道各走**真主站**；冷启动 onedir 0.42–0.57s、
+   onefile 1.7–1.9s，体积 124.0 MB / 48.7 MB。计划在
+   `docs/superpowers/plans/2026-10-13-packaging.md`，实测记录在 `packaging/SMOKE.md`。
+   留在人手上的：真 UAC 弹窗点一次、真上位机连冻结包、双击 GUI 的观感（M2 那份清单）。
+
 已确认按 M1→M2→M3→M4→M5→M6 顺序（M6 与 M5 互不依赖，谁先都能做）；S7 是 v1 之后的独立里程碑
 （与 M5/M6 之后落地，见上面第 7 条）。
 
@@ -715,8 +730,15 @@ S7 内确认（**已清零**，结论都有用例钉住）：
   排除了 GC——那是**仪表坏了**：这台机器的 `gc.callbacks` 是 `cb(phase, info)` 两参数签名，
   按上游的单参数写，回调每次抛 `TypeError` 被解释器 "Exception ignored" 静默吃掉。
   教训：仪表先拿一次已知事件验准（`gc.collect()` 一次看回调进不进），再谈排除。
-- 打包（PyInstaller onefile + pyserial/pymodbus hidden imports）推迟到 v1 功能稳定后，
-  但 v1 不验证打包会留一个尾巴，届时单列里程碑。
+- **（已清零）打包（PyInstaller）这条尾巴**：v1 之后单列的里程碑，2026-10-13 完成。
+  落地 `packaging/`（`simbench.spec` + `entry.py` + `build.ps1` + `smoke.py`），产物是
+  `dist/simbench/` 下的 `simbench.exe`（控制台）与 `simbench-gui.exe`（无控制台，共用
+  `_internal/`）外加单文件 `dist/simbench-onefile.exe`。实测的两处**冻结才会碎**的地方：
+  ① 提权重跑自己的 `-m simbench`（冻结后没有这条路，改成按 `sys.frozen` 分派，
+  `net/cli.py::_self_command_prefix`）；② `snap7.dll` 是**用到才加载**的，产物漏了它
+  时原来是一段 traceback，现在是一行带安装提示的错。冻结冒烟 11 项全绿、三条通道各走
+  真主站，记录与冷启动/体积见 `packaging/SMOKE.md`；计划与口径见
+  `docs/superpowers/plans/2026-10-13-packaging.md`。
 
 ## 14. 系统网络层（专用网卡 + 设备 IP）
 
