@@ -110,6 +110,49 @@ def test_the_allocator_refuses_past_the_address_ceiling():
         edit.next_point_address(dev, "hr", s7=False)
 
 
+def test_the_ceiling_check_counts_the_whole_span_not_just_the_first_cell():
+    """validate 只看**首地址**：65535 上放一个占两格的点它不报，真跑起来主站读到越界。
+
+    所以分配这一层必须按跨度算（今天界面只用跨度 1 的类型，这是给下一个调用方的闸）。
+    """
+    dev = device(points=[point(address=65530, datatype="uint16")])      # 占 65530，末尾 65531
+    # 一个 uint32 需要 2 格：落在 65531 会到 65532（可以）
+    assert edit.next_point_address(dev, "hr", s7=False, span=2) == (65531, None)
+    tight = device(points=[point(address=65500, datatype="uint16")])
+    with pytest.raises(edit.EditRefused) as excinfo:
+        for _ in range(40):                       # 一路加到贴住上限
+            address, _bit = edit.next_point_address(tight, "hr", s7=False, span=4)
+            tight.points.append(point(address=address, datatype="uint32"))
+    assert "past 65535" in str(excinfo.value)
+
+
+def test_the_diff_counts_repeats_so_a_third_duplicate_name_is_still_refused():
+    """差集按条数比：工程里本来就有两条同名通道时，再加第三条照样得拦。
+
+    用集合比差集的话，新来的那一条与旧的字符串一模一样，会被当成"早就有"吞掉——
+    "加了不该加的"就是这么发生的。
+    """
+    project = Project(channels=[channel(name="x", port=5020), channel(name="x", port=5021)])
+    assert len([line for line in errors(project) if "channel_duplicated" in line]) == 1
+    before = copy.deepcopy(project)
+    with pytest.raises(edit.EditRefused) as excinfo:
+        edit.add_channel(project, channel(name="x", port=5022))
+    assert "channel_duplicated" in str(excinfo.value)
+    assert project == before
+
+
+def test_a_bad_object_leaves_no_half_mutation_behind():
+    """改的过程或验的过程自己炸了（对象根本不是通道）：工程里也不许留下它。"""
+    project = Project()
+
+    class NotAChannel:
+        pass
+
+    with pytest.raises(Exception):
+        edit.add_channel(project, NotAChannel())
+    assert project.channels == []
+
+
 # ---------- 骨架 ----------
 
 def test_the_tcp_skeleton_is_clean_and_has_one_of_everything():

@@ -14,13 +14,14 @@ import copy
 import pathlib
 
 import pytest
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore
 from simbench.engine.session import Session
 from simbench.gui import main_window as main_window_module
 from simbench.gui.channel_form import ChannelForm
+from simbench.gui.device_tree import DeviceTree
 from simbench.gui.main_window import MainWindow
 from simbench.gui.new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
 from simbench.project import edit
@@ -205,17 +206,22 @@ def test_the_channel_dialog_prefills_around_what_is_already_there(make_window, q
 
 
 def test_a_channel_added_while_another_is_running_is_refused(
-        make_window, qapp):
-    """加通道要走 `Session.load`，而它第一步停掉**所有**在跑的通道：先拒绝，并点名。"""
+        make_window, monkeypatch, qapp):
+    """加通道要走 `Session.load`，而它第一步停掉**所有**在跑的通道：先拒绝，并点名。
+
+    对话框的 `exec` 换成记录器：护栏万一回归，真对话框会弹出来把用例挂住——那种失败
+    比"红一条"难查得多。所以这里断言的是"它压根没被打开"。
+    """
     window = make_window(loaded(free_port()))
     window._start_all()
     qapp.processEvents()
     before = copy.deepcopy(window.session.project)
-    called: list[int] = []
-    window.tree.add_channel_requested.connect(lambda: called.append(1))
+    opened: list[int] = []
+    monkeypatch.setattr(AddChannelDialog, "exec", lambda self, *a: opened.append(1) or 0)
     window._add_channel()
     qapp.processEvents()
-    assert called == [] and window.session.project == before
+    assert opened == [], "护栏没拦住：添加通道对话框被打开了"
+    assert window.session.project == before
     assert "正在运行" in window.log_view.toPlainText()
 
 
@@ -522,5 +528,148 @@ def test_a_project_built_from_scratch_serves_a_real_master(
         assert client.read_holding_registers(0, count=1, device_id=1).registers == [4242]
     finally:
         client.close()
+        window._stop_all()
+        qapp.processEvents()
+
+
+# ---------- 13. 右键菜单的命中测试（坐标系那一条在这里钉住） ----------
+
+class _Click:
+    """`contextMenuEvent` 的替身事件：`pos()` 与 `globalPos()` 必须是**不同**坐标系的两点。
+
+    两边给同一个值的话，"弹层坐标取错坐标系"这类缺陷测不出来（菜单会开到窗口左上角）。
+    """
+
+    def __init__(self, pos, global_pos):
+        self._pos, self._global = pos, global_pos
+
+    def pos(self):
+        return self._pos
+
+    def globalPos(self):
+        return self._global
+
+    def ignore(self):
+        self.ignored = True
+
+
+def _tree(qapp):
+    tree = DeviceTree()
+    tree.rebuild(edit.new_project("tcp"))
+    tree.resize(400, 200)
+    tree.show()
+    qapp.processEvents()
+    return tree
+
+
+def test_the_channels_come_up_expanded_so_the_device_rows_are_visible(qapp):
+    """树起来就是展开的：设备行要一眼看得见。
+
+    原来 `setExpanded(True)` 调在 `addTopLevelItem` **之前**，那是个空操作（视图里还没有
+    这一项），于是每条通道都是折叠的、设备行要人手点开。断言用 `visualItemRect` 而不是
+    `childCount`：后者只能证明"模型里有这一行"，证明不了"屏幕上看得见"——而这个缺陷之所
+    以活到现在，正是因为所有用例都在看模型。
+    """
+    tree = _tree(qapp)
+    top = tree.topLevelItem(0)
+    assert top.isExpanded() is True
+    assert tree.visualItemRect(top.child(0)).isValid(), "设备行没有被显示出来"
+
+
+def test_the_tree_menu_opens_for_the_row_under_the_cursor(qapp, monkeypatch):
+    """点哪一行的**中心**，弹的就是哪一行的菜单。
+
+    这一条是补一个真缺陷：`itemAt` 吃的是视口坐标而 `contextMenuEvent` 给的是控件坐标，
+    少了 `viewport().mapFrom(...)` 那一步，表头那 20 来像素的偏移会把命中整体下移——实测
+    点通道行上半截（第 0 行的中心）**什么都不弹**。`point_table` 里同一句话早就写着。
+    """
+    tree = _tree(qapp)
+    popped: list[list[str]] = []
+    monkeypatch.setattr(DeviceTree, "_popup",
+                        lambda self, menu, pos: popped.append(
+                            [a.text() for a in menu.actions()]))
+    for row, expected in ((0, ["添加设备…", "删除通道 tcp-5020…"]),
+                          (1, ["添加点位…", "删除设备…"])):
+        item = tree.topLevelItem(0) if row == 0 else tree.topLevelItem(0).child(0)
+        center = tree.viewport().mapTo(tree, tree.visualItemRect(item).center())
+        tree.contextMenuEvent(_Click(center, center + QtCore.QPoint(300, 200)))
+        assert popped[-1] == expected, f"第 {row} 行弹错了菜单：{popped[-1]}"
+    assert len(popped) == 2
+
+
+def test_the_tree_menu_offers_add_channel_on_empty_space(qapp, monkeypatch):
+    tree = _tree(qapp)
+    popped: list[list[str]] = []
+    monkeypatch.setattr(DeviceTree, "_popup",
+                        lambda self, menu, pos: popped.append(
+                            [a.text() for a in menu.actions()]))
+    below = QtCore.QPoint(60, tree.height() - 4)
+    tree.contextMenuEvent(_Click(below, below + QtCore.QPoint(300, 200)))
+    assert popped == [["添加通道…"]]
+
+
+# ---------- 14. 表单/对话框的按钮面 ----------
+
+def test_only_the_new_project_dialog_offers_a_blank_start(qapp):
+    """添加通道里不许有"空白工程"这个按钮：点下去只会得到一句说不通的错。
+
+    原来表单那句判断写反了（"不在 kinds 里**或者**就是 blank 就建按钮"），于是添加通道
+    对话框里也躺着一个空白选项，选中后走到 `default_channel(project, "blank")` →
+    `unknown transport 'blank'`。
+    """
+    from simbench.project.model import Project
+    add = AddChannelDialog(None, Project())
+    assert sorted(add.form._buttons) == ["rtu", "s7", "tcp"]
+    new = NewProjectDialog()
+    assert sorted(new.form._buttons) == ["blank", "rtu", "s7", "tcp"]
+
+
+def test_switching_projects_says_which_running_channel_it_stopped(
+        make_window, monkeypatch, qapp):
+    """换工程（新建/打开/导入）会停掉在跑的通道：日志里必须有一行，不能只让 ● 变 ○。"""
+    window = make_window(loaded(free_port()))
+    window._start_all()
+    qapp.processEvents()
+    assert window.session.channel("tcp-5020").running
+    drive(monkeypatch, NewProjectDialog, edit.BLANK)
+    window._new_project()
+    qapp.processEvents()
+    assert "[stopped] tcp-5020" in window.log_view.toPlainText()
+    assert not window.session.channel("tcp-5020")
+
+
+def test_points_added_to_an_s7_channel_land_on_fresh_bytes_and_serve_a_master(
+        make_window, monkeypatch, qapp):
+    """S7 那条路：新点落在**新字节**上（`word` 占 2 字节），真上位机读得到、写得进。
+
+    与 TCP 那条端到端同一个形状，只是换了传输：S7 的地址单位是字节、bool 才带位，
+    分配器与 validate 的按位重叠都要在这里对上（不然第二个点就会与第一个重叠）。
+    """
+    from pyS7 import S7Client
+
+    window = make_window()
+    port = free_port()
+    drive(monkeypatch, NewProjectDialog, "s7", first_edit="127.0.0.1",
+          second_edit=str(port))
+    window._new_project()
+    qapp.processEvents()
+    name = window.session.project.channels[0].name
+    window.tree.add_point_requested.emit(name, 1)
+    window.tree.add_point_requested.emit(name, 1)
+    qapp.processEvents()
+    device = edit.find_device(window.session.project, name, 1)
+    assert [(pt.area, pt.address, pt.datatype, pt.bit) for pt in device.points] == \
+        [("db1", 0, "word", None), ("db1", 2, "word", None), ("db1", 4, "word", None)]
+
+    window._start_all()
+    qapp.processEvents()
+    client = S7Client("127.0.0.1", rack=0, slot=1, port=port, timeout=3.0)
+    try:
+        client.connect()
+        assert client.read(["DB1,W0", "DB1,W2", "DB1,W4"]) == [0, 0, 0]
+        client.write(["DB1,W4"], [4711])
+        assert client.read(["DB1,W4"]) == [4711]
+    finally:
+        client.disconnect()
         window._stop_all()
         qapp.processEvents()

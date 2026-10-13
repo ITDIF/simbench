@@ -102,7 +102,10 @@ class ChannelForm(QtWidgets.QWidget):
         group = QtWidgets.QButtonGroup(self)
         group.setExclusive(True)
         for kind, caption in _KIND_LABELS:
-            if kind not in self._kinds and kind != edit.BLANK:
+            # 只摆调用方点名要的那几个：原来那句"或者就是 blank"写反了，结果是"添加通道"
+            # 对话框里也躺着一个"空白工程"按钮，点下去走到 `default_channel(project, "blank")`
+            # 报一句 `unknown transport '"'"'blank'"'"'`——用户看见的是个说不通的错
+            if kind not in self._kinds:
                 continue
             button = QtWidgets.QPushButton(caption)
             button.setCheckable(True)

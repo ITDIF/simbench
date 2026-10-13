@@ -249,7 +249,15 @@ class MainWindow(QtWidgets.QMainWindow):
         用模态清单打断连续动作，但清单仍要逐条进日志——带着旧错的工程改完还带着那些错，
         不写出来就等于假装干净了。
         """
+        # 换工程（新建 / 打开 / 导入）会把在跑的通道一起停掉——这是**故意的**（用户要换的
+        # 是整份工程，跟"为一个编辑停掉正在服务的另一路"不是一回事）。但不能静默：树上的
+        # ● 变 ○ 太容易被忽略，日志里必须有一行说清楚是谁被停了。
+        stopped = [name for name in self.session.channel_names()
+                   if (runtime := self.session.channel(name)) is not None
+                   and runtime.running]
         issues = self.session.load(project, source=path)
+        for name in stopped:
+            self._log(f"[stopped] {name}：换工程时停掉了这一路正在运行的服务")
         names = self.session.channel_names()
         self.tree.rebuild(project)
         if names:
@@ -313,6 +321,10 @@ class MainWindow(QtWidgets.QMainWindow):
             dialog = AddDeviceDialog(self, self.session.project, channel)
         except KeyError:
             self._log(f"[refused] 添加设备：{channel} 已经不在这份工程里了")
+            return
+        except edit.EditRefused as exc:
+            # 构造期就会算默认值（名字与 unit），算不出来时它抛的是这个（unit 用满 247 个）
+            self._show_refused("添加设备", exc.reasons)
             return
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return

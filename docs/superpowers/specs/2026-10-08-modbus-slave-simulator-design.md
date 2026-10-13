@@ -396,8 +396,8 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
      动作共用（原来只有关窗问，另外三个会静默丢改动——实测确认过的缺陷）。
   改动一律走"改 → 全量 `validate_project` → 与改前做差集 → 有新增 error 就整体回滚"，
   与通道面板、点位属性面板**同一条管线**（`simbench/project/edit.py`，判定一条都不在界面层）。
-  证据：`tests/test_edit.py`（30 条）、`tests/test_gui_new_project.py`（28 条，含"空白工程一路
-  建到真主站读得到"那条端到端）；界面合同（无 `QComboBox`、换类型几何恒定、被拒时面板不关）
+  证据：`tests/test_edit.py`（33 条）、`tests/test_gui_new_project.py`（34 条，含"空白工程一路
+  建到真主站读得到"与"S7 骨架加两个点再真上位机读写"两条端到端）；界面合同（无 `QComboBox`、换类型几何恒定、被拒时面板不关）
   在同一份里逐格量。
 
 ## 8. 错误处理
@@ -572,7 +572,7 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
    设备树与点位表的右键菜单、工具栏"新建工程"。顺手修了三条既有缺陷：**打开/导入/新建会静默
    丢掉未保存改动**、**切到空工程后点位表还留着上一份的行**、**新建的工程导不出 CSV**。
    验收：`tests/test_edit.py` 与 `tests/test_gui_new_project.py` 全绿（含"空白 → 加通道 →
-   加设备 → 加点位 → 起从站 → 真主站读写"的端到端）；全量串行 **1259 → 1320 passed**。
+   加设备 → 加点位 → 起从站 → 真主站读写"的端到端）；全量串行 **1259 → 1329 passed**。
    计划与偏离表在 `docs/superpowers/plans/2026-10-13-new-project.md`。
    不做：重命名通道/设备、点位进树的第三级、拖拽排序、撤销/重做、在跑的通道上增删。
 

@@ -130,8 +130,8 @@ class AddDeviceDialog(_EditDialog):
         self.unit_edit = QtWidgets.QLineEdit(str(edit.next_unit_id(channel)))
         self.unit_edit.setFixedWidth(_SHORT_WIDTH)
         self.unit_edit.setToolTip("unit id：同一通道内唯一，1..247")
-        for row, (caption, widget, tip) in enumerate((
-                ("设备名", self.name_edit, None), ("unit id", self.unit_edit, None))):
+        for row, (caption, widget) in enumerate((("设备名", self.name_edit),
+                                                 ("unit id", self.unit_edit))):
             label = QtWidgets.QLabel(caption)
             label.setFixedWidth(_LABEL_WIDTH)
             grid.addWidget(label, row, 0, QtCore.Qt.AlignTop)

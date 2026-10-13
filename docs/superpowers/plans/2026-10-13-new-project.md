@@ -144,9 +144,9 @@
 
 ## 5. 执行结果（实测，2026-10-13）
 
-- **全量串行 pytest：1259 → 1320 passed**（+30 `tests/test_edit.py`、+28
-  `tests/test_gui_new_project.py`，另有两处既有用例的文字断言按新菜单合同改过、导出那条拆成两条），
-  无 skip / xfail。
+- **全量串行 pytest：1259 → 1329 passed**（`tests/test_edit.py` 33 条、
+  `tests/test_gui_new_project.py` 34 条，另有两处既有用例的文字断言按新菜单合同改过、导出那条
+  拆成两条），无 skip / xfail。
 - **端到端那一条真的跑到了主站**：`test_a_project_built_from_scratch_serves_a_real_master`
   ——空白工程 → 加通道（临时空闲端口）→ 加设备 → 加点位 → 全部启动 → 真 `ModbusTcpClient`
   读 0、写 4242、读回 4242 → 停止。全程只点界面，没有"先手写一份 CSV"的绕路。
@@ -181,10 +181,10 @@
 
 ## 完成检查表
 
-- [x] Task 1–5 全部落地，`tests/test_edit.py`（30 条）与 `tests/test_gui_new_project.py`（28 条）全绿
+- [x] Task 1–5 全部落地，`tests/test_edit.py`（33 条）与 `tests/test_gui_new_project.py`（34 条）全绿
 - [x] 既有的界面合同只在**必须改**的地方改（点位表菜单多了两项 + 那两条文字断言），
       逐条写进下面的偏离表
-- [x] 全量串行 `.venv\Scripts\python.exe -m pytest` 全绿：**1259 → 1320**，只增不减
+- [x] 全量串行 `.venv\Scripts\python.exe -m pytest` 全绿：**1259 → 1329**，只增不减
 - [x] spec §2/§7/§11 与 README 回写
 - [x] 重新打包 + `packaging/smoke.py` 11 项不回归（见下方执行记录）
 - [x] `git status --short` 为空
@@ -212,3 +212,32 @@
 | 撤销 / 重做 | 与"关窗问一次"是两套记忆模型，单独一个里程碑 |
 | 在跑的通道上增删 | 会话没有"增量加一路"的 API（`reindex` 的文档明确不许对账通道集合）；先拒绝并点名 |
 | 修 §2 第 8 条那个 S7 同字节 bool 键冲突 | 要动 `_points` 的键与 `Row.key` 并连带一批信号/用例，是独立改动；本轮默认路径踩不到 |
+
+## 全面审查（2026-10-13，当轮发现并修复）
+
+交付后按"找缺陷"跑了一遍：读代码 + 拿探针验（不是拿用例当证据）。**七条**发现，其中三条是
+真缺陷（两条是本轮写的，一条是既有的、被本轮的使用方式照出来的），一条是潜在缺陷，三条是
+可读性/测试质量。全部当轮修掉并配了会红的用例。
+
+| # | 严重度 | 是什么 | 怎么发现的 | 修法与钉住它的用例 |
+|---|---|---|---|---|
+| B1 | **高（用户可见）** | **设备树右键菜单用错坐标系**：`itemAt()` 吃视口坐标而 `contextMenuEvent` 给控件坐标，少了 `viewport().mapFrom(...)` → 点通道行上半截**什么菜单都不弹**（实测第 0 行中心点映射回来是 `None`） | 拿探针把"第 0 行中心的控件坐标"喂给 `itemAt`，看它返回什么 | 补上 `mapFrom`（`point_table` 里同一句话早就写着）；`test_the_tree_menu_opens_for_the_row_under_the_cursor` 用替身事件按**视觉坐标**点每一行 |
+| B2 | **高（用户可见，既有）** | **设备行默认不显示**：`setExpanded(True)` 调在 `addTopLevelItem` **之前**，那是空操作 → 每条通道起来都是折叠的，设备行要人手点开（`visualItemRect(设备行)` 是空矩形） | 写 B1 的用例时发现"第 1 行根本不存在"，回头量 `isExpanded()` 是 `False` | 把 `setExpanded` 挪到插入之后；`test_the_channels_come_up_expanded_so_the_device_rows_are_visible` 用 `visualItemRect` 判"看得见"（不是 `childCount`——那个只能证明模型里有） |
+| B3 | 中（用户可见） | **"添加通道"里多一个"空白工程"按钮**：表单那句判断写反了（"不在 kinds 里**或者**就是 blank 就建按钮"），点下去得到 `unknown transport 'blank'` | 直接构造 `AddChannelDialog` 打印按钮组 | 判断改成"只摆点名要的"；`test_only_the_new_project_dialog_offers_a_blank_start` |
+| B4 | 低（潜在） | **地址上限不按跨度算**：`validate` 只看首地址，`65535` 上放一个占 4 格的点它不报；分配器原来也只判首格 | 抄一条"贴住上限"的设备去算下一格 | 占位判据改成"**末格**也要在范围内"（`span` 参数）；`test_the_ceiling_check_counts_the_whole_span_not_just_the_first_cell` |
+| B5 | 低（潜在） | **差集按集合比**：同一条错误行出现两次时（工程里本来就有两条同名通道，再加第三条），新来的那条会被当成旧的吞掉 → 加了不该加的 | 构造"已有两条同名通道"的工程再加第三条 | `_apply` 改成按**条数**比（`Counter`）；`test_the_diff_counts_repeats_so_a_third_duplicate_name_is_still_refused` |
+| B6 | 低（测试质量） | 一条新用例的失败模式是**挂住**：它靠护栏生效来避免真对话框弹出，护栏回归就会开一个模态框把用例卡死 | 读自己写的用例 | 把 `exec` 换成记录器，断言"压根没被打开"（失败从"卡住"变成"红一条"） |
+| B7 | 低（可读性） | `next_port` 拿 `ADDRESS_MAX` 当端口上限（两个 65535 合成一个常量）；`AddDeviceDialog` 里有个没人用的 `tip`；`_add_device` 只接 `KeyError`，而对话框构造期还可能抛 `EditRefused`（unit 用满 247 个） | grep 常量与构造函数 | 拆出 `PORT_MAX`、删掉那个变量、`_add_device` 两种都接 |
+
+顺带补的一条"不许静默"：**换工程停掉在跑的通道时日志里会有一行**
+（`[stopped] <通道名>：换工程时停掉了这一路正在运行的服务`）。原来树上 ● 变 ○ 之外一个字都
+没有——换工程本来就该停（用户要换的是整份工程），但不能让人只看见灯灭了。
+用例：`test_switching_projects_says_which_running_channel_it_stopped`。
+
+## 审查里**没**动的（另立里程碑）
+
+| 内容 | 为什么不在这轮动 |
+|---|---|
+| **S7 同字节 bool 点在会话索引里互相覆盖**（§2 第 8 条）：`_points` 的键是 `(area, address)`、`Row.key` 是四元组，都不带"位"，所以 `DBX6.2` 与 `DBX6.3` 同时存在时，界面双击改一个可能写进另一个 | 修它要动 `_points` 的键 + `Row.key` + `write`/`set_point`/`restore_waveform`/面板信号与一批用例，属于"改身份键"级别的改动，得单独出计划、单独定口径（本轮默认路径踩不到：新加的 bool 点落在**新字节**上；只有把属性面板里的位改到与邻居同字节才会撞上） |
+| `channel_panel` / `point_props` 那两处仍按**集合**比差集（`edit.py` 已改 `Counter`） | 它们比的是**字段**改动前后的清单，语义上不会出现"同一条错多一份"；改它们要改两个既有面板的行为，收益不抵风险。`edit.py` 那处是新增的集合型改动，形状不同，算法也就该不同（同一条口径的两种正确算法） |
+| "改动落地后必须走 `_after_edit`（它负责补回 `dirty`）"这条约定没有单独钉 | 现有用例已经在两条路上钉住了结果（`dirty is True`、标题带 `*`）；再加一条"约定测试"是重复。真正该做的是让 `Session` 自己拥有"编辑"这件事（本轮没动会话层的 API） |

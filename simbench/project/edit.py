@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from .model import (AREAS, BOOL, FLOAT32, S7_AREAS, S7_DEFAULTS, S7_MAX_DB,
                     S7_TYPE_BYTES, SERIAL_DEFAULTS, TcpChannel, UINT16, WORD_ABCD,
                     Device, Point, Project, S7Channel, SerialChannel, area_is_bit,
@@ -35,9 +37,13 @@ DEFAULT_S7_PORT = S7_DEFAULTS["port"]         # S7 的惯例端口就是 102（I
 # 口径：默认端口只对 TCP 是"从 5020 起"，S7 照惯例给 102。**不给 S7 加"1024 以下不行"的
 # 下界**：1024 以下是 Unix 的特权端口，Windows 上普通用户也能绑 102（现场就是这么用的），
 # 加一条下界会让 S7 通道默认跑到一个非标准端口上去。
-# Modbus 的裸协议地址上界（`validate._shape` 的那条）：分配时要连跨度一起算，
-# 因为 validate 只看首地址，`65535` 上放一个 4 寄存器的点它不报，真跑起来主站会读到越界。
+# Modbus 的裸协议地址上界（`validate._shape` 的那条）：分配时要连**跨度**一起算，
+# 因为 validate 只看首地址——`65535` 上放一个 4 寄存器的点它不报，真跑起来主站会读到越界。
+# 所以这里的判据是"新点的**末格**也要在范围内"，不是"首地址在范围内"。
 ADDRESS_MAX = 65535
+# 端口的上界与地址上界恰好都是 65535，但它们是两件事：合成一个常量，改端口范围时
+# 会顺手把地址范围也改掉。分开写，各自只有一处。
+PORT_MAX = 65535
 UNIT_MIN, UNIT_MAX = 1, 247
 
 
@@ -85,8 +91,8 @@ def next_port(project, start: int = DEFAULT_TCP_PORT) -> int:
     port = int(start)
     while port in used:
         port += 1
-    if port > ADDRESS_MAX:
-        raise EditRefused([f"no free port from {start} up"])
+    if port > PORT_MAX:
+        raise EditRefused([f"no free port from {start} up (past {PORT_MAX})"])
     return port
 
 
@@ -151,8 +157,8 @@ def _occupied_end(device, area: str, s7: bool) -> int:
     return end
 
 
-def next_point_address(device, area: str, s7: bool,
-                       bit_point: bool = False) -> tuple[int, int | None]:
+def next_point_address(device, area: str, s7: bool, bit_point: bool = False,
+                       span: int = 1) -> tuple[int, int | None]:
     """这个区里第一个不与现有点重叠的位置，回 `(address, bit)`。
 
     规则只有一条：取"已占末尾"当新点的起点。Modbus 的位区与寄存器区、S7 的字节与位
@@ -162,18 +168,34 @@ def next_point_address(device, area: str, s7: bool,
     `bit_point` 区分 S7 的两种落点：**bool 占一位**，可以落在任意位上；其余类型占整字节，
     必须落在字节起点（`validate` 的 `s7_bit` 明写"bit 只有 bool 点有"，给一个非 bool 点
     带上 bit 会被它拒掉——所以这里对非 bool 一律回 `bit=None`，并向上取整到下一个字节）。
+
+    `span` 是**新点要占几格**（与地址同一个单位：Modbus 是寄存器/位、S7 是字节）。判据是
+    "末格也要在范围内"：validate 只看首地址，`65535` 上放一个占 4 格的点它不报，真跑起来
+    主站会读到越界——分配这一层必须替它把住（今天界面只用跨度 1 的类型，但这是公开 API）。
     """
     end = _occupied_end(device, area, s7)
     if s7:
         address, bit = divmod(end, 8) if bit_point else ((end + 7) // 8, None)
-        if address > ADDRESS_MAX:
-            raise EditRefused([f"device {device.name}: area {area} is full "
-                               f"(next byte {address} is past {ADDRESS_MAX})"])
-        return address, bit
-    if end > ADDRESS_MAX:
+    else:
+        address, bit = end, None
+    last = address + max(int(span), 1) - 1
+    if last > ADDRESS_MAX:
         raise EditRefused([f"device {device.name}: area {area} is full "
-                           f"(next address {end} is past {ADDRESS_MAX})"])
-    return end, None
+                           f"(a {span}-wide point would reach {last}, past {ADDRESS_MAX})"])
+    return address, bit
+
+
+def _point_span(datatype: str, area: str, s7: bool) -> int:
+    """新点要占几格（单位与地址一致）。类型不认识时回 1：那份点会被 validate 拦下，
+    这里只要不算错格子、不把邻居顶掉就行。"""
+    try:
+        if s7:
+            return s7_span_bytes(datatype, "0")
+        if area_is_bit(area):
+            return 1
+        return register_span(datatype, "0")
+    except ValueError:
+        return 1
 
 
 def default_point(device, area: str, s7: bool, datatype: str | None = None) -> Point:
@@ -186,7 +208,8 @@ def default_point(device, area: str, s7: bool, datatype: str | None = None) -> P
     if datatype is None:
         datatype = BOOL if (not s7 and area_is_bit(area)) else ("word" if s7 else UINT16)
     bit_point = datatype == BOOL
-    address, bit = next_point_address(device, area, s7, bit_point=bit_point)
+    address, bit = next_point_address(device, area, s7, bit_point=bit_point,
+                                      span=_point_span(datatype, area, s7))
     return Point(name=next_point_name(device), area=area,
                  address=address, datatype=datatype,
                  initial="0", word_order=WORD_ABCD, bit=bit)
@@ -246,10 +269,26 @@ def new_project(transport: str, **values) -> Project:
 # ---------- 改动：改 → 验 → 差集 → 不行就回滚 ----------
 
 def _apply(project, mutate, undo) -> None:
-    """本文件唯一的管线（见模块头）。`mutate()` 就地改，`undo()` 把它撤回。"""
-    before = set(error_lines(validate_project(project)))
+    """本文件唯一的管线（见模块头）。`mutate()` 就地改，`undo()` 把它撤回。
+
+    `undo()` 在两条路上都会走：**验出新增错误**（正常的拒绝），以及**验的过程自己炸了**
+    （对象根本不是个通道之类，那是调用方的 bug）。后一条也要撤回——"抛出去的时候工程里
+    留着半成品"比抛本身更难查。
+
+    差集按**条数**比（`Counter`）而不是"有没有出现过"（集合）：校验的错误行是字符串，
+    同一句话可能出现两次（工程里本来就有两条同名通道、再加第三条），用集合比会把新来的
+    那一条当成旧的吞掉——那正是"加了不该加的"。`channel_panel`/`point_props` 那两处比的是
+    **字段**改动前后的清单，语义上不会出现"同一条错多一份"，所以它们仍用集合：不是两种口径，
+    是同一条口径在两个形状下的正确算法。
+    """
+    before = Counter(error_lines(validate_project(project)))
     mutate()
-    new = [line for line in error_lines(validate_project(project)) if line not in before]
+    try:
+        after = Counter(error_lines(validate_project(project)))
+    except Exception:
+        undo()
+        raise
+    new = list((after - before).elements())
     if new:
         undo()
         raise EditRefused(new)

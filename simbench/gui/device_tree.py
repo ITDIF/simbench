@@ -61,8 +61,13 @@ class DeviceTree(QtWidgets.QTreeWidget):
         for channel in project.channels:
             top = QtWidgets.QTreeWidgetItem([channel.name, _STATUS_MARK["stopped"]])
             top.setData(0, _ROLE_CHANNEL, channel.name)
-            top.setExpanded(True)
             self.addTopLevelItem(top)
+            # `setExpanded` 必须在**插进视图之后**调：在那之前这一项在视图里还不存在，
+            # 调用是个空操作。原来它调在 `addTopLevelItem` 前面，于是每一条通道起来都是
+            # 折叠的——设备行要人手点一下箭头才看得见（实测 `isExpanded()` 回来是 False，
+            # `visualItemRect(设备行)` 是空矩形）。界面合同里"左树两行通道/设备"说的就是
+            # 这个默认展开，所以它是缺陷，不是取舍。
+            top.setExpanded(True)
             self._items[channel.name] = top
             for device in channel.devices:
                 child = QtWidgets.QTreeWidgetItem(
@@ -97,7 +102,12 @@ class DeviceTree(QtWidgets.QTreeWidget):
         return [] if menu is None else menu.actions()
 
     def contextMenuEvent(self, event) -> None:                # noqa: N802
-        menu = self._menu_for(self.itemAt(event.pos()))
+        # `event.pos()` 是**控件**坐标，而 `itemAt` 吃的是**视口**坐标，中间必须过
+        # `mapFrom`：少了这一步，表头那 20 来像素的偏移会把命中位置整体下移——点通道行
+        # 的上半截什么都不会弹（实测：第 0 行的中心点落回去是 None）。`point_table` 里
+        # 同一句话早就写着，这一处是补上的。
+        menu = self._menu_for(
+            self.itemAt(self.viewport().mapFrom(self, event.pos())))
         if menu is None:
             event.ignore()
             return
