@@ -349,26 +349,31 @@ def add_point(project, channel_name: str, unit_id: int, point) -> None:
            lambda: device.points.remove(point))
 
 
-def find_point(device, area: str, address: int) -> Point:
-    """按区+地址找点位。**同一地址上有多个就直接拒**，不猜是哪一个。
+def find_point(device, area: str, address: int, bit: int | None = None) -> Point:
+    """按 区 + 地址 + **位** 找点位。身份里带位，所以同字节上的两个 S7 bool 分得开。
 
-    这一条只在 S7 上会真发生（`DBX6.2` 与 `DBX6.3` 同占一个字节是合法的，判定按位），
-    而界面这一层的身份键里还没有"位"（见本计划的 §2 第 8 条）。猜着删一个，现场丢的是
-    另一个点——那比"删不掉"难查得多，所以这里明说。
+    `bit=None` 时若同地址上不止一个点（S7 的 `DBX6.2` 与 `DBX6.3`），仍然拒——
+    调用方没给位就说明它不知道自己要点哪一个，猜着删一个、现场丢的是另一个点。
+    这条拒绝不是"这一层做不到"（现在做得到），是"你没告诉我哪个"。
     """
-    found = [pt for pt in device.points if pt.area == area and pt.address == address]
+    found = [pt for pt in device.points
+             if pt.area == area and pt.address == address and pt.bit == bit]
     if not found:
-        raise KeyError((area, address))
-    if len(found) > 1:
-        names = "/".join(pt.name for pt in found)
-        raise EditRefused([f"{area} {address}: {len(found)} points share this address "
-                           f"({names}); this build cannot tell them apart"])
+        if bit is None:
+            same_address = [pt for pt in device.points
+                            if pt.area == area and pt.address == address]
+            if same_address:
+                names = "/".join(pt.name for pt in same_address)
+                raise EditRefused([f"{area} {address}: {len(same_address)} points share "
+                                   f"this address ({names}); pass the bit to pick one"])
+        raise KeyError((area, address, bit))
     return found[0]
 
 
-def remove_point(project, channel_name: str, unit_id: int, area: str, address: int) -> None:
+def remove_point(project, channel_name: str, unit_id: int, area: str, address: int,
+                 bit: int | None = None) -> None:
     device = _find_device(_find_channel(project, channel_name), unit_id)
-    point = find_point(device, area, address)
+    point = find_point(device, area, address, bit)
     index = [device.points.index(point)]
     _apply(project, lambda: device.points.remove(point),
            lambda: device.points.insert(index[0], point))

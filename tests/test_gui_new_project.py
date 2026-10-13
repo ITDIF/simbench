@@ -270,14 +270,14 @@ def test_adding_a_point_lands_with_a_free_address_and_opens_the_properties(
     assert (added.name, added.area, added.address, added.datatype) == \
         ("点位1", "hr", 12, "uint16")
     assert "点位1" in rows(window)
-    assert no_modal_dialogs == [("tcp-5020", 11, "hr", 12)], "加完没打开属性面板"
+    assert no_modal_dialogs == [("tcp-5020", 11, "hr", 12, None)], "加完没打开属性面板"
     assert window.session.dirty is True
 
 
 def test_adding_a_point_from_the_table_uses_that_rows_device(make_window, qapp):
     """表上右键哪一行，就加到那一行的设备里（示例点表两台设备，unit 11 与 12）。"""
     window = make_window()
-    window.point_table.add_point_requested.emit(("tcp-5020", 12, "hr", 0))
+    window.point_table.add_point_requested.emit(("tcp-5020", 12, "hr", 0, None))
     qapp.processEvents()
     assert edit.find_device(window.session.project, "tcp-5020", 12).points[-1].name == "点位1"
     assert len(edit.find_device(window.session.project, "tcp-5020", 11).points) == 8
@@ -306,7 +306,7 @@ def test_removing_a_point_asks_first_and_does_nothing_when_declined(
     window = make_window()
     before = copy.deepcopy(window.session.project)
     answer(monkeypatch, QtWidgets.QMessageBox.No)
-    window.point_table.remove_point_requested.emit(("tcp-5020", 11, "hr", 4))
+    window.point_table.remove_point_requested.emit(("tcp-5020", 11, "hr", 4, None))
     qapp.processEvents()
     assert window.session.project == before
     assert "风机状态" in rows(window)
@@ -316,7 +316,7 @@ def test_removing_a_point_asks_first_and_does_nothing_when_declined(
 def test_removing_a_point_takes_exactly_that_row(make_window, monkeypatch, qapp):
     window = make_window()
     answer(monkeypatch, QtWidgets.QMessageBox.Yes)
-    window.point_table.remove_point_requested.emit(("tcp-5020", 11, "hr", 4))
+    window.point_table.remove_point_requested.emit(("tcp-5020", 11, "hr", 4, None))
     qapp.processEvents()
     assert "风机状态" not in rows(window)
     assert "CO浓度" in rows(window)

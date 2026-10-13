@@ -105,7 +105,9 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self._session = getattr(parent, "session", None)
         if self._session is None:
             raise ValueError("the properties panel needs a parent that exposes .session")
-        self._key = key                              # 与 `Row.key` 同源的四元组
+        # 与 `Row.key` 同源的五元组：(通道, unit, 区, 地址, 位)。最后那位只有 S7 的 bool
+        # 非 None——同字节上的两个 bool 是两个点，身份里不带位就会打开/改错那一个。
+        self._key = key
         self._project = project
         self._real = _find_point(project, key)       # 工程本体：只有 apply 成功才落到它身上
         self._point: Point | None = copy.deepcopy(self._real)
@@ -482,7 +484,7 @@ def _restore_name(line: str, new_name: str, old_name: str) -> str:
 
 
 def _find_point(project, key: tuple) -> Point:
-    channel_name, unit_id, area, address = key
+    channel_name, unit_id, area, address, bit = key
     for ch in project.channels:
         if ch.name != channel_name:
             continue
@@ -490,6 +492,7 @@ def _find_point(project, key: tuple) -> Point:
             if dev.unit_id != unit_id:
                 continue
             for pt in dev.points:
-                if pt.area == area and pt.address == address:
+                if pt.area == area and pt.address == address and pt.bit == bit:
                     return pt
-    raise KeyError(f"点位 {channel_name}/{unit_id}/{area} {address} 不在当前点表")
+    raise KeyError(f"点位 {channel_name}/{unit_id}/{area} {address}"
+                   + (f".{bit}" if bit is not None else "") + " 不在当前点表")

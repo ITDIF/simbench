@@ -333,7 +333,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _add_point(self, key: tuple) -> None:
         """点位表右键"添加点位…"：落在**右键那一行所属的设备**上。"""
-        channel, unit_id, _area, _address = key
+        channel, unit_id, _area, _address, _bit = key
         self._create_point(channel, unit_id)
 
     def _add_point_to_device(self, channel: str, unit_id: int) -> None:
@@ -363,7 +363,7 @@ class MainWindow(QtWidgets.QMainWindow):
                       f"已经不在这份工程里了")
             return
         self._after_edit(f"已添加点位 {point.name}（{channel} unit {unit_id}）")
-        self._show_point_props((channel, unit_id, point.area, point.address))
+        self._show_point_props((channel, unit_id, point.area, point.address, point.bit))
 
     def _remove_channel(self, channel: str) -> None:
         if self._guard_running(self.session.channel_names()):
@@ -401,7 +401,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._after_edit(f"已删除设备 {device.name}（{channel} unit {unit_id}）")
 
     def _remove_point(self, key: tuple) -> None:
-        channel, unit_id, area, address = key
+        channel, unit_id, area, address, bit = key
         if self._guard_running([channel]):
             return
         try:
@@ -411,7 +411,7 @@ class MainWindow(QtWidgets.QMainWindow):
                       f"已经不在这份工程里了")
             return
         try:
-            point = edit.find_point(device, area, address)
+            point = edit.find_point(device, area, address, bit)
         except edit.EditRefused as exc:
             self._show_refused("删除点位", exc.reasons)
             return
@@ -425,7 +425,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._edit_call(f"删除点位 {point.name}",
                            lambda: edit.remove_point(self.session.project, channel,
-                                                     unit_id, area, address)):
+                                                     unit_id, area, address, bit)):
             self._after_edit(f"已删除点位 {point.name}（{channel} unit {unit_id}）")
 
     # ---------- 结构性改动共用的几步 ----------
@@ -642,8 +642,8 @@ class MainWindow(QtWidgets.QMainWindow):
         计数只在**真还回去过东西**之后说：没恢复成还说"还剩 N 处"，那一行明明仍 `已停`，
         状态栏就成了说谎的那个人。
         """
-        channel, unit_id, area, address = key
-        if not self.session.restore_waveform(channel, unit_id, area, address):
+        channel, unit_id, area, address, bit = key
+        if not self.session.restore_waveform(channel, unit_id, area, address, bit):
             return
         remaining = self.session.manual_count(channel)
         self.status.showMessage(

@@ -16,10 +16,14 @@ from .events import PacketEvent
 
 @dataclass
 class SourceStore:
-    _manual: set[tuple[str, int, str, int]] = field(default_factory=set)
+    # 键里的最后一位是 S7 的**位**（`DBX6.2` 的那个 2）：同一字节上放两个 bool 点是 S7 的
+    # 常规用法（判定按位，见 `validate._s7_overlap`），而归位的单位是**点位**（spec §7）——
+    # 不带位的话，写其中一个会让两个都显示"已停"，那不是保守，是错的。
+    # Modbus 的点恒为 `None`（那里的"位"就是地址，一个位一个地址）。
+    _manual: set[tuple[str, int, str, int, int | None]] = field(default_factory=set)
 
     def own(self, channel: str, unit_id: int, area: str, address: int,
-            count: int = 1, who: str = "gui") -> None:
+            count: int = 1, who: str = "gui", bit: int | None = None) -> None:
         """把 `[address, address+count)` 这一段标成 manual。
 
         key 存的是**寄存器/位地址**而不是点位：本模块没有点表，`write_targets` 给出的也
@@ -35,15 +39,19 @@ class SourceStore:
         "平台下发被波形顶回去"那次事故，多标顶多多一次"已停"，一次 `restore` 就回得来。
         报文那一路轮不到它兜（qty=0 的坏帧已被 `write_targets` 判掉，见
         `test_a_quantity_of_zero_is_not_a_write`），它兜的是调用方自己把跨度算成 0 的手滑。
+        `bit` 只作用在**基础地址**那一个上，后面的偏移一律不带位：只有 S7 的 bool 需要它
+        （`span_of` 给它 1），而 Modbus 的点恒是 `None`。
         """
         for offset in range(max(1, int(count))):
-            self._manual.add((channel, unit_id, area, address + offset))
+            self._manual.add((channel, unit_id, area, address + offset,
+                              bit if offset == 0 else None))
 
-    def is_waveform(self, channel: str, unit_id: int, area: str, address: int) -> bool:
-        return (channel, unit_id, area, address) not in self._manual
+    def is_waveform(self, channel: str, unit_id: int, area: str, address: int,
+                    bit: int | None = None) -> bool:
+        return (channel, unit_id, area, address, bit) not in self._manual
 
     def restore(self, channel: str, unit_id: int, area: str, address: int,
-                count: int = 1) -> bool:
+                count: int = 1, bit: int | None = None) -> bool:
         """把 `[address, address+count)` 这一段还给波形；这一段里原本有 manual 就返回 True。
 
         `count` 要与当初 `own` 给的那一段一致（默认 1，单寄存器点照旧一个参数就够）。
@@ -54,7 +62,8 @@ class SourceStore:
         一段里一个都没接管过时返回 False，调用方才好在日志里说"没恢复过什么"。
         `count <= 0` 与 `own` 同样钳到 1。
         """
-        span = {(channel, unit_id, area, address + offset)
+        span = {(channel, unit_id, area, address + offset,
+                 bit if offset == 0 else None)
                 for offset in range(max(1, int(count)))}
         handed_back = span & self._manual
         self._manual -= handed_back

@@ -475,7 +475,7 @@ def test_the_properties_action_opens_the_panel_built_for_that_row(make_window, q
     monkeypatch.setattr(main_window_module, "PointPropertiesDialog", Stub)
     row = row_of(window, "风机状态")
     window.point_table.row_menu_actions(row)[1].trigger()
-    assert opened == [("tcp-5020", 11, "hr", 4)]
+    assert opened == [("tcp-5020", 11, "hr", 4, None)]
     assert not window.session.dirty
     assert "已改" not in window.status.currentMessage()
 
@@ -541,7 +541,7 @@ def test_properties_for_a_row_that_vanished_says_so_instead_of_crashing(make_win
                                                                         qapp):
     """菜单建好与打开面板之间行没了（换工程的瞬间）：槽函数不许炸，给一句人话。"""
     window = make_window()
-    window._show_point_props(("tcp-5020", 11, "hr", 999))
+    window._show_point_props(("tcp-5020", 11, "hr", 999, None))
     assert "不在当前点表" in window.status.currentMessage()
     assert "属性面板" in window.status.currentMessage()
 

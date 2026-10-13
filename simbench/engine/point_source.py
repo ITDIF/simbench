@@ -24,7 +24,7 @@ class PointSource(Protocol):
     def rows(self, channel: str) -> list[Row]: ...
 
     def write(self, channel: str, unit_id: int, area: str, address: int,
-              text: str) -> tuple[bool, str]: ...
+              text: str, bit: int | None = None) -> tuple[bool, str]: ...
 
 
 def session_source(session: Session) -> PointSource:
@@ -69,10 +69,10 @@ class FakeEngine:
             out.append(_with_value(row, text) if text is not None else row)
         return out
 
-    def write(self, channel, unit_id, area, address, text):
+    def write(self, channel, unit_id, area, address, text, bit=None):
         row = next((r for r in self._rows if r.channel == channel
                     and r.unit_id == unit_id and r.area == area
-                    and r.address == address), None)
+                    and r.address == address and r.bit == bit), None)
         if row is None:
             # 与 Session.set_point 同一句式：不在点表里就这一句，不许换成 traceback
             return (False, f"{area} address {address} is not in the point table")
@@ -80,7 +80,11 @@ class FakeEngine:
             encode(text, row.datatype, row.word_order)
         except ValueError as exc:
             return (False, str(exc))          # 文案原样交给模型，点位名在那里统一加
-        self.writes.append((channel, unit_id, area, address, text))
+        # 记录里带上 `bit`：替身与真 `Session` 必须分得开同字节上的两个 S7 bool，
+        # 否则"写错那一行"这类缺陷在替身这一层永远测不出来。
+        self.writes.append((channel, unit_id, area, address, text, bit))
+        # `values` 这份注入表仍按四元组（替身的行都是 Modbus，`bit` 恒为 None）；
+        # 要按位注入的场景走真 Session 的用例。
         self.values[(channel, unit_id, area, address)] = text
         return (True, "")
 

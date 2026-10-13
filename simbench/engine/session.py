@@ -82,10 +82,15 @@ class Row:
     waveform: str
     stale: bool = False
     source: str = "waveform"
+    # S7 的位（`DBX6.2` 里的 2）：**身份的一部分**，放最后一位且带默认值——`Row` 的字段
+    # 顺序是位置参数契约（`FakeEngine` 与一批用例按位置构造），插在前面会把 `readonly`
+    # 与 `waveform` 串成一列看着合法的错值。Modbus 的点恒为 None。
+    bit: int | None = None
 
     @property
-    def key(self) -> tuple[str, int, str, int]:
-        return (self.channel, self.unit_id, self.area, self.address)
+    def key(self) -> tuple[str, int, str, int, int | None]:
+        """点位身份：同字节上的两个 S7 bool 是**两个**身份（带位才分得开）。"""
+        return (self.channel, self.unit_id, self.area, self.address, self.bit)
 
 
 @dataclass
@@ -381,7 +386,7 @@ class Session:
             out.append(Row(channel, device, unit_id, pt.name, pt.area, pt.address,
                            pt.datatype, pt.word_order, value_text, registers,
                            pt.readonly, pt.waveform, stale=failed and running,
-                           source=_source_of(backend, unit_id, pt, s7)))
+                           source=_source_of(backend, unit_id, pt, s7), bit=pt.bit))
         return out
 
     def manual_count(self, channel: str) -> int:
@@ -404,10 +409,10 @@ class Session:
         key = 0 if self._is_s7(channel) else None
         return sum(1 for unit_id, _device, pt in meta
                    if not backend.source_is_waveform(key if key is not None else unit_id,
-                                                     pt.area, pt.address))
+                                                     pt.area, pt.address, bit=pt.bit))
 
     def restore_waveform(self, channel: str, unit_id: int, area: str,
-                         address: int) -> bool:
+                         address: int, bit: int | None = None) -> bool:
         """把一个人工接管的点交还给波形，返回"真还回去过东西没有"。
 
         签名里只有**基础地址**，跨度在这里自己算：`Session` 手里有摊平的点表，取出该点的
@@ -420,7 +425,7 @@ class Session:
         静默把值交还波形等于操作员看不见发生了什么。
         """
         runtime, _ = self._require(channel)
-        pt = self._points.get((channel, unit_id), {}).get((area, address))
+        pt = self._points.get((channel, unit_id), {}).get((area, address, bit))
         if pt is None:
             self.publish_log("warning",
                              f"{area} address {address} (unit {unit_id}) on channel "
@@ -439,7 +444,7 @@ class Session:
         span = _span_of(pt, s7)
         try:
             restored = self._runner.call(
-                lambda: _arestore(runtime.backend, key, area, address, span),
+                lambda: _arestore(runtime.backend, key, area, address, span, bit),
                 _WRITE_TIMEOUT,
                 f"restore waveform {area} {address} (unit {unit_id})")
         except Exception as exc:                    # noqa: BLE001
@@ -460,18 +465,18 @@ class Session:
         return bool(restored)
 
     def write(self, channel: str, unit_id: int, area: str, address: int,
-              text: str) -> tuple[bool, str]:
+              text: str, bit: int | None = None) -> tuple[bool, str]:
         """点位表模型（`gui/point_table`）用的写入口：只把 `WriteResult` 收成二元组。
 
         判定与错误文案全部留在 `set_point`/codec 那一份里——GUI 抄一套自己的话术，
         同一件错在现场就有两种说法。要 `value_text`/`registers` 的调用方直接用
         `set_point`。
         """
-        res = self.set_point(channel, unit_id, area, address, text)
+        res = self.set_point(channel, unit_id, area, address, text, bit)
         return (res.ok, res.error)
 
     def set_point(self, channel: str, unit_id: int, area: str, address: int,
-                  text: str) -> WriteResult:
+                  text: str, bit: int | None = None) -> WriteResult:
         """改一个点的值。类型不符/越界/超出点位跨度一律拒绝且不落寄存器。
 
         引擎写只读点是允许的（M1 定的口径：readonly 是"挡主站"的墙），
@@ -484,9 +489,9 @@ class Session:
         runtime, _ = self._require(channel)
         if not runtime.running or runtime.backend is None:
             return WriteResult(False, f"channel {channel} is not running")
-        pt = self._points.get((channel, unit_id), {}).get((area, address))
+        pt = self._points.get((channel, unit_id), {}).get((area, address, bit))
         if pt is None:
-            # 不在点表（含未知 area、未知 unit、越界地址）一律在这里挡住：
+            # 不在点表（含未知 area、未知 unit、越界地址、对不上的位）一律在这里挡住：
             # 放进 backend 就会变成 `unknown area 'xx'` 那种像模拟器 bug 的话。
             return WriteResult(False, f"{area} address {address} is not in the point table")
         s7 = self._is_s7(channel)
@@ -672,7 +677,8 @@ class Session:
             for dev in ch.devices:
                 bucket = self._points.setdefault((ch.name, dev.unit_id), {})
                 for p in dev.points:
-                    bucket[(p.area, p.address)] = p
+                    # 键里带 `bit`：同字节上的两个 S7 bool 是两个点，不带位会互相覆盖
+                    bucket[(p.area, p.address, p.bit)] = p
                     self._rows_meta[ch.name].append((dev.unit_id, dev.name, p))
 
     def _stop_all_locked(self) -> list[ChannelRuntime]:
@@ -751,8 +757,8 @@ def _source_of(backend, unit_id: int, pt: Point, s7: bool = False) -> str:
     if backend is None:
         return "waveform"
     key = 0 if s7 else unit_id          # S7 的归属键固定 0（见 `manual_count` 的注释）
-    return "waveform" if backend.source_is_waveform(key, pt.area, pt.address) \
-        else "manual"
+    return "waveform" if backend.source_is_waveform(key, pt.area, pt.address,
+                                                    bit=pt.bit) else "manual"
 
 
 def _render(pt: Point, regs: list[int] | None,
@@ -806,7 +812,8 @@ async def _awrite_s7(backend, pt, raw):
     ok = backend.write_point_bytes(pt, raw)
     if ok:
         backend.mark_manual(0, pt.area, pt.address,
-                            count=s7_span_bytes(pt.datatype, pt.initial), who="gui")
+                            count=s7_span_bytes(pt.datatype, pt.initial),
+                            who="gui", bit=pt.bit)
     return ok
 
 
@@ -818,8 +825,8 @@ async def _awrite_bits(backend, unit_id, area, address, value):
     return ok
 
 
-async def _arestore(backend, unit_id, area, address, count):
+async def _arestore(backend, unit_id, area, address, count, bit=None):
     """把整点的跨度交还波形。`runner.call` 只收协程，所以和上面两个同一个形状；
     状态改动仍然全部发生在 loop 线程，主线程只是等一句"还真回去没有"。
     """
-    return backend.restore_waveform(unit_id, area, address, count=count)
+    return backend.restore_waveform(unit_id, area, address, count=count, bit=bit)

@@ -159,7 +159,7 @@ def test_the_properties_dialog_offers_s7_areas_and_types(qapp, engine):
         Device("D1", 11, [point("出口温度", "db3", 0, "real")])])])
     engine.load(project)
     host = _Host(engine)                 # 引用要留着：父窗口被回收时对话框会跟着没
-    dialog = PointPropertiesDialog(host, project, ("s7-1", 11, "db3", 0))
+    dialog = PointPropertiesDialog(host, project, ("s7-1", 11, "db3", 0, None))
     try:
         # `_radios` 回的是"值 -> 按钮"的字典（M4 的形状），键就是选项名
         areas = list(dialog.area_buttons)
@@ -178,7 +178,7 @@ def test_the_properties_dialog_keeps_modbus_options_for_modbus_points(qapp, engi
         Device("D1", 11, [point("温度", "hr", 0, "uint16", "1")])])])
     engine.load(project)
     host = _Host(engine)
-    dialog = PointPropertiesDialog(host, project, ("tcp-1", 11, "hr", 0))
+    dialog = PointPropertiesDialog(host, project, ("tcp-1", 11, "hr", 0, None))
     try:
         assert list(dialog.area_buttons) == ["co", "di", "hr", "ir"]
         assert "uint16" in list(dialog.datatype_buttons)
@@ -186,3 +186,24 @@ def test_the_properties_dialog_keeps_modbus_options_for_modbus_points(qapp, engi
         dialog.deleteLater()
         host.deleteLater()
         qapp.processEvents()
+
+
+def test_the_properties_panel_edits_the_bit_that_was_asked_for(qapp, engine):
+    """同字节上的两个 bool 是两个点：面板按身份（带位）取本体，改的是**那一行**。
+
+    不带位取本体的话，这里改的是 `_find_point` 先找到的那一个——现场表现是"改甲，乙变了"。
+    """
+    project = Project(channels=[S7Channel("s7-1", devices=[
+        Device("D1", 11, [point("起", "db1", 6, "bool", "false", bit=2),
+                          point("停", "db1", 6, "bool", "false", bit=3)])])])
+    engine.load(project)
+    host = _Host(engine)
+    dialog = PointPropertiesDialog(host, project, ("s7-1", 11, "db1", 6, 3))
+    try:
+        assert dialog.point.name == "停"
+        dialog.name_edit.setText("停止位")
+        assert dialog.apply() is True
+    finally:
+        dialog.deleteLater()
+    names = [pt.name for pt in project.channels[0].devices[0].points]
+    assert names == ["起", "停止位"], names

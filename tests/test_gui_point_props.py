@@ -34,7 +34,7 @@ from tests.conftest import free_port
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
-KEY = ("tcp-5020", 11, "hr", 4)          # 状态字：可写、uint16、邻居是 5 上的 uint64
+KEY = ("tcp-5020", 11, "hr", 4, None)   # 身份五元组：最后那位是 S7 的位（Modbus 恒 None）
 NAME = "风机状态"
 VALUE_COLUMN = 6                          # gui/point_table.COLUMNS 里的"当前值"
 ADDRESS_COLUMN = 2                        # 同一张表里的"地址"
@@ -59,8 +59,12 @@ def window(qapp, engine_runner):
 
 
 def real_point(project, key):
-    """按 `(channel, unit_id, area, address)` 取工程里**正在被索引**的那个 Point 对象。"""
-    channel, unit_id, area, address = key
+    """按 `(channel, unit_id, area, address, bit)` 取工程里**正在被索引**的那个 Point 对象。
+
+    与 `Row.key` / `PointPropertiesDialog._find_point` 同一份身份：最后那位是 S7 的位
+    （Modbus 恒 None），不带它就会取到同字节上的邻居。
+    """
+    channel, unit_id, area, address, bit = key
     for ch in project.channels:
         if ch.name != channel:
             continue
@@ -68,7 +72,7 @@ def real_point(project, key):
             if dev.unit_id != unit_id:
                 continue
             for pt in dev.points:
-                if pt.area == area and pt.address == address:
+                if pt.area == area and pt.address == address and pt.bit == bit:
                     return pt
     raise AssertionError(f"point {key} is not in the project")
 
@@ -196,7 +200,7 @@ def test_a_structural_apply_with_nothing_running_lands_in_project_and_write_inde
     dialog.address_edit.setText("20")
     assert dialog.apply() is True
     assert dialog.applied == {"address": 20}
-    assert real_point(project, ("tcp-5020", 11, "hr", 20)).name == NAME
+    assert real_point(project, ("tcp-5020", 11, "hr", 20, None)).name == NAME
     assert window.session.dirty is True
     window.session.start_channel("tcp-5020")
     window.point_model.refresh()
@@ -254,14 +258,14 @@ def test_live_safe_fields_apply_while_the_channel_runs_without_reloading(qapp, w
         "live 安全改动走了整会话重载：把正在服务网关的通道停了"
     assert real_point(project, KEY).name == "风机状态B"
 
-    dialog2 = PointPropertiesDialog(window, project, ("tcp-5020", 11, "hr", 4))
+    dialog2 = PointPropertiesDialog(window, project, ("tcp-5020", 11, "hr", 4, None))
     dialog2.pick_waveform("ramp")
     dialog2.wave_param_edit.setText("from=0;to=10;speed=2")
     assert dialog2.apply() is True
     assert dialog2.applied == {"waveform": "ramp", "wave_param":
                                {"from": "0", "to": "10", "speed": "2"}}
     assert window.session.channel("tcp-5020").running
-    assert real_point(project, ("tcp-5020", 11, "hr", 4)).waveform == "ramp"
+    assert real_point(project, ("tcp-5020", 11, "hr", 4, None)).waveform == "ramp"
     assert window.session.dirty is True
 
 
@@ -450,7 +454,7 @@ def test_a_row_with_an_unknown_area_opens_and_stays_an_error(qapp, window):
     validator 那一份判定一字不动：这一行仍然是错，面板只是不再崩在 `no option is checked`。
     """
     project = load_dirty(window, KEY, area="holding")
-    dialog = PointPropertiesDialog(window, project, ("tcp-5020", 11, "holding", 4))
+    dialog = PointPropertiesDialog(window, project, ("tcp-5020", 11, "holding", 4, None))
     assert [n for n, b in dialog.area_buttons.items() if b.isChecked()] == ["holding"]
     assert dialog.convention_label.text() == "—", "未知区名算不出惯例地址，也不许猜一个前缀"
     joined = "\n".join(error_lines(validate_project(project)))
@@ -496,7 +500,7 @@ def test_opening_the_panel_for_a_dirty_row_does_not_escape_the_slot(qapp, window
     """
     load_dirty(window, KEY, area="holding")
     opened = panel_from_the_slot(monkeypatch)
-    window._show_point_props(("tcp-5020", 11, "holding", 4))
+    window._show_point_props(("tcp-5020", 11, "holding", 4, None))
     assert len(opened) == 1, "面板没建起来：构造路上的异常还是从槽里逃出去了"
     assert opened[0].area_buttons["holding"].isChecked()
     assert "不在当前点表" not in window.status.currentMessage()
@@ -536,19 +540,19 @@ def test_renaming_a_point_does_not_rewrite_its_neighbour_into_a_new_error(qapp, 
     两个点被同一条引用互相锁死。归一化只作用于差集比较，清单本身一个字没改。
     """
     project = window.session.project
-    real_point(project, ("tcp-5020", 11, "hr", 9)).address = 7   # 铭牌 落进 累计电量 的格子里
+    real_point(project, ("tcp-5020", 11, "hr", 9, None)).address = 7   # 铭牌 落进 累计电量 的格子里
     window.session.load(project)
     before = "\n".join(error_lines(validate_project(project)))
     assert "already used by 累计电量" in before, before
-    dialog = PointPropertiesDialog(window, project, ("tcp-5020", 11, "hr", 5))
+    dialog = PointPropertiesDialog(window, project, ("tcp-5020", 11, "hr", 5, None))
     dialog.name_edit.setText("累计电量B")
     assert dialog.apply() is True, "改名被邻居那条引用了自己旧名的消息挡住了"
     joined = "\n".join(error_lines(validate_project(project)))
     assert "already used by 累计电量B" in joined, joined
-    dialog2 = PointPropertiesDialog(window, project, ("tcp-5020", 11, "hr", 7))
+    dialog2 = PointPropertiesDialog(window, project, ("tcp-5020", 11, "hr", 7, None))
     dialog2.name_edit.setText("铭牌B")
     assert dialog2.apply() is True, "邻居改完名之后，自己的名字也改不动了"
-    assert real_point(project, ("tcp-5020", 11, "hr", 7)).name == "铭牌B"
+    assert real_point(project, ("tcp-5020", 11, "hr", 7, None)).name == "铭牌B"
 
 
 def test_a_rename_that_also_creates_a_real_collision_is_still_refused(qapp, window):

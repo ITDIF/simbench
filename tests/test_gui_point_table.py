@@ -217,7 +217,7 @@ def test_edit_writes_through_the_engine(model, engine):
     r = row_of(model, "风机状态")
     assert model.setData(model.index(r, 6), "37") is True
     assert model.index(r, 6).data() == "37"
-    assert engine.writes == [("tcp-5020", 11, "hr", 4, "37")]
+    assert engine.writes == [("tcp-5020", 11, "hr", 4, "37", None)]
 
 
 def test_bad_edit_is_refused_and_keeps_the_old_text(model):
@@ -254,7 +254,7 @@ def test_noop_edit_does_not_emit_dataChanged(model):
 def test_a_edit_with_surrounding_spaces_is_stripped_before_writing(model, engine):
     r = row_of(model, "风机状态")
     assert model.setData(model.index(r, 6), "  37  ") is True
-    assert engine.writes == [("tcp-5020", 11, "hr", 4, "37")]
+    assert engine.writes == [("tcp-5020", 11, "hr", 4, "37", None)]
 
 
 # ---------- 刷新 ----------
@@ -501,7 +501,7 @@ def test_the_row_menu_carries_the_point_name_and_greys_out_the_wrong_rows(qapp):
     """
     view = _menu_view(qapp, [_row("曲线在跑", "1", waveform="sine"),
                              _row("人工改过", "2", source="manual")])
-    assert view.row_key(0) == ("tcp-5020", 11, "hr", 0)
+    assert view.row_key(0) == ("tcp-5020", 11, "hr", 0, None)
     assert view.row_key(9) is None
     # 四项：交还波形、属性、加点位、删这一个点位（后两项是"从零搭工程"那一步加的）
     assert [a.text() for a in view.row_menu_actions(0)] == \
@@ -570,7 +570,7 @@ def test_triggering_the_row_action_hands_back_that_rows_point(qapp):
     got: list[tuple] = []
     view.restore_requested.connect(got.append)
     view.row_menu_actions(0)[0].trigger()
-    assert got == [view.row_key(0)] == [("tcp-5020", 11, "hr", 4)]
+    assert got == [view.row_key(0)] == [("tcp-5020", 11, "hr", 4, None)]
 
 
 def test_the_properties_item_carries_the_identity_of_its_own_row(qapp):
@@ -588,7 +588,7 @@ def test_the_properties_item_carries_the_identity_of_its_own_row(qapp):
     view.props_requested.connect(got.append)
     view.row_menu_actions(0)[1].trigger()
     view.row_menu_actions(1)[1].trigger()
-    assert got == [("tcp-5020", 11, "hr", 0), ("tcp-5020", 12, "co", 3)]
+    assert got == [("tcp-5020", 11, "hr", 0, None), ("tcp-5020", 12, "co", 3, None)]
 
 
 def test_a_greyed_item_stays_inert_when_triggered(qapp):
@@ -618,7 +618,7 @@ def test_the_add_point_item_tells_the_caller_which_device_is_under_the_cursor(qa
     got: list[tuple] = []
     view.add_point_requested.connect(got.append)
     view.row_menu_actions(1)[2].trigger()
-    assert got == [("tcp-5020", 12, "co", 3)]
+    assert got == [("tcp-5020", 12, "co", 3, None)]
 
 
 def test_the_remove_point_item_names_the_row_it_would_delete(qapp):
@@ -632,4 +632,4 @@ def test_the_remove_point_item_names_the_row_it_would_delete(qapp):
     view.remove_point_requested.connect(got.append)
     assert view.row_menu_actions(1)[3].text() == "删除点位：乙…"
     view.row_menu_actions(0)[3].trigger()
-    assert got == [("tcp-5020", 11, "hr", 0)]
+    assert got == [("tcp-5020", 11, "hr", 0, None)]

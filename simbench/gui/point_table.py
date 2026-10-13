@@ -179,7 +179,7 @@ class PointTableModel(QtCore.QAbstractTableModel):
         if text == row.value_text:
             return False                      # 没变就别惊动视图
         ok, error = self._source.write(row.channel, row.unit_id, row.area,
-                                       row.address, text)
+                                       row.address, text, row.bit)
         # 点位名在这里加，只加一次：数据源（真 Session 与替身）给的文案是同一份句式，
         # 界面再套一层"是哪一行"，现场靠这个名字认屏幕上哪一格被拒了。
         self.last_error = "" if ok else f"{row.name}: {error}"
@@ -220,7 +220,8 @@ class PointTableView(QtWidgets.QTableView):
     因为一次只可能恢复右键的那一行，操作员不需要在弹层里再认一次地址。
 
     "加点位"落在**这一行所属的设备**上（表是按通道看的，行里带 unit），"删点位"删的就是
-    右键的这一行；两个都以 `Row.key` 交出去，跟另外两项同一份身份。
+    右键的这一行；两个都以 `Row.key` 交出去，跟另外两项同一份身份（五元组，最后那位是
+    S7 的"位"——同字节上的两个 bool 是两个点）。
     """
 
     restore_requested = QtCore.Signal(tuple)      # payload = 那一行的 `Row.key`

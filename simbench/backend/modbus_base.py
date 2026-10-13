@@ -453,8 +453,11 @@ class ModbusBackendBase:
                 continue
             span = span_of(pt)
             if pt.address < address + count and address < pt.address + span:
+                # `pt.bit` 一起交下去：S7 的同字节 bool 是两个点（判据见 `SourceStore`）。
+                # 事件只给**字节**范围，所以同字节里另一个 bool 也会被标上——这是既有的
+                # S7 口径"宁可多标一个"（一次恢复就回来），不是这里算错。
                 self._sources.own(self.channel_name, key, area, pt.address,
-                                  count=span, who="master")
+                                  count=span, who="master", bit=pt.bit)
 
     def _emit(self, level: str, kind: str, key: tuple, text: str,
               now: float) -> None:
@@ -517,26 +520,32 @@ class ModbusBackendBase:
                    f"{type(exc).__name__}: {exc}", now)
 
     def mark_manual(self, unit_id: int, area: str, address: int,
-                    count: int = 1, who: str = "gui") -> None:
-        """把一段地址标成"人工接管"。**只能在 loop 线程调**（`Session` 经 runner.call）。"""
+                    count: int = 1, who: str = "gui", bit: int | None = None) -> None:
+        """把一段地址标成"人工接管"。**只能在 loop 线程调**（`Session` 经 runner.call）。
+
+        `bit` 只对 S7 的 bool 点有意义（同一字节上可以有多个点位，见 `SourceStore`）。
+        """
         self._sources.own(self.channel_name, unit_id, area, address, count=count,
-                          who=who)
+                          who=who, bit=bit)
 
     def restore_waveform(self, unit_id: int, area: str, address: int,
-                         count: int = 1) -> bool:
+                         count: int = 1, bit: int | None = None) -> bool:
         """把 `[address, address+count)` 交还波形；这一段里原本有 manual 才返回 True。
 
-        跨度由调用方给（`Session` 手里才有点位的 `span`），这一层不认点只认地址。
+        跨度由调用方给（`Session` 手里才有点位的 `span`），这一层不认点只认地址；
+        `bit` 同理只为 S7 的 bool 服务。
         """
         return self._sources.restore(self.channel_name, unit_id, area, address,
-                                     count=count)
+                                     count=count, bit=bit)
 
-    def source_is_waveform(self, unit_id: int, area: str, address: int) -> bool:
+    def source_is_waveform(self, unit_id: int, area: str, address: int,
+                           bit: int | None = None) -> bool:
         """这一格当前还归波形驱动吗（`Session.rows()` 的 `source` 列读它）。
 
         只给"调用方要的那个点"的答案，不外泄整表快照（Task 2 复审的口径）。
         """
-        return self._sources.is_waveform(self.channel_name, unit_id, area, address)
+        return self._sources.is_waveform(self.channel_name, unit_id, area, address,
+                                         bit=bit)
 
     def _require_writer(self) -> RawRegisterWriter:
         """没起（或已经停了）就调读写接口：一句带通道名的话，不要 `AttributeError`。

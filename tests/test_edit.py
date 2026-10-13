@@ -284,10 +284,9 @@ def test_remove_point_takes_exactly_that_one():
     assert [pt.name for pt in dev.points] == ["a"]
 
 
-def test_two_s7_bools_in_one_byte_cannot_be_told_apart_by_this_layer():
-    """`DBX6.2` 与 `DBX6.3` 同占一个字节是合法的，而身份键里还没有"位"（计划 §2 第 8 条）。
-
-    猜着删一个，现场丢的是另一个点——所以这一层明说"分不出来"，而不是删掉先找到的那个。
+def test_a_bitless_removal_on_a_shared_byte_is_refused_but_a_par_one_works():
+    """`DBX6.2` 与 `DBX6.3` 同占一个字节是合法的：**不给位就拒**（不知道你要哪一个），
+    给了位就精确删那一个——这一层分得开了，不再需要"做不到"那种话。
     """
     dev = device(points=[Point(name="起", area="db1", address=6, datatype="bool", bit=2),
                          Point(name="停", area="db1", address=6, datatype="bool", bit=3)])
@@ -295,8 +294,22 @@ def test_two_s7_bools_in_one_byte_cannot_be_told_apart_by_this_layer():
     before = copy.deepcopy(project)
     with pytest.raises(edit.EditRefused) as excinfo:
         edit.remove_point(project, "s7-1", 1, "db1", 6)
-    assert "cannot tell them apart" in str(excinfo.value)
+    assert "pass the bit" in str(excinfo.value)
     assert project == before
+
+    edit.remove_point(project, "s7-1", 1, "db1", 6, bit=2)
+    assert [pt.name for pt in dev.points] == ["停"], "删错了那一个（位没起作用）"
+
+
+def test_find_point_matches_the_bit_exactly():
+    dev = device(points=[Point(name="起", area="db1", address=6, datatype="bool", bit=2),
+                         Point(name="停", area="db1", address=6, datatype="bool", bit=3)])
+    assert edit.find_point(dev, "db1", 6, 3).name == "停"
+    assert edit.find_point(dev, "db1", 6, 2).name == "起"
+    with pytest.raises(KeyError):
+        edit.find_point(dev, "db1", 6, 5)          # 这个位上没有点
+    with pytest.raises(KeyError):
+        edit.find_point(dev, "db1", 7, 2)          # 这个字节上没有点
 
 
 def test_find_point_reports_a_missing_address_as_a_key_error():

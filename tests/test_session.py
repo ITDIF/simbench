@@ -83,9 +83,10 @@ def test_rows_are_indexed_in_the_point_table_order(session):
     assert names == ["CO浓度", "VI风速", "风机状态", "累计电量", "铭牌",
                      "启动命令", "运行反馈", "固件版本", "回路状态"]
     assert all(isinstance(r, Row) for r in session.rows("tcp-5020"))
-    # key 是 GUI 定位一行的身份，四元组顺序即 (channel, unit, area, address)
+    # key 是 GUI 定位一行的身份：五元组顺序即 (channel, unit, area, address, bit)，
+    # 最后那位是 S7 的位（Modbus 的点恒为 None）——同字节上的两个 S7 bool 靠它分开
     first = session.rows("tcp-5020")[0]
-    assert first.key == ("tcp-5020", 11, "hr", 0)
+    assert first.key == ("tcp-5020", 11, "hr", 0, None)
 
 
 def test_rows_for_unknown_channel_is_empty(session):
@@ -114,7 +115,7 @@ def test_row_field_order_is_the_positional_contract_task_5_builds_on():
     assert tuple(Row.__dataclass_fields__) == (
         "channel", "device", "unit_id", "name", "area", "address", "datatype",
         "word_order", "value_text", "registers", "readonly", "waveform", "stale",
-        "source")
+        "source", "bit")
     default = Row("tcp-5020", "COVI-1", 11, "CO浓度", "hr", 0, "float32", "CDAB",
                   "12.5", (0x0000, 0x4148), True, "const")
     assert default.stale is False, "stale 要有默认值，否则现有构造点全得跟着改"
@@ -122,11 +123,16 @@ def test_row_field_order_is_the_positional_contract_task_5_builds_on():
     assert default.readonly is True and default.waveform == "const"
 
 
-def test_row_source_is_a_trailing_default_not_an_inserted_field():
-    """`source` 加在最后且有默认值：老的位置构造不会把它接到 `waveform` 上。"""
+def test_the_fields_added_later_all_sit_at_the_tail_with_defaults():
+    """后加的字段（`stale` / `source` / `bit`）都在**末尾**且带默认值：老的位置构造
+    （`FakeEngine` 与一批用例）不会把它们接到前面的字段上。
+
+    这条原来是"`source` 是最后一位"，加了 `bit`（S7 的位，属于身份）之后改成
+    "尾巴那三个是它们"——契约没变松：**新字段只许往后加、且必须带默认值**。
+    """
     fields = list(dataclasses.fields(Row))
-    assert fields[-1].name in ("source",)
-    assert fields[-1].default == "waveform"
+    assert [field.name for field in fields[-3:]] == ["stale", "source", "bit"]
+    assert [field.default for field in fields[-3:]] == [False, "waveform", None]
 
 
 def test_rows_carry_the_ownership_of_a_running_channel(session):
@@ -803,7 +809,7 @@ def test_a_same_or_shorter_string_edit_still_lands(session):
     same = session.set_point("tcp-5020", 11, "hr", 9, "PUMP07")
     assert same.ok, same.error
     assert same.value_text == "PUMP07"
-    assert session.restore_waveform("tcp-5020", 11, "hr", 9) is True
+    assert session.restore_waveform("tcp-5020", 11, "hr", 9, None) is True
     shorter = session.set_point("tcp-5020", 11, "hr", 9, "AB")
     assert shorter.ok, shorter.error
     assert session.manual_count("tcp-5020") == 1
@@ -962,14 +968,14 @@ def test_restore_waveform_hands_the_whole_point_back(session):
     assert session.manual_count("tcp-5020") == 1                        # 按点数是 1
     logs: list[LogLine] = []
     session.subscribe(lambda e: isinstance(e, LogLine) and logs.append(e))
-    assert session.restore_waveform("tcp-5020", 11, "hr", 5) is True
+    assert session.restore_waveform("tcp-5020", 11, "hr", 5, None) is True
     assert backend._sources.cleared() == 0, "恢复留下了尾巴"
     assert session.manual_count("tcp-5020") == 0
     assert [r.source for r in session.rows("tcp-5020") if r.name == "累计电量"] == \
         ["waveform"]
     assert any("累计电量" in line.text for line in logs), logs
     # 本来就在波形手上：没恢复过任何东西，不许谎报成功
-    assert session.restore_waveform("tcp-5020", 11, "hr", 5) is False
+    assert session.restore_waveform("tcp-5020", 11, "hr", 5, None) is False
 
 
 def test_restore_waveform_refuses_without_raising(session):
@@ -982,11 +988,11 @@ def test_restore_waveform_refuses_without_raising(session):
     session.start_channel("tcp-5020")
     logs: list[LogLine] = []
     session.subscribe(lambda e: isinstance(e, LogLine) and logs.append(e))
-    assert session.restore_waveform("tcp-5020", 11, "hr", 30) is False
+    assert session.restore_waveform("tcp-5020", 11, "hr", 30, None) is False
     assert any("not in the point table" in line.text for line in logs), logs
     logs.clear()
     session.stop_channel("tcp-5020")
-    assert session.restore_waveform("tcp-5020", 11, "hr", 4) is False
+    assert session.restore_waveform("tcp-5020", 11, "hr", 4, None) is False
     assert any("not running" in line.text and "风机状态" in line.text
                for line in logs), logs
     assert session.manual_count("tcp-5020") == 0
@@ -1016,7 +1022,7 @@ def test_the_restore_is_handed_back_on_the_engine_thread_not_the_gui_one(session
         return real(*args, **kwargs)
 
     monkeypatch.setattr(backend, "restore_waveform", record)
-    assert session.restore_waveform("tcp-5020", 11, "hr", 4) is True
+    assert session.restore_waveform("tcp-5020", 11, "hr", 4, None) is True
     assert seen and seen[0] != threading.get_ident(), (
         "恢复在调用方线程上直接跑了：主线程直插 loop 线程的 SourceStore")
     assert seen == [session._runner.thread_ident], (
@@ -1045,10 +1051,10 @@ def test_restoring_puts_the_point_back_under_the_waveform(session):
         assert session.set_point("tcp-5020", 11, "hr", 4, "5").ok
         tick()
         assert value_of(session, "风机状态") == "5"          # 被接管，波形一个字都不写
-        assert session.restore_waveform("tcp-5020", 11, "hr", 4) is True
+        assert session.restore_waveform("tcp-5020", 11, "hr", 4, None) is True
         tick()
         assert value_of(session, "风机状态") == "77"         # 还给波形就重新动
-        assert session.restore_waveform("tcp-5020", 11, "hr", 4) is False
+        assert session.restore_waveform("tcp-5020", 11, "hr", 4, None) is False
     finally:
         session.stop_channel("tcp-5020")
 
@@ -1062,7 +1068,7 @@ def test_restore_on_a_stopped_channel_is_a_named_refusal_not_an_attribute_error(
     session.load(loaded(free_port()))
     lines: list[LogLine] = []
     session.subscribe(lambda e: isinstance(e, LogLine) and lines.append(e))
-    assert session.restore_waveform("tcp-5020", 11, "hr", 4) is False
+    assert session.restore_waveform("tcp-5020", 11, "hr", 4, None) is False
     assert any("not running" in l.text and "风机状态" in l.text for l in lines), lines
 
 

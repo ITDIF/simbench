@@ -94,7 +94,7 @@ def test_the_ownership_count_and_restore_work_on_the_s7_key(session):
     assert session.manual_count("s7-1") == 1
     row = next(r for r in session.rows("s7-1") if r.name == "状态字")
     assert row.source == "manual"
-    assert session.restore_waveform("s7-1", 11, "db1", 4) is True
+    assert session.restore_waveform("s7-1", 11, "db1", 4, None) is True
     assert session.manual_count("s7-1") == 0
     assert session.channel("s7-1").backend._tick_once(now=time.monotonic() + 1.0) >= 1
     client = master(port)
@@ -165,3 +165,73 @@ def test_mixed_tcp_rtu_and_s7_channels_start_and_stop_independently(engine_runne
     finally:
         session.stop_all()
         session.shutdown()
+
+
+def two_bits(port: int) -> S7Channel:
+    """一个字节上两个 bool 点（`DBX6.2` / `DBX6.3`）：S7 的常规用法，判定按位、明确允许。"""
+    return S7Channel("s7-1", host="127.0.0.1", port=port, devices=[
+        Device("D1", 11, [
+            Point("起", "db1", 6, "bool", initial="false", bit=2),
+            Point("停", "db1", 6, "bool", initial="false", bit=3),
+        ])])
+
+
+def test_two_bools_in_one_byte_are_two_identities(session):
+    """身份键带"位"之后，同字节的两个 bool 分得开：改一个，另一个一个字都不动。
+
+    这是修掉的那个数据错位级缺陷：`Session._points` 原来按 `(区, 地址)` 建键，后注册的
+    把前一个覆盖掉——界面双击 `DBX6.2`，写进去的是 `DBX6.3` 那个点。
+    """
+    port = free_port()
+    session.load(Project(channels=[two_bits(port)]))
+    session.start_channel("s7-1")
+    rows = {row.name: row for row in session.rows("s7-1")}
+    assert rows["起"].key == ("s7-1", 11, "db1", 6, 2)
+    assert rows["停"].key == ("s7-1", 11, "db1", 6, 3)
+
+    assert session.set_point("s7-1", 11, "db1", 6, "true", bit=3).ok
+    values = {row.name: row.value_text for row in session.rows("s7-1")}
+    assert values == {"起": "false", "停": "true"}, values
+
+    client = master(port)
+    client.connect()
+    try:
+        # 真上位机看到的也是"只有 DBX6.3 那一位变了"
+        assert client.read(["DB1,X6.2", "DB1,X6.3"]) == [False, True]
+    finally:
+        client.disconnect()
+
+
+def test_the_ownership_of_one_bit_does_not_take_the_other_bit_over(session):
+    """归属单位是**点位**：改 `DBX6.3` 只让那一个变 `已停`，交还也只还那一个。"""
+    port = free_port()
+    session.load(Project(channels=[two_bits(port)]))
+    session.start_channel("s7-1")
+    assert session.set_point("s7-1", 11, "db1", 6, "true", bit=3).ok
+    rows = {row.name: row for row in session.rows("s7-1")}
+    assert rows["停"].source == "manual" and rows["起"].source == "waveform"
+    assert session.manual_count("s7-1") == 1
+
+    assert session.restore_waveform("s7-1", 11, "db1", 6, bit=3) is True
+    assert [row.source for row in session.rows("s7-1")] == ["waveform", "waveform"]
+    # 已经交还过的那一个再交还一次：回 False（没真还回去什么）
+    assert session.restore_waveform("s7-1", 11, "db1", 6, bit=3) is False
+
+
+def test_a_master_bit_write_marks_the_byte_but_changes_only_that_bit(session):
+    """主站写 `DBX6.2`：事件只给**字节**范围，所以同字节的另一个 bool 也被标成 manual
+    （既有的 S7 口径"宁可多标一个"，一次恢复就回来），但它的**值**一个字不变。
+    """
+    port = free_port()
+    session.load(Project(channels=[two_bits(port)]))
+    session.start_channel("s7-1")
+    client = master(port)
+    client.connect()
+    try:
+        client.write(["DB1,X6.2"], [True])
+        wait_for(lambda: session.manual_count("s7-1") == 2,
+                 what="the byte-level ownership to land")
+        values = {row.name: row.value_text for row in session.rows("s7-1")}
+        assert values == {"起": "true", "停": "false"}, values
+    finally:
+        client.disconnect()
