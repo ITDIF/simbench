@@ -610,6 +610,38 @@ def test_the_tree_menu_offers_add_channel_on_empty_space(qapp, monkeypatch):
 
 # ---------- 14. 表单/对话框的按钮面 ----------
 
+def test_every_fixed_slot_in_the_forms_fits_its_longest_caption(qapp):
+    """定宽槽装得下最长文案（`test_gui_theme.py` 对主窗那套断言，这里是表单）。
+
+    这条是**截图**照出来的：提示那一格原来 190 宽，而"串口名要自己填：本工具不替现场猜
+    COM 口"要 240px——Qt 不接省略号，屏幕上就是硬切掉半句，而那句话正是要人看见的。
+    """
+    from simbench.gui.channel_form import _HINTS
+    form = ChannelForm(kinds=(edit.BLANK,) + edit.TRANSPORTS, start=edit.BLANK)
+    form.show()
+    try:
+        for kind in (edit.BLANK,) + edit.TRANSPORTS:
+            form.pick(kind)
+            qapp.processEvents()
+            assert form.hint.text() == _HINTS[kind]
+            advance = form.hint.fontMetrics().horizontalAdvance(form.hint.text())
+            assert advance <= form.hint.width(), \
+                (kind, form.hint.text(), advance, form.hint.width())
+            for label in form.labels:
+                advance = label.fontMetrics().horizontalAdvance(label.text())
+                assert advance <= label.width(), (label.text(), advance, label.width())
+    finally:
+        form.deleteLater()
+
+    device = AddDeviceDialog(None, edit.new_project("tcp"), "tcp-5020")
+    try:
+        for widget in device.form_area.findChildren(QtWidgets.QLabel):
+            advance = widget.fontMetrics().horizontalAdvance(widget.text())
+            assert advance <= widget.width(), (widget.text(), advance, widget.width())
+    finally:
+        device.deleteLater()
+
+
 def test_only_the_new_project_dialog_offers_a_blank_start(qapp):
     """添加通道里不许有"空白工程"这个按钮：点下去只会得到一句说不通的错。
 

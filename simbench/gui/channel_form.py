@@ -27,6 +27,10 @@ _LABEL_WIDTH = 84
 _FIELD_WIDTH = 190
 _SHORT_WIDTH = 96
 _HINT_HEIGHT = 22
+# 提示那一格的宽度 = 表单可用宽度（对话框按那块 420 宽的拒绝框定尺寸，减掉标签列与间距）。
+# 定 190（与字段同宽）时，最长那句提示要 240px，屏幕上直接被**硬切**半句——Qt 不接省略号，
+# 而"串口名要自己填"这句正是要人看见的。截图照出来的（见 2026-10-13 那组界面截图）。
+_HINT_WIDTH = 328
 
 # 类型的显示名与"标签订单"：`_LABELS[kind]` 是那三格的标签（空串 = 这一格对这个类型没意义）
 _KIND_LABELS = (("blank", "空白工程"), ("tcp", "TCP"), ("rtu", "串口 RTU"), ("s7", "S7"))
@@ -118,7 +122,7 @@ class ChannelForm(QtWidgets.QWidget):
         row.addStretch(1)
         grid.addLayout(row, 0, 1)
 
-        self.hint = self._fixed(QtWidgets.QLabel(), _FIELD_WIDTH, _HINT_HEIGHT)
+        self.hint = self._fixed(QtWidgets.QLabel(), _HINT_WIDTH, _HINT_HEIGHT)
         self.hint.setWordWrap(False)
         grid.addWidget(self.hint, 1, 1)
 

@@ -27,7 +27,9 @@ _NOTICE_WIDTH = 420
 _ERROR_VIEW_HEIGHT = 64
 _FIELD_WIDTH = 190
 _SHORT_WIDTH = 72
-_LABEL_WIDTH = 84
+# 标签列的宽度按**最长的那一句**给：`unit id` 在 10pt 下要 91px，84 会把它硬切成
+# `unit i…`（截图 + `test_every_fixed_slot_in_the_forms_fits_its_longest_caption` 抓到的）。
+_LABEL_WIDTH = 104
 
 
 class _EditDialog(QtWidgets.QDialog):
