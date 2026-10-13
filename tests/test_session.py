@@ -1124,6 +1124,37 @@ def test_a_wedged_engine_marks_the_rows_stale_and_says_so_only_once(session, mon
     assert session.manual_count("tcp-5020") is None
 
 
+def test_a_mixed_project_runs_every_protocol_together(session):
+    """一张表里三种协议（TCP + 串口 + S7）：一起起、各自服务、状态互不牵连。
+
+    命令行那条由 `test_cli.py::test_the_command_line_serves_every_channel_of_a_mixed_project`
+    端到端钉住（三类真主站各读一次）；这一条在会话层钉"三路都在跑、谁的状态是谁的"——
+    现场一张表里混装是常态，任何"只认一种协议"的地方都会在这里露出来。
+    """
+    from simbench.project.model import S7Channel, SerialChannel
+    tcp_port, rtu_port, s7_port = free_port(), free_port(), free_port()
+    project = Project(channels=[
+        TcpChannel("tcp-x", host="127.0.0.1", port=tcp_port, devices=[
+            Device("D1", 11, [Point("温度", "hr", 0, "uint16", initial="11")])]),
+        SerialChannel("com-485-1", port=f"socket://127.0.0.1:{rtu_port}", devices=[
+            Device("D2", 12, [Point("转速", "hr", 0, "uint16", initial="22")])]),
+        S7Channel("s7-x", host="127.0.0.1", port=s7_port, devices=[
+            Device("D3", 21, [Point("出温", "db1", 0, "word", initial="33")])]),
+    ])
+    session.load(project)
+    assert session.start_all() == []
+    assert [session.channel(name).running for name in session.channel_names()] == [True] * 3
+    assert session.rows("com-485-1")[0].value_text == "22"
+    assert session.rows("s7-x")[0].value_text == "33"
+
+    # 停一路：另外两路照旧（"独立启停"这条在混装工程上同样成立）
+    session.stop_channel("com-485-1")
+    assert [session.channel(name).running for name in session.channel_names()] == [True, False,
+                                                                                  True]
+    session.stop_all()
+    assert [session.channel(name).running for name in session.channel_names()] == [False] * 3
+
+
 def test_dirty_flag_tracks_edits(session):
     session.load(loaded(free_port()))
     session.start_channel("tcp-5020")

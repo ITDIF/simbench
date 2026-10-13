@@ -608,6 +608,20 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
     建通道时探端口占用。计划与偏离表（D1–D4）在
     `docs/superpowers/plans/2026-10-13-review-round2.md`；全量 **1354 → 1366 passed**。
 
+
+11. **混装工程（2026-10-13 补）**：一张点表里可以有**多种协议**（TCP + 串口 + S7）与多路同协议
+    通道，各处都按通道自己的传输走（校验、编解码、后端、界面那一行、CSV 的通道名写法）。
+    这一轮补的是**命令行那一路**：原来 `python -m simbench x.csv` 只起**第一个**通道（stderr
+    上那句 "M1 serves one channel at a time"），于是"离了界面就用不了混装工程"。现在
+    `_serve` 起**全部**通道、逐个打印各自的监听形态（`tcp-x: listening on 127.0.0.1:5020 …` /
+    `com-485-1: serving on socket://… 9600 8N1 …` / `s7-x: serving on … rack 0 slot 1 …`）。
+    一路起不来**不牵连别的**（与界面"全部启动"同一条口径）：当场在 stderr 上留一行带通道名的
+    错，其余照服务；**一路都没起来**才当场退出码 2，部分起不来的情况在收工时回 2（"有通道没
+    服务上"脚本要看得见）。证据：`tests/test_cli.py::test_the_command_line_serves_every_channel_
+    of_a_mixed_project`（三类真主站各读一次）、`::test_one_channel_that_cannot_start_does_not_
+    stop_the_others`、`::test_list_shows_each_protocols_own_address_form`、
+    `tests/test_session.py::test_a_mixed_project_runs_every_protocol_together`。
+
 **实现计划范围**：第一份计划覆盖 M1–M4，交付一个 TCP 从站 + GUI + CSV + 报文监视 + 预设波形
 的完整可用工具，全程可自动化验证。M5（RTU）单独出第二份计划，因为它需要你在笔记本 + USB-485
 上做人工冒烟，混进第一份会让"全部通过"无从判定。

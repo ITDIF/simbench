@@ -131,24 +131,47 @@ def _apply_overrides(project, host: str | None, port: int | None) -> bool:
     return applied
 
 
-async def _serve(channel, quiet: bool, tick_ms: int, extra_endpoints=()) -> None:
-    """起一路无头从站。`tick_ms > 0` 时波形按节拍自己动（M4）——命令行与 GUI 起的是同一个
-    工程，读到同一批点表，就不该一个有曲线一个没有。
+async def _serve(channels, quiet: bool, tick_ms: int) -> list[str]:
+    """起**全部**通道（一个工程里可以有多种协议，也可以有多路同协议）。返回起不来的那些。
 
-    `tick_ms` 不给默认值：默认 0 就是"忘了传也照样起监听、只是曲线静默不动"，而那正是
-    这一路 M4 之前的缺陷形状。调用方必须表态。"""
-    # 选后端只走 `make_backend`（与 Session 同一个装配口）：认不出的传输（例如现在的 rtu）
-    # 会抛 `UnsupportedTransportError`，由 main 兜成一行错误，不甩 traceback。
-    backend = make_backend(channel, packet_sink=None if quiet else _line,
-                           tick_ms=tick_ms, log_sink=_runtime_log,
-                           extra_endpoints=extra_endpoints)
-    await backend.start()
-    # 这一句问后端要（`describe()`）：TCP 是"所有监听地址"（不是只打通道自己那个——现场
-    # 主站连的是**设备那一侧**的地址，只报 0.0.0.0:5020 等于没告诉他该连哪），串口是那一串
-    # 串口参数（`COM3 19200 8E1`）。两种说法分头写在两处迟早对不上，所以只有一处。
-    where = backend.describe()
-    verb = "listening on" if channel_transport(channel) == "tcp" else "serving on"
-    print(f"[simbench] {verb} {where} unit ids {_units(channel)}", flush=True)
+    `channels` 是 `[(通道, 额外监听地址)]`。**一路起不来不牵连别的**：现场一张表里
+    TCP + 串口 + S7 混装是常态，串口没插、端口被占不该让另外两路也停——与界面"全部启动"
+    同一条口径（那里也是逐个起、逐个报）。起不来的逐条收集，由调用方打成一行行的错。
+
+    `tick_ms > 0` 时波形按节拍自己动（M4）——命令行与 GUI 起的是同一个工程，读到同一批点表，
+    就不该一个有曲线一个没有。`tick_ms` 不给默认值：默认 0 就是"忘了传也照样起监听、只是
+    曲线静默不动"，而那正是 M4 之前的缺陷形状。调用方必须表态。
+    """
+    started: list[tuple[object, object]] = []
+    failures: list[str] = []
+    for channel, extra_endpoints in channels:
+        # 选后端只走 `make_backend`（与 Session 同一个装配口）：认不出的传输抛
+        # `UnsupportedTransportError`，起不来（端口被占、串口打不开）抛 `BackendStartError`。
+        # 两种都只收成一行字，别的通道照起。
+        try:
+            backend = make_backend(channel, packet_sink=None if quiet else _line,
+                                   tick_ms=tick_ms, log_sink=_runtime_log,
+                                   extra_endpoints=extra_endpoints)
+            await backend.start()
+        except (BackendStartError, UnsupportedTransportError) as exc:
+            # **当场**一行（不等收工才说）：现场看着 30 秒没动静才会来翻日志，而"哪一路
+            # 为什么没起来"这时候就该在屏幕上。
+            line = f"{channel.name}: {exc}"
+            failures.append(line)
+            print(f"[error] [port] {line}", file=sys.stderr, flush=True)
+            continue
+        # 这一句问后端要（`describe()`）：TCP 是"所有监听地址"（不是只打通道自己那个——现场
+        # 主站连的是**设备那一侧**的地址，只报 0.0.0.0:5020 等于没告诉他该连哪），串口是那一串
+        # 串口参数（`COM3 19200 8E1`）。两种说法分头写在两处迟早对不上，所以只有一处。
+        where = backend.describe()
+        verb = "listening on" if channel_transport(channel) == "tcp" else "serving on"
+        print(f"[simbench] {channel.name}: {verb} {where} "
+              f"unit ids {_units(channel)}", flush=True)
+        started.append((channel, backend))
+    if not started:
+        # 一路都没起来：交给调用方按"启动失败"报（一行字 + 退出码 2），与单通道时代同一个口径
+        raise BackendStartError("; ".join(failures) or "no channel could be started")
+
     stop = asyncio.Event()
     with contextlib.suppress(NotImplementedError):
         # Windows 上 add_signal_handler 不可用，Ctrl+C 走 KeyboardInterrupt（见 main）
@@ -160,7 +183,11 @@ async def _serve(channel, quiet: bool, tick_ms: int, extra_endpoints=()) -> None
         # 那轮 loop 再把 finally 跑完，监听套接字因此真被关掉，下一次启动不撞端口——这条
         # 由 tests/test_cli.py::test_cancelling_the_serve_task_releases_the_port 钉住
         # （同一个动作：任务被取消 + loop 还活着）。不指望进程退出顺手替我们关。
-        await backend.stop()
+        # 逐个关：一路关不掉不影响别的。
+        for _channel, backend in started:
+            with contextlib.suppress(Exception):
+                await backend.stop()
+    return failures
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -239,16 +266,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         print("[simbench] point table is valid")
         return 0
-    if len(project.channels) > 1:
-        print("[simbench] M1 serves one channel at a time; using "
-              f"{project.channels[0].name}", file=sys.stderr)
-
     _prepare_network(args.point_table, project)
+    # **全部**通道一起起（一个工程里可以有多种协议）：一路起不来不牵连别的，
+    # 起不来的逐条收集，见 `_serve`。
+    channels = [(channel, _listen_endpoints(channel, args.point_table))
+                for channel in project.channels]
     try:
-        asyncio.run(_serve(project.channels[0], args.quiet, project.tick_ms,
-                           _listen_endpoints(project.channels[0], args.point_table)))
+        failures = asyncio.run(_serve(channels, args.quiet, project.tick_ms))
     except KeyboardInterrupt:
         print("\n[simbench] stopped", flush=True)
+        return 0
     except BackendStartError as exc:
         # 资源不归我们（端口被占、串口打不开……）按一行错误报，不甩 traceback（和读不到文件
         # 同一个口径）：现场第一件事就是"再起一次"，而这里静默成功比报错更糟——两个监听叠在
@@ -260,7 +287,9 @@ def main(argv: list[str] | None = None) -> int:
         # 不许让一个属性错误或 RuntimeError 变成 traceback 甩给现场。
         print(f"[error] [channel] {exc}", file=sys.stderr)
         return 2
-    return 0
+    # 起不来的那几路在 `_serve` 里已经各报了一行（当场报的）：这里只用它定退出码——
+    # "有通道没服务上"这件事脚本要看得见，静默的成功比报错更糟。
+    return 2 if failures else 0
 
 
 _GUI_PASSTHROUGH_FLAGS = ("--check", "--list")

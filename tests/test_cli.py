@@ -372,7 +372,8 @@ def test_cancelling_the_serve_task_releases_the_port():
 
     async def scenario():
         # tick_ms 显式给 0：这一条只验"取消任务后监听真被释放"，曲线动不动与它无关
-        task = asyncio.create_task(cli._serve(channel, quiet=True, tick_ms=0))
+        # 新签名：`[(通道, 额外监听地址)]`——一个工程里可以有多路（也可以多种协议）
+        task = asyncio.create_task(cli._serve([(channel, ())], quiet=True, tick_ms=0))
         await wait_for_listener(port, task)
         task.cancel()                             # 与 SIGINT 处理函数同一个动作
         with contextlib.suppress(asyncio.CancelledError):
@@ -586,3 +587,135 @@ def wait_until_answering_serial(client, timeout: float = 10.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+
+# ---------- 混装工程：一张表里三种协议 ----------
+
+def mixed_table(tmp_path, tcp: int, rtu: int, s7: int) -> str:
+    """一张表里 TCP + 串口 + S7 三路通道（现场"一台机器上多种协议"的常见形状）。"""
+    path = tmp_path / "mixed.csv"
+    path.write_text(
+        HEADER
+        + f"tcp-x@tcp:127.0.0.1:{tcp},D1,11,温度,hr,0,uint16,ABCD,11,const,,false\n"
+        + f"com-485-1@socket://127.0.0.1:{rtu},D2,12,转速,hr,0,uint16,ABCD,22,const,,false\n"
+        + f"s7-x@127.0.0.1:{s7} 0/1,D3,21,出温,db1,0,word,ABCD,33,const,,false\n",
+        encoding="utf-8")
+    return str(path)
+
+
+def wait_until(readable, timeout: float = 20.0, what: str = "") -> None:
+    """有界轮询：`readable()` 为真就返回，超时就把子进程的输出一起报出来。"""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            if readable():
+                return
+        except Exception as exc:                                    # noqa: BLE001
+            last = exc
+        time.sleep(0.1)
+    raise AssertionError(f"{what} never became true within {timeout}s (last={last!r})")
+
+
+def test_the_command_line_serves_every_channel_of_a_mixed_project(tmp_path):
+    """一张表里三种协议：命令行把它们**全部**起起来，三类主站各读自己的那一格。
+
+    原来只起第一个通道（stderr 上那句 "M1 serves one channel at a time"）——而现场一张表里
+    TCP + 串口 + S7 混装是常态，那条限制等于"离了界面就用不了混装工程"。
+    """
+    import socket as _socket
+    from pyS7 import S7Client
+    from pymodbus import FramerType
+    from pymodbus.client import ModbusSerialClient
+
+    tcp, rtu, s7 = free_port(), free_port(), free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "simbench", mixed_table(tmp_path, tcp, rtu, s7), "--quiet"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", cwd=str(ROOT))
+
+    def tcp_answers() -> bool:
+        client = ModbusTcpClient("127.0.0.1", port=tcp, timeout=1.0)
+        try:
+            if not client.connect():
+                return False
+            read = client.read_holding_registers(0, count=1, device_id=11)
+            return read is not None and not read.isError() and read.registers == [11]
+        except Exception:                                           # noqa: BLE001
+            return False
+        finally:
+            with contextlib.suppress(Exception):
+                client.close()
+
+    rtu_master = ModbusSerialClient(port=f"socket://127.0.0.1:{rtu}",
+                                    framer=FramerType.RTU, baudrate=9600, timeout=2.0)
+    s7_master = S7Client("127.0.0.1", rack=0, slot=1, port=s7, timeout=3.0)
+
+    def s7_answers() -> bool:
+        if not s7_master.is_connected:
+            s7_master.connect()
+        return s7_master.read(["DB1,W0"]) == [33]
+
+    try:
+        wait_until(tcp_answers, what=f"TCP channel ({tcp})")
+        wait_until(lambda: wait_until_answering_serial(rtu_master, 0.5) and True,
+                   what=f"RTU channel ({rtu})")
+        assert rtu_master.read_holding_registers(0, count=1, device_id=12).registers == [22]
+        wait_until(s7_answers, what=f"S7 channel ({s7})")
+    except AssertionError:
+        _out, err = drain(proc)
+        raise AssertionError(f"混装工程没全部起到\n--- stderr ---\n{err}")
+    finally:
+        rtu_master.close()
+        with contextlib.suppress(Exception):
+            s7_master.disconnect()
+        terminate(proc)
+
+
+def test_one_channel_that_cannot_start_does_not_stop_the_others(tmp_path):
+    """一路起不来（端口被别人占着）不牵连别的：其余通道照服务，它是 stderr 上一行错。
+
+    与界面"全部启动"同一条口径（逐个起、逐个报）。"一路都没起来"那种情况才当场回 2
+    （由 `test_second_backend_on_the_same_port_is_refused` 钉住）。
+    """
+    import socket as _socket
+    from pymodbus import FramerType
+    from pymodbus.client import ModbusSerialClient
+
+    hog = _socket.socket()
+    hog.bind(("127.0.0.1", 0))
+    hog.listen(128)
+    busy = hog.getsockname()[1]
+    rtu = free_port()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "simbench", mixed_table(tmp_path, busy, rtu,
+                                                           free_port()), "--quiet"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace", cwd=str(ROOT))
+        rtu_master = ModbusSerialClient(port=f"socket://127.0.0.1:{rtu}",
+                                        framer=FramerType.RTU, baudrate=9600, timeout=2.0)
+        try:
+            assert wait_until_answering_serial(rtu_master, 15.0), "被占的那一路拖住了串口那一路"
+            assert rtu_master.read_holding_registers(0, count=1,
+                                                     device_id=12).registers == [22]
+            _out, err = terminate(proc)                 # 收工时把那行错一起读回来
+            assert "tcp-x" in err and "in use" in err.lower(), err
+        finally:
+            rtu_master.close()
+            terminate(proc)
+    finally:
+        hog.close()
+
+
+def test_list_shows_each_protocols_own_address_form(tmp_path):
+    """`--list` 对混装工程逐路打印：TCP 是 `host:port`、串口是那一串串口参数、S7 带机架/槽位。"""
+    table = mixed_table(tmp_path, free_port(), free_port(), free_port())
+    result = run_cli(table, "--list")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    lines = [line for line in result.stdout.splitlines() if line.startswith("channel ")]
+    assert len(lines) == 3, lines
+    assert any("tcp-x (127.0.0.1:" in line for line in lines), lines
+    assert any("com-485-1 (socket://" in line for line in lines), lines
+    assert any("s7-x (127.0.0.1:" in line and "rack 0 slot 1" in line for line in lines), lines
