@@ -26,16 +26,16 @@ import pytest
 from PySide6 import QtCore, QtWidgets
 from pymodbus.client import ModbusTcpClient
 
-from modslave.backend.events import ChannelState
-from modslave.backend.modbus_tcp import check_port_is_free
-from modslave.csv_io_entry import load_point_table
-from modslave.engine.packets import PacketStore
-from modslave.engine.session import Session
-from modslave.gui import main_window as main_window_module
-from modslave.gui.dialogs import IssueDialog
-from modslave.gui.main_window import MainWindow
-from modslave.project.model import Device, Point, TcpChannel
-from modslave.project.validate import validate_project
+from simbench.backend.events import ChannelState
+from simbench.backend.modbus_tcp import check_port_is_free
+from simbench.csv_io_entry import load_point_table
+from simbench.engine.packets import PacketStore
+from simbench.engine.session import Session
+from simbench.gui import main_window as main_window_module
+from simbench.gui.dialogs import IssueDialog
+from simbench.gui.main_window import MainWindow
+from simbench.project.model import Device, Point, TcpChannel
+from simbench.project.validate import validate_project
 from tests.conftest import free_port
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -148,7 +148,7 @@ def relaunch(window, project, qapp):
 # ---------- 标题与脏标记（口径 ε） ----------
 
 def test_the_title_shows_the_project_and_no_star_while_clean(window):
-    assert window.windowTitle() == f"modslave - {pathlib.Path(CSV).name}"
+    assert window.windowTitle() == f"设备模拟台 - {pathlib.Path(CSV).name}"
     assert "*" not in window.windowTitle()
 
 
@@ -169,7 +169,7 @@ def test_the_tick_is_the_only_reclaim_point_and_runs_on_the_gui_thread(
     `runner.call` 上等引擎，互等成环（spec §13）。这里既钉"只有主线程在收"，
     也钉"一跳一次会变成 5 秒一次"——每跳都 collect 会把 10Hz 心跳变成卡顿源。
     """
-    from modslave.gui import main_window as mw
+    from simbench.gui import main_window as mw
 
     window = make_window()
     calls: list[bool] = []
@@ -349,7 +349,7 @@ def test_an_engine_timeout_is_reported_with_the_engine_stack_not_as_a_hang(
     （多行栈进日志窗，不给状态栏撑高度）。
     """
     relaunch(window, window.session.project, qapp)
-    stack = ("\n  | File \"modslave/engine/runner.py\", line 1, in _run\n")
+    stack = ("\n  | File \"simbench/engine/runner.py\", line 1, in _run\n")
     monkeypatch.setattr(window.session._runner, "call",
                         lambda factory, seconds, what: (_ for _ in ()).throw(
                             TimeoutError(f"{what}: engine thread did not finish within "
@@ -358,7 +358,7 @@ def test_an_engine_timeout_is_reported_with_the_engine_stack_not_as_a_hang(
         window.point_model.index(row_of(window, "风机状态"), VALUE_COLUMN), "42") is False
     window._tick()
     assert "did not finish" in window.log_view.toPlainText()
-    assert "modslave/engine/runner.py" in window.log_view.toPlainText(), "整段栈要留在日志"
+    assert "simbench/engine/runner.py" in window.log_view.toPlainText(), "整段栈要留在日志"
     assert "\n" not in window.status.currentMessage()
     # 拆窗在 monkeypatch 撤销**之前**跑（fixture 销毁是安装的反序），不主动撤掉的话
     # teardown 里的 `shutdown()` 会一路撞在这个必然超时的 `call` 上，监听就留在端口上。
@@ -613,7 +613,7 @@ def test_open_project_remembers_the_path(window, monkeypatch, tmp_path):
                         staticmethod(lambda *a, **k: (str(target), "工程 (*.csv)")))
     window._open_project()
     assert window._path == target
-    assert window.windowTitle() == f"modslave - {target.name}"
+    assert window.windowTitle() == f"设备模拟台 - {target.name}"
     assert window.point_model.rowCount() == 9
 
 

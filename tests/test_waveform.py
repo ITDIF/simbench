@@ -8,7 +8,7 @@ import math
 
 import pytest
 
-from modslave.codec.waveform import waveform_value
+from simbench.codec.waveform import waveform_value
 
 
 def test_const_is_flat_and_defaults_to_zero_when_value_missing():
@@ -128,7 +128,7 @@ def test_random_defaults_to_one_second_between_values_when_interval_is_omitted()
 
 
 def test_clamp_pins_out_of_range_and_nan_to_the_low_edge():
-    from modslave.codec.waveform import clamp_to_datatype
+    from simbench.codec.waveform import clamp_to_datatype
     assert clamp_to_datatype(70000, "uint16") == (65535, True)
     assert clamp_to_datatype(-5, "uint16") == (0, True)
     assert clamp_to_datatype(float("nan"), "float32") == (-3.4028234663852886e38, True)

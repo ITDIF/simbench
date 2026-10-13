@@ -1,5 +1,8 @@
 # Modbus 从站模拟器（modslave-sim）设计
 
+> 本文与 `plans/` 下两份计划里的 `modslave-sim`/`modslave` 是定稿时的历史称谓，保留不改；
+> 项目已于 2026-10-12 更名 `simbench`（用户可见名「设备模拟台」），代码包名即 `simbench`。
+
 日期：2026-10-08
 状态：已与用户逐节确认（架构批次 1、点表与界面批次 2、错误处理/测试/里程碑批次 3）；
 自审阶段有四处调整，需你复核：
@@ -103,43 +106,73 @@ engine/     Session：唯一对 GUI 暴露的门面（启停/改值/拉取行 + 
 backend/    ModbusTcpBackend（pymodbus 只出现在这里）；`Backend` 抽象与 ModbusRtuBackend 是 M5 的缝（§9）
 codec/      point_codec：点位值 ↔ 原始寄存器序列（数据类型 × 字序）
 project/    数据模型（Project/Channel/Device/Point）+ project.json + CSV 读写 + 校验
+net/        系统网络层（网卡现状/差异/专用网卡/设备 IP）；唯一允许跑 PowerShell 与 netsh 的包（§14）
 ```
 
-依赖方向单向：`gui → engine → backend → project/codec`。`codec` 与 `project` 不 import
-`pymodbus`，也不 import `PySide6`；`backend` 不 import `PySide6`。
+依赖方向单向：`gui → engine → backend → project/codec`，`net` 是旁路（谁都可以调它，它
+不 import `pymodbus`/`PySide6`，也不 import `engine`/`gui`）。`codec` 与 `project` 不 import
+`pymodbus`，也不 import `PySide6`；`backend` 不 import `PySide6`；`subprocess` 只许出现在
+`net/`。
 
-线程模型：Qt 主线程 + 一个引擎线程（内部 asyncio loop）。
+线程模型（**2026-10-13 全面审查时按落地形状改写**；此前这一节写的是目标形状，"命令队列"
+与 `packet_event / validation_error` 这几个名字在实际代码里都不存在）：Qt 主线程 + 一个引擎
+线程（`engine/runner.EngineRunner` 持有 asyncio loop）。
 
-- GUI → 引擎：命令队列（`start_channel / stop_channel / set_point / load_project`）
-- 引擎 → GUI：Qt signal（`packet_event / point_changed / channel_state / validation_error`）
-  通过 queued connection 跨线程投递
+- GUI → 引擎：`EngineRunner.call(fn, timeout, what)`。GUI 能走到的每条等待都走它（不裸用
+  `submit(...).result()`），因为超时会把引擎线程当时的栈帧一起写进异常；写侧的状态改动
+  （接管/恢复、点值写入）全部经它投回 loop 线程——运行态只有一条线程碰（§13 那条 GC 死锁的
+  教训）。
+- 引擎 → GUI：`Session.subscribe(sink)`（sink 在 **loop 线程**被调用，只准 emit）+
+  `gui/bridge.py` 的 `EngineBridge` 四个 Qt signal（`packet / point_changed / channel_state /
+  logged`）→ queued connection 投到主线程。**没有"命令队列"这个对象**，也没有
+  `validation_error` 这个 signal：校验清单由调用方自己问 `validate_project()` /
+  `Session.issues()`。
+- 刷新是**拉的**：引擎不推点位值，GUI 以 10Hz 心跳调 `Session.rows(ch)`（M2 定的口径，实测
+  200 行一次 `dataChanged` 0.34ms）
 - 不用 qasync：少一个依赖兼容风险，且引擎可脱离 Qt 用 pytest 跑
 - GUI 永不直接接触 pymodbus 对象
 
 关键接口：
 
-- `Session.load(project) / start_channel(name) / stop_channel(name) / set_point(ch, unit, area,
-  addr, value) / rows(ch) / restore_waveform(...) / subscribe(sink) / shutdown()`
-- `build_sim_devices(project) -> list[SimDevice]`（`backend/simdev.py`）；
-  `ModbusTcpBackend(channel, packet_sink, on_connection, tick_ms, log_sink)` 的
-  `start()` / `stop()` 两个协程
+- `Session.load(project, source=...) / start_channel(name) / stop_channel(name) /
+  set_point(ch, unit, area, addr, value) / rows(ch) / restore_waveform(...) / manual_count(ch) /
+  issues() / mark_dirty() / subscribe(sink) / shutdown()`（`Session` 是唯一对 GUI 暴露的门面）
+- `build_sim_devices(project) -> list[SimDevice]`（`backend/simdev.py`）；一个后端只服务
+  一路通道，所以调用方传的是 `Project(channels=[channel])`
+- **`backend.make_backend(channel, packet_sink, on_connection, tick_ms, log_sink,
+  extra_endpoints)`** 是唯一按 `channel_transport()` 选后端的地方；两条传输共用的那一半
+  （波形 tick、值归属、报文/日志钩子、启停顺序）在 `backend/modbus_base.py` 的
+  `ModbusBackendBase`（**不 import pymodbus**），两个子类 `ModbusTcpBackend` /
+  `ModbusRtuBackend` 各自只填五个钩子（探针 / 建 server / 等起来 / 切帧 / 解析），
+  对外都是 `start()` / `stop()` 两个协程
 - `codec/point_codec.encode(value, datatype, word_order) -> list[int]` /
   `decode(registers, datatype, word_order) -> value`（`PointCodec` 这个类不存在，是一组模块函数）
 - 波形（`codec/waveform.py`）：`waveform_value(name, params, t) -> value` 纯函数（可注入时间戳
   做确定性测试），注册表 `WAVE_BUILDERS` 按名字装配；`clamp_to_datatype(value, datatype) ->
   (value, clamped)` 负责把值钳进类型区间
+- 网络（`net/`，见 §14）：`plan_addresses(adapter, desired, present, owned) -> NetPlan` 与
+  `foreign_owners(desired, others)` 是"要不要动系统"的唯一判据（纯函数）；
+  `startup.prepare(point_table, apply, project)` / `startup.status(point_table, project)` 是
+  启动挂钩与网络页的入口；`endpoints.for_channel(channel, point_table)` 算这一路要额外监听
+  哪些地址；`ModbusTcpBackend(channel, …, extra_endpoints=…)` 把它们挂上
 
 数据流：
 
 - 录入：CSV/GUI → `project` 模型 → `validate()` → 生成 `SimDevice` 列表 → `Backend`
-- 运行：backend 的 tick（默认 100ms，`backend/modbus_tcp.py` 的 `_tick_loop`/`_tick_once`；
-  不在 `engine/`，为的是无头 CLI 也驱动曲线）→ `waveform_value` 算值 → `clamp_to_datatype`
+- 运行：backend 的 tick（默认 100ms，`backend/modbus_base.py` 的 `_tick_loop`/`_tick_once`，
+  两条传输共用一份；不在 `engine/`，为的是无头 CLI 也驱动曲线）→ `waveform_value` 算值 → `clamp_to_datatype`
   钳位 → `PointCodec.encode` →
   **直接改 `SimRuntime.block[..][2]` 的寄存器列表**（`backend/raw_writer.py`；已实测不能用
   `SimCore.async_setValues`，它把 `readonly` 点上的引擎自写一起拒，见 §8/§12）→
   归 `manual` 的点整轮跳过（值归属表在 `backend/ownership.py`：`SourceStore`/`write_targets`/
   `LogDedupe`，见 §7）→ 主站读时 pymodbus 直接出寄存器，不等 GUI
-- 监视：`trace_packet(is_outgoing, bytes)` → `PacketEvent` → 环形缓冲（5000 条）→ 报文窗
+- 监视：`trace_packet(is_outgoing, bytes)` → `PacketEvent` → 环形缓冲（5000 条）→ 报文窗。
+  钩子拿到的是**到达的字节块**，一个块里可能挤了几帧；切帧按传输各一份（TCP 按 MBAP 的
+  length、RTU 按 单元号+PDU+CRC，见 `_split_frames`），值归属要靠它认出主站在写哪个点
+- 网络：点表旁的 `x.net.json` → `net up`（提权）把设备 IP 配到专用网卡 → 同一份声明交给
+  `endpoints.for_channel`（**只对 TCP 通道**：串口没有"设备 IP:端口"这回事，回空）→
+  backend 在主监听之外多挂那几个 `(ip, port)` 监听（共用一份
+  datastore）→ 主站按 `设备IP:端口` 连上，读到的就是那台模拟设备（§14）
 
 ## 5. 数据模型与 CSV
 
@@ -150,7 +183,19 @@ channel, device, unit_id, name, area, address, datatype,
 word_order, initial, waveform, wave_param, readonly
 ```
 
-- `channel`：通道名。TCP 通道 = 一个 host:port 监听；RTU 通道 = 一个串口
+- `channel`：通道名。TCP 通道 = 一个 host:port 监听；RTU 通道 = 一个串口。
+  CSV 的表头是固定的 12 列、**没有串口列**，所以串口通道用**通道名本身**表述：
+  `通道名@串口名[ 波特率[ 帧格式]]`——`com-485-1@COM3`、`com-485-1@COM3 19200`、
+  `com-485-1@COM3 19200 8E1`（段之间是**空格**：逗号在 CSV 里会让整格必须加引号，
+  Excel 里手改一格就会多出一对引号）。不带 `@` 的一律按 TCP 处理（并保留"按尾数猜端口
+  + 记一条 note"的既有口径）。因此 `@` 是**保留字符**：通道名里不许出现它，
+  串口名里不许出现它或空格（§8 两条判据），否则"导出再导入"会解析成另一路设备。
+  导出时把参数按同一语法烘回名字里（全默认时只写 `com-485-1@COM3`），
+  **CSV 往返不丢串口参数**；`@`、波特率与帧格式的解析/渲染各只此一份
+  （`project/csv_io.parse_serial_name` / `_csv_channel_name`），界面不另抄一套。
+- 串口通道的帧格式写作 `8E1`（数据位 / 校验 N|E|O / 停止位），
+  `project/model.parse_frame` 只做**转换**（形状不对回 None），"9N1 这种形状对、值不合法"
+  留给 §8 的白名单报。
 - `unit_id`：1–247。同 `channel + unit_id` 的行合并为一个从站的点位；重复地址在校验阶段报错，
   **不静默覆盖**
 - `area`：`co / di / hr / ir`
@@ -181,6 +226,12 @@ word_order, initial, waveform, wave_param, readonly
 | `step` | `values,interval` | — | 逗号分隔序列按 interval 轮播，循环 |
 
 参数缺失、类型不符、`period=0`、`min>max` 都归入启动前校验错误（§8），不静默取默认。
+
+`type` 决定用哪个通道类：`"rtu"` -> `SerialChannel`（字段就是上面那 6 个串口键，
+一个不多一个不少；类本身就是事实，`type` 由 `channel_transport()` 在写盘时补上），
+其余 -> `TcpChannel`。键序按上面的顺序写，**同一份工程反复存盘产出同样的字节**；
+`port`/`parity` 原样收下（合不合法由 §8 判），`baudrate`/`bytesize`/`stopbits` 必须是
+JSON 整数、`timeout` 必须是数字（`int(1.9)=1` 那种静默截断会让现场看到"波特率变成 9600 了"）。
 
 寄存器区形态：**四区独立** `SimDevice(simdata=(co, di, hr, ir))`，不使用共享块 +
 `use_bit_addressing`。理由：隧道设备点表按四区给，共享块的位编址（`addr*16+bit`）与现场点表
@@ -263,6 +314,14 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 ```
 
 - 通道可独立启停（现场常常只接了一路 485）
+- **串口行（M5）**：通道面板每通道一行、那几格是定宽槽（口径 3/4）。TCP 行 =
+  `名称 | 监听地址 | 端口 | (空) | 启动 | 停止 | 状态`；串口行把前两格换成
+  **串口名**（`COM3`）与**波特率**（`19200`），第三格是**帧格式**（`8E1`），
+  TCP 行那一格**留空并置灰**（置灰不隐藏——隐藏会让后面的格子集体左移，那正是
+  "状态一变布局就跳"里最难看的一种）。面板只做**转换**（`8E1` → 数据位/校验/停止位、
+  `9600` → int），白名单、"两个通道抢同一个串口"这类**判定**全在 §8 那一份里：
+  先写回工程再验，验出新增的错就整体回滚（连输入框一起退回，`gui/channel_panel.py`）。
+  "连接数"那一栏对串口不显示（串口没有"连接"这件事，显示它就是演戏）
 - 报文窗：环形缓冲 5000 条 + 暂停滚动按钮
 - **已实现口径（M2，别再按布局图猜）**：报文过滤是 **4 个平铺可勾选标签**
   `全部/请求/响应/异常`（`gui/packet_view.py` 里**一个 `QComboBox` 都不许有**，换个地方塞下拉
@@ -307,7 +366,13 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
   占用**（不等启动第二阶段炸 bind：Windows 只回 10048 且不带通道名，现场看不出是点表配置错）；
   字序与数据类型冲突——**64 位类型填 `CDAB`/`BADC`、`string` 填非 `ABCD` 才是拦截项**
   （语义有分歧，不许猜），而单寄存器类型（bool/int16/uint16/reg16）填了 `ABCD` 之外的值
-  只记一条 warning（§5）；端口被占（bind 阶段的 Windows 10048）；串口不存在或打不开。
+  只记一条 warning（§5）；端口被占（bind 阶段的 Windows 10048）；**串口那一族（M5）**：
+  串口名为空/不是字符串、串口名含 `@` 或空格（会把 §5 的 CSV 通道名语法拆坏）、
+  波特率不在白名单（1200/2400/4800/9600/19200/38400/57600/115200——写 9500 这种"看着也像数"
+  的值进来，真跑起来是收发全乱、报文窗一片 CRC 错）、`parity` 不在 N/E/O、`bytesize` 不是
+  7/8、`stopbits` 不是 1/2、`timeout` 不是正数、**两个通道配同一个串口**（现象是"一路能收
+  一路全错帧"，而 Windows 只会说 Access is denied）、通道名含 `@`（§5 的保留字符）；
+  以及**运行期**的串口打不开（不存在 / 被别的程序占着 / 驱动没装好）。
   任一条不满足就**整个工程不启动**，把所有错误一次性列成清单，不做第一个错就崩。
 - **运行期**：USB-485 被拔 → 该通道状态置错、树节点标红、日志一条，**不自动重连**
   （现场拔插常是人有意的，静默重连会让人误判设备在线），提供"重启通道"按钮。
@@ -362,7 +427,7 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 2. **M2 GUI 最小可用（代码已全部落地，人工那两条清单还没跑）**：设备树 + 点位表 + 双击改值 +
    通道启停，外加报文监视窗与多通道独立启停（原本排在 M3 的两项一起做掉了，因为界面一次装齐
    比拆两次更省返工）。落地在计划 `docs/superpowers/plans/2026-10-08-modslave-m2-gui.md`，
-   入口 `modslave/gui/app.py` + `python -m modslave <点表> --gui`。全量
+   入口 `simbench/gui/app.py` + `python -m simbench <点表> --gui`。全量
    `.venv/Scripts/python.exe -m pytest` **773 passed in 63.27s**（无 skip、无 xfail，串行连跑 4 轮
    全绿）。此前那条"整轮挂死"的根因与修法见 §12/§13：自动 GC 在非 GUI 线程销毁界面丢弃的
    `QWidget`，与正等引擎回话的主线程互锁；现已定口径**回收只许发生在 GUI 线程**。
@@ -383,9 +448,34 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
    面板与 `start_channel` 一起生效；另一条是**改值不许超出点位跨度**（`len(registers) > pt.span`
    在进引擎之前拒，跨度归点表的初值管）。
    等人的仍是人工那一条：Task 7 Step 5 的界面冒烟清单。
-5. **M5 RTU backend**（串口；唯一需要真硬件冒烟的一段）。
+5. **M5 RTU backend（已完成）**：串口通道（模型/校验/CSV 与 JSON 往返/界面那一行）+
+   `ModbusRtuBackend`。落地在计划 `docs/superpowers/plans/2026-10-12-modslave-m5-rtu.md`
+   （三段执行，偏离表 D1–D12），新增 `simbench/backend/modbus_base.py`（TCP 与 RTU 共用的
+   那一半：波形 tick、值归属、报文/日志钩子、启停顺序；**不 import pymodbus**）与
+   `simbench/backend/modbus_rtu.py`（串口探针 + `ModbusSerialServer` + 按 RTU 帧切帧）。
+   验收**不需要硬件**：`ModbusSerialServer(port="socket://host:port")` 会自建 TCP 监听、
+   主站那一侧是 pyserial 的串口对象，两端跑真 RTU framer（CRC、单元号、静默切帧都在）
+   —— 这条路来自对 pymodbus 3.15 源码分支的实测（`transport/transport.py:151-160`），
+   脚本与输出留档在 `docs/superpowers/notes/2026-10-12-m5-rtu-probes.md`。
+   §10 那张 12 行验收表在 `tests/test_serial_backend.py` 上逐行成立（四区读值逐字对齐 TCP、
+   寄存器/线圈写各"两个 tick 后仍是我写的值"、被协议拒的只读点不切 manual、异常码 2/4、
+   钳位到边界 + 60s 去重日志、报文窗六位置合同、一 TCP 一 RTU 独立起停）；无头命令行也能起
+   串口通道（`python -m simbench x.csv --list` 与真主站在 `socket://` 上读写）。
+   全量 `.venv/Scripts/python.exe -m pytest` **1131 passed**（无 skip、无 xfail，**串行**跑）。
+   等人的只有人工那五条（真 USB-485：读四区、写值看钳位、拔线、串口被占、COM10+ 与高 DPI
+   观感）——自动化替不了，见那份计划 Task 8.3 的步骤表。
+6. **M6 系统网络层（已完成）**：专用网卡（`netloop.inf` 新建 + 账本认领）、设备 IP 的
+   "只加不猜/只删自己的"差异判定、`net show|check|apply|up|clean|init|device` 子命令与
+   提权、启动挂钩（起从站/开界面时自动配，失败不拦启动）、按声明多挂监听、GUI 网络页。
+   落地在 `simbench/net/`（`plan.py`/`spec.py`/`state.py`/`ledger.py`/`device.py`/`win32.py`/
+   `endpoints.py`/`startup.py`/`cli.py`）与 `tests/test_net_*.py`/`test_backend_listeners.py`/
+   `test_gui_net_panel.py`，口径见 §14。全量 `.venv/Scripts/python.exe -m pytest`
+   **1031 passed**（无 skip、无 xfail，**串行**跑：这套件绑真实临时端口，两份并行结果不可信）。
+   **没有单独的计划文档**：这一段是用户在一次会话里直接提的功能，落地口径全部记在 §14 与
+   代码注释里。手动冒烟那一条（真网卡 + 真主站按 `设备IP:端口` 连）仍留在人手上：本机
+   `simbench 模拟网卡` 已建好（ifIndex 67），声明示例见 §14.1。
 
-已确认按 M1→M2→M3→M4→M5 顺序。
+已确认按 M1→M2→M3→M4→M5→M6 顺序（M6 与 M5 互不依赖，谁先都能做）。
 
 **实现计划范围**：第一份计划覆盖 M1–M4，交付一个 TCP 从站 + GUI + CSV + 报文监视 + 预设波形
 的完整可用工具，全程可自动化验证。M5（RTU）单独出第二份计划，因为它需要你在笔记本 + USB-485
@@ -513,10 +603,45 @@ M4 内确认（**已清零**，结论都有用例钉住；这些是"看着像常
   `tests/test_integration_tcp.py::test_one_bad_point_does_not_stop_the_rest_of_the_tick`
   （tick 若给 `co` 走寄存器入口，那个点会因 `ValueError` 不算写掉，`written == 2` 当场红）。
 
-M5 内确认：
+M6 内确认（**已清零**，结论都有用例钉住）：
 
-- `ModbusSerialServer` 的 `trace_packet` 是否同样生效（源码看是继承自 base，但需实测）；
-- 拔 USB-485 后 pymodbus 抛的是哪类异常，好让"通道置错"接得住。
+- **一个 pymodbus server 只按一个 `(host, port)` 建监听**：`ModbusProtocol.listen()` 里是
+  `loop.create_server(factory, host, port)`，`host` 只取 `source_address[0]` 这一个值。→ 声明里
+  的第二个地址只能自己挂 `loop.create_server(server.handle_new_connection, host, port)`；
+  用 pymodbus 自己那个连接工厂，所以每条连接仍登记进 `server.active_connections`、
+  handler 读写的还是 `server.context` —— **所有地址共用同一份寄存器**（每个地址一份副本的
+  后果是"主站从 A 写、界面按主 server 读回旧值，两边都不报错"）。证据：
+  `tests/test_backend_listeners.py::test_both_endpoints_serve_one_datastore` 用两个真主站
+  在两个端口上各写一次各读一次。
+- **"地址不在本机"与"端口被占"在 bind 上只差一个错误码**（Windows 10049 vs 10048），
+  但该做的事相反（去跑 `net up` vs 去停那个进程）。→ 10049 单独成一句带 `net up` 指路的
+  原话。证据：`tests/test_backend_listeners.py::test_an_address_that_is_not_on_this_machine_names_the_fix`。
+- **提权子进程的参数不能走命令行**：`Start-Process -ArgumentList` 是按空格拼成一条命令行的，
+  网卡名"simbench 模拟网卡"里的空格会把参数拆开，子进程 argparse 直接退出 2。→ 参数写进
+  JSON 任务文件，命令行只带一个路径。证据：
+  `tests/test_net_startup.py::test_device_create_relaunches_with_both_subcommand_words`、
+  `::test_device_create_replays_its_job_file`。
+- **跑测试必须能关掉启动挂钩**：用例装载的是 `examples/` 下的点表，而现场那份点表旁边早晚
+  躺着一份 `.net.json` —— 闸门一松，一次 pytest 就真会去改机器上的网卡地址。→
+  `SIMBENCH_NET_AUTO=0`（`tests/conftest.py` 默认关掉），`--no-net` 也落到同一个开关上。
+
+M5 内确认（**第一条已清零，第二条转人工冒烟**）：
+
+- **已实测：`ModbusSerialServer` 的 `trace_packet` / `trace_connect` 都生效。**
+  在 `socket://` 虚拟串口对上，一次 `fc03` + 一次异常响应共 10 帧请求/响应都进了钩子
+  （`0b 03 00 04 00 01 c5 61` 这类带 CRC 的整帧），`trace_connect` 收到 `(True, False)`、
+  主站断开后 `active_connections` 清空。报文窗与连接状态因此在 RTU 上一样成立。
+  脚本与输出：`docs/superpowers/notes/2026-10-12-m5-rtu-probes.md`；
+  用例：`tests/test_serial_backend.py::test_the_rtu_packet_sink_carries_the_contract_fields`。
+- **拔 USB-485 后 pymodbus 抛的是哪类异常 —— 转人工那一次确认。** 源码路径上
+  `SerialTransport.intern_read_ready` 捕的是 `serial.SerialException` 并走 `close(exc=exc)`，
+  但"拔线时底层到底给不给这个异常"本机没有硬件可验；人工冒烟时按计划 Task 8.3 的
+  "拔线"那一条确认：通道要置 `▲ 失败` + 日志一句人话，插回后重新"启动"能起来。
+- 另一条实测副产品（写进代码注释了）：串口打不开时 pymodbus 只抛通用
+  `RuntimeError("Could not start listen, please check address.")`，真实原因（pyserial 的
+  `could not open port 'COM99': FileNotFoundError`）只剩一条 warning，而项目自己的
+  `configure_library_logging(ERROR)` 连那条也压掉 —— 所以 RTU 后端必须先自己开一次串口
+  （`check_serial_is_free`）把原话拿到手。
 
 ## 13. 风险
 
@@ -536,3 +661,120 @@ M5 内确认：
   教训：仪表先拿一次已知事件验准（`gc.collect()` 一次看回调进不进），再谈排除。
 - 打包（PyInstaller onefile + pyserial/pymodbus hidden imports）推迟到 v1 功能稳定后，
   但 v1 不验证打包会留一个尾巴，届时单列里程碑。
+
+## 14. 系统网络层（专用网卡 + 设备 IP）
+
+现场要的形状：点表里每台设备在一张**真实网卡**上有一个 IP，主站按 `设备IP:端口` 连上去，
+读到的是这台模拟设备。这是本工具唯一会**改操作系统**的一层，所以它单独成包
+（`simbench/net/`），安全口径全部写在代码注释与本节里，并由 `tests/test_architecture.py`
+钉死：`subprocess` 只许出现在这个包（`net/state.py` 跑 PowerShell、`net/win32.py` 造/删
+网卡），`gui/`、`engine/` 连 `import subprocess` 都不许有。
+
+### 14.1 一份文件、几条命令
+
+- **`x.net.json`**（点表旁边，`x.csv` → `x.net.json`，`companion_path()`）：`adapter_name` +
+  `devices[]`（`name` / `ip` / 可选 `port`(默认 502) / 可选 `prefix`(默认 24)）。故意做成
+  扁平的，现场拿记事本也能改。
+  为什么不塞进 `project.json`：IP 是**环境相关的**（现场、同事机器、我的机器各不相同），
+  与点表（设备定义）生命周期不同。两份分开，才不会"把点表拷给同事"顺手把地址也带过去。
+- **`python -m simbench net …`**：
+  - 只读（不需要管理员）：`show` 看网卡现状、`check` 把声明/清单与现状对一遍（**有差异回 2**，
+    脚本里当"需要处理"用）、`device show` 看专用网卡在不在；
+  - 改系统（**提权**）：`up`（没有专用网卡就建，再把缺的地址配上，一次 UAC 办完两件事）、
+    `clean`（收回本工程记过账的地址）、`device create|remove`；
+  - `init`：从点表读设备名 + 人来给 IP，生成声明骨架（数量对不上会明说，不静默截断）。
+- 提权只覆盖这几条子命令：当前不是管理员时用 `Start-Process -Verb RunAs` 重跑自己，**参数走
+  JSON 任务文件**（命令行拼参数会被网卡名里的空格拆开），结果也走文件回传（提权进程的
+  stdout 抓不到）。GUI 与其余命令始终保持普通权限。
+
+### 14.2 一律新建专用网卡，永不借用机器上已有的
+
+机器上可能早就有别人装的环回适配器（本机就有一块"以太网 5"）。借用它 = 和别人的配置共用
+一份可变状态：对方改一个字、我们删一个地址，两边互相踩。所以 `net device create` 用系统自带
+的 `C:\WINDOWS\INF\netloop.inf` 造一块 `simbench 模拟网卡`（不需要第三方驱动、不需要重启）。
+
+认一块网卡"是我们的"只有两条证据：账本里记过它的适配器 GUID，或者名字**精确**等于
+`simbench 模拟网卡`。**不按描述认**：机器上别的环回适配器描述一模一样（`Microsoft KM-TEST
+环回适配器`），按描述认会把它们当成自己的。卸载走设备实例（`pnputil /remove-device`）。
+
+账本（`%LOCALAPPDATA%\simbench\net-ledger.json`）记着"我们加过哪些地址、造过哪块网卡"；
+它坏掉时方向必须是安全的：`owned` 一律为空 → 一个地址都不回收。
+
+### 14.3 三条差异口径（纯函数，可脱离真实网卡单测）
+
+判定集中在 `net/plan.py`，因为"要不要动系统"不该由"当时网卡上正好有什么"来决定：
+
+1. **只加不猜**：声明要的地址，网卡上缺就加；已经有了什么都不做（幂等）。
+2. **掩码不一致不静默改**：同一个 IP 掩码不同单独报出来让人定——改掩码会把同网段的
+   路由行为一起改掉，而且这不是这台模拟器该替现场做的决定。
+3. **只删自己的**：能删的只有"账本记过 + 现在真的在网卡上 + 声明已经不要了"三项同时成立。
+   网卡上原有地址、DHCP 租约、`169.254.x` 自动地址一律不碰（`PrefixOrigin` 不是 Manual 的
+   一律视为"不是我们的"），**只报数**。
+
+另有一条防"撞了别人"的前置检查：同一个 IP 不能同时挂在两块网卡上（不先查出来，直接加只会
+得到一句英文的 `The object already exists.`）。想加的地址已经配在别的网卡上时先报出来，
+说清它在哪块网卡上，让人决定是迁走还是换 IP。
+
+### 14.4 启动挂钩：起从站/开界面时自动配网络
+
+`net/startup.py`。四条口径，每条都对应一次现场判断：
+
+1. **没有声明文件就一声不吭**（IP 是环境相关的，"这个工程没声明网络"是合法状态）；声明文件
+   **坏了**（半截 JSON）报一句原话——那是真写错了，但同样不拦启动。
+2. **`SIMBENCH_NET_AUTO=0` 是总闸**（`--no-net` 落到同一个开关上）。测试与 CI 靠它保证
+   **绝不碰真网卡**：用例装载的是 `examples/` 下的点表，而现场那份点表旁边早晚躺着一份
+   `.net.json`——闸门一松，跑一次 pytest 就会真去改机器上的网卡地址
+   （`tests/conftest.py` 默认关掉）。
+3. **已经一致时不提权**：先只读对账，只有真要动系统才调 `net up`。每次启动弹一次 UAC，
+   用户很快就会把整个功能关掉。
+4. **网络这一步永远不许把模拟器拦在门外**：读系统失败、UAC 被取消、地址加不上，都只落一行话，
+   不改退出码（`net/startup.py` 里那处 `except Exception` 是全项目唯一一处兜底，理由写在那里）。
+   反过来"网卡没配好"和"点表不合法"不是一个量级：后者才该拒绝启动。
+
+无头 CLI 与 GUI 两条启动路径都接（`__main__._prepare_network` / `gui.app._prepare_network`）；
+`--check`/`--list` 这类只读命令**不接**（它们的语义就是"绝不改系统"）。
+
+`--no-net` 只管"别自动配"，**不影响监听**：声明里的地址照样要听（那是"照着声明起服务"，
+不是"改系统"）。真没配好时会带着指路的话拒绝启动（见 §14.5 末条），而不是安静地只起一个
+本机端口——后者现场看到的是"主站连不上，日志里却在 listening"，最难查。
+
+### 14.5 监听：主站到底该连哪
+
+主站连的是**设备那一侧**的地址（声明说 `10.136.107.240:502`，主站就往那儿连），而通道自己的
+`host:port` 通常是点表写给本机自测用的（`0.0.0.0:5020`）。所以后端在通道自己的监听之外，
+把这一路声明里的地址也听上：
+
+- `net/endpoints.py` 算"额外听哪些"：**按设备名配对**（`net init` 就是按点表的设备名生成的
+  声明）。按顺序配会在点表增删一台设备之后把 IP 整体错位一格，而那种错配是静默的，现场只
+  看到"设备读数全不对"。名字对不上的不当成错误，但**也不许静默**：启动挂钩与网络页各报一句。
+- 三条"不重复听"的口径，否则启动就撞上自己刚绑的地址：通道自己那个端点不重复挂；通道 host
+  是通配（`0.0.0.0`/`::`/空）时同端口的声明地址已被它盖住；同一 `(ip, port)` 只挂一次。
+- 多挂的监听**共用同一份 datastore**（实现见 §12 那条"一个 server 只按一个地址建监听"）：
+  主站从 A 地址写、从 B 地址读得到，界面读回也是同一个值。代价是一路通道里任意地址都能寻址
+  到这一路的全部 unit id——v1 接受这条口子（Modbus 本来就是按 unit id 寻址，主站只读自己那台）。
+- 地址不在本机（`net up` 还没跑）与端口被占分开报：前者指路去跑 `net up`，后者让人去停那个
+  进程。启动失败时把已经支起来的监听全收干净（包括额外那几个），不许留半个后端占着端口。
+
+### 14.6 界面
+
+`gui/net_panel.py`（下栏第三个标签页"网络"）：现状 + 差异 + 「应用（提权）」。三条口径：
+文字进只读文本框（会自动换行的标签一换行就改高度，布局恒等那几条断言立刻红）；
+**刷新只读**（走 `startup.status()`，总闸关着也照样能看——总闸管的是"启动时别自动动手"，
+不是"不许看"）；**切到网络页才读系统**（读一次是几次 PowerShell，秒级，"打开点表"不许
+跟着等）。「应用」走 `net up` 那条路，结论一句话落状态栏。收回地址（`net clean`）不放在
+界面里：那是要人逐条确认的动作，留在命令行。
+
+### 14.7 未决
+
+- **主站跑在哪台机器上**。专用网卡是系统自带的**环回**适配器（`netloop.inf` 的 KM-TEST），
+  它不接任何物理网络，所以这些 IP 只在**本机**可路由：主站（平台 / 网关 / 调试工具）与模拟器
+  在同一台机器上时，按 `设备IP:端口` 连得通——本机实测，真主站连 `10.136.107.240:18823`
+  读到了 COVI-1 的 CO 浓度 `12.5`（float32 CDAB）与固件版本 `7`，启动那行同时报出
+  `listening on 127.0.0.1:18824、10.136.107.240:18823`。要让**另一台**机器连上，得靠现场
+  自己的路由或隧道（本项目名字里的 tunnel 就是干这个的），那属于现场的网络设计。
+- **"以太网 5"上那 79 个地址要不要迁到专用网卡**。同一个 IP 不能同时挂在两块网卡上，所以
+  只要那 79 个里有声明要用的地址，`net up` 就会报"已被占用"而不是硬加。迁不迁是现场决定
+  （那是别人手工配的地址，工具不替现场做主）。
+- **502 端口与防火墙**：Windows 防火墙拦不拦首次监听 502，取决于现场策略；本机自测用
+  `127.0.0.1:5020` 那一套不受影响（见 §13 的同一条）。
+- 声明里 `port` 只影响监听，`net up`/`check` 不碰端口（端口不是操作系统的网络配置）。

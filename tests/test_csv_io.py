@@ -2,13 +2,13 @@
 
 import pytest
 
-from modslave.project import csv_io, model
-from modslave.project.csv_io import (
+from simbench.project import csv_io, model
+from simbench.project.csv_io import (
     HEADER, format_wave_param, parse_wave_param, read_csv, read_csv_file,
     write_csv, write_csv_file,
 )
-from modslave.project.model import Device, Point, Project, TcpChannel
-from modslave.project.validate import error_lines, validate_project
+from simbench.project.model import Device, Point, Project, TcpChannel
+from simbench.project.validate import error_lines, validate_project
 
 ROWS = """channel,device,unit_id,name,area,address,datatype,word_order,initial,waveform,wave_param,readonly
 tcp-502,COVI-1,11,CO浓度,hr,0,float32,CDAB,12.5,sine,base=20;amp=15;period=60,true

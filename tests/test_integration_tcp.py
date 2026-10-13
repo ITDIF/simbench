@@ -19,16 +19,16 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
-from modslave.backend.events import LogLine
-from modslave.backend.modbus_tcp import (
+from simbench.backend.events import LogLine
+from simbench.backend.modbus_tcp import (
     _DropDatastoreNoise, ModbusTcpBackend, PortInUseError, _bind_probe,
     _connect_probe, _is_being_served, check_port_is_free, configure_library_logging,
     parse_packet,
 )
-from modslave.codec.point_codec import encode
-from modslave.engine.session import Session
-from modslave.project.model import Device, Point, Project, TcpChannel
-from modslave.project.validate import validate_project
+from simbench.codec.point_codec import encode
+from simbench.engine.session import Session
+from simbench.project.model import Device, Point, Project, TcpChannel
+from simbench.project.validate import validate_project
 from tests.conftest import free_port
 
 # 一张典型隧道设备点表：四个区都有真点位，字序/类型/只读各覆盖到
@@ -472,12 +472,12 @@ def test_open_backend_fixture_adds_no_threads_and_frees_the_port(open_backend,
                                                                 engine_runner):
     """起停一个 backend 不留引擎线程、端口能重新 bind。
 
-    只点名 `modslave*` 线程：探针用的 `asyncio.to_thread` 工作线程本来就有生有灭，拿
+    只点名 `simbench*` 线程：探针用的 `asyncio.to_thread` 工作线程本来就有生有灭，拿
     "全部线程数不变"去判会把一次正常启动误判成泄漏。共享 runner 自己那两条 loop/pump
     线程横跨整个会话，属于预期内，所以比的是"集合没多出新的"。
     """
     def engine_threads():
-        return {t.name for t in threading.enumerate() if t.name.startswith("modslave")}
+        return {t.name for t in threading.enumerate() if t.name.startswith("simbench")}
 
     before = engine_threads()
     port = free_port()
@@ -493,7 +493,7 @@ def test_start_refuses_a_port_that_is_already_listened():
     """端口已经有人在监听时，start() 必须在把端口交给 pymodbus 之前就拒绝。
 
     实测：pymodbus 3.15.0 在 Windows 上连开两个 `ModbusTcpServer` 绑同一 `(host, port)`
-    会**两个都成功**（`_await_listener` 只看自己 transport 是否为 None，证明不了端口归属），
+    会**两个都成功**（`_await_ready` 只看自己 transport 是否为 None，证明不了端口归属），
     netstat 能叠出 3 个 LISTENING；主站的连接被先起来那个吃掉，于是"改了点位重启模拟器"
     之后平台读到的还是旧值，而且两条日志都说 listening on 同一端口——没有任何线索指向
     上一个没退干净的实例。所以这里自己拿裸 `socket.bind` 探一次。
@@ -518,11 +518,15 @@ def test_start_refuses_a_port_that_is_already_listened():
         assert backend._server is None                    # 没留下半个后端
 
 
-def test_await_listener_reports_a_late_bind_failure():
-    """探针之后仍可能晚到失败（TOCTOU、保留端口 10013）：`_await_listener` 照旧抛真异常。
+def test_await_ready_reports_a_late_bind_failure():
+    """探针之后仍可能晚到失败（TOCTOU、保留端口 10013）：`_await_ready` 照旧抛真异常。
 
     `serve_forever()` 只有两种提前结束：bind 失败与被 shutdown。所以 task 一结束就说明
     从站没起来，这里把真实异常原样抛出去，不许"start 成功但外面连不上"（静默失败）。
+
+    名字在 M5 Task 3 抽基类时从 `_await_ready` 改成 `_await_ready`（函数名保留旧称呼是
+    因为它在文档里被引用过）：两条传输的"起来了"判据不同（TCP 等 listener、RTU 等串口
+    transport），但**这一条纪律是同一条**——所以它是基类的钩子，断言一个字没动。
     """
     port = free_port()
     backend = ModbusTcpBackend(tunnel_project(port).channels[0])
@@ -536,7 +540,7 @@ def test_await_listener_reports_a_late_bind_failure():
     async def scenario():
         task = asyncio.create_task(failing_serve_forever())
         with pytest.raises(RuntimeError, match="Could not start listen"):
-            await backend._await_listener(NoListener(), task)
+            await backend._await_ready(NoListener(), task)
 
     asyncio.run(scenario())
 
@@ -575,8 +579,8 @@ def test_the_port_probe_must_not_block_the_engine_loop(monkeypatch):
     loop 上，探针堵多久界面就冻多久；两个通道一起启动时后一个还得等前一个探完。
     判据：探针故意做慢（0.3s），这段时间同一 loop 上的另一个协程必须照常推进。
     """
-    import modslave.backend.modbus_tcp as mbt
-    from modslave.engine.runner import EngineRunner
+    import simbench.backend.modbus_tcp as mbt
+    from simbench.engine.runner import EngineRunner
 
     inside_probe = threading.Event()
 
@@ -585,7 +589,7 @@ def test_the_port_probe_must_not_block_the_engine_loop(monkeypatch):
         time.sleep(0.3)                      # 模拟 connect 探针的阻塞窗口
 
     monkeypatch.setattr(mbt, "check_port_is_free", slow_probe)
-    runner = EngineRunner(name="modslave-probe-loop")
+    runner = EngineRunner(name="simbench-probe-loop")
     runner.start()
     ticks: list[int] = []
 
@@ -782,7 +786,7 @@ def test_the_tick_task_dies_with_the_backend(engine_runner):
 def test_the_tick_cancel_runs_before_the_shutdown_not_after(engine_runner,
                                                             monkeypatch):
     """钉住 `stop()` 里"先取消 tick 任务"这条**顺序**本身（承诺在
-    `modslave/backend/modbus_tcp.py` 的 `stop()` 开头那段注释里，不在行号里）。
+    `simbench/backend/modbus_tcp.py` 的 `stop()` 开头那段注释里，不在行号里）。
 
     为什么"任务 done 了"顶不掉这条：早取消与晚取消的任务都是 `done()==True`，把
     cancel 挪到 `server.shutdown()` 之后 837 条照样全绿。能分辨的只有**结束形态**——
@@ -1632,7 +1636,7 @@ def test_the_probe_does_not_refuse_a_port_whose_previous_owner_was_killed():
 
              "s = socket.socket()\n"
 
-             "s.bind(('127.0.0.1', int(os.environ['MODSLAVE_HOG_PORT'])))\n"
+             "s.bind(('127.0.0.1', int(os.environ['SIMBENCH_HOG_PORT'])))\n"
 
              "s.listen(5)\n"
 
@@ -1642,7 +1646,7 @@ def test_the_probe_does_not_refuse_a_port_whose_previous_owner_was_killed():
 
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
 
-            encoding="utf-8", env=dict(os.environ, MODSLAVE_HOG_PORT=str(port)))
+            encoding="utf-8", env=dict(os.environ, SIMBENCH_HOG_PORT=str(port)))
 
         try:
 

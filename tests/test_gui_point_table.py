@@ -23,14 +23,14 @@ import dataclasses
 import pytest
 from PySide6 import QtCore
 
-from modslave.csv_io_entry import load_point_table
-from modslave.engine.point_source import FakeEngine, session_source
-from modslave.engine.runner import EngineRunner
-from modslave.engine.session import Row, Session
-from modslave.gui.point_table import (COLUMNS, PointTableModel, PointTableView,
+from simbench.csv_io_entry import load_point_table
+from simbench.engine.point_source import FakeEngine, session_source
+from simbench.engine.runner import EngineRunner
+from simbench.engine.session import Row, Session
+from simbench.gui.point_table import (COLUMNS, PointTableModel, PointTableView,
                                       conventional)
-from modslave.project.model import Project, TcpChannel
-from modslave.project.validate import validate_project
+from simbench.project.model import Project, TcpChannel
+from simbench.project.validate import validate_project
 from tests.conftest import free_port
 
 CSV = "examples/covi-tunnel.csv"

@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from pymodbus.simulator import DataType, SimData, SimDevice
 from pymodbus.simulator.simcore import SimCore
-from modslave.backend.raw_writer import RawRegisterWriter
+from simbench.backend.raw_writer import RawRegisterWriter
 
 
 def core():

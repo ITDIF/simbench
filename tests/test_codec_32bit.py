@@ -1,6 +1,6 @@
 # tests/test_codec_32bit.py
 import pytest
-from modslave.codec.point_codec import decode, encode
+from simbench.codec.point_codec import decode, encode
 
 V = 0x12345678          # A=0x12 B=0x34 C=0x56 D=0x78
 EXPECT = {

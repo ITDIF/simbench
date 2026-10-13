@@ -8,8 +8,8 @@ import threading
 
 from PySide6 import QtCore
 
-from modslave.backend.events import ChannelState, LogLine, PacketEvent, PointChanged
-from modslave.gui.bridge import EngineBridge
+from simbench.backend.events import ChannelState, LogLine, PacketEvent, PointChanged
+from simbench.gui.bridge import EngineBridge
 
 
 def test_forward_reaches_main_thread_from_worker(qapp):

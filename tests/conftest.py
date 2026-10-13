@@ -2,7 +2,7 @@
 
 调用形态与后面 GUI 计划一致：asyncio loop 跑在专用线程，测试主体（真主站 client）在主线程，
 所以 backend 的 start/stop 必须投回 loop 线程执行。M2 起这个线程由生产件
-`modslave.engine.runner.EngineRunner` 持有——测试不再养一份私有实现，跑的就是生产那条路。
+`simbench.engine.runner.EngineRunner` 持有——测试不再养一份私有实现，跑的就是生产那条路。
 
 Qt 这边只需要一个会话级的 `offscreen` QApplication：实测该平台下 `show()` +
 `processEvents()` 之后控件几何是真的（900 宽、工具栏 27 高），所以"状态变化不许挪布局"
@@ -22,8 +22,14 @@ import pytest
 # 之后再改这个变量只会留下一个已经起在 windows 平台上的 QApplication（CI/无头机器上直接崩）。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from modslave.backend.modbus_tcp import ModbusTcpBackend
-from modslave.engine.runner import EngineRunner
+# 启动挂钩的总闸（口径见 simbench/net/startup.py）：用例会装载 examples/ 下的点表，
+# 而现场那份点表旁边早晚躺着一份 `.net.json`——不关掉这道闸，跑一次 pytest 就会真的去
+# 改机器上的网卡地址（弹 UAC、动系统网络）。这里按 setdefault 写：想验挂钩本身的人
+# 可以显式把这个变量设成别的值再跑。
+os.environ.setdefault("SIMBENCH_NET_AUTO", "0")
+
+from simbench.backend.modbus_tcp import ModbusTcpBackend
+from simbench.engine.runner import EngineRunner
 
 # ---- 回收只许发生在 GUI 线程（口径见 spec §13 那条跨线程 ~QWidget 死锁）。
 # 引擎线程一旦触发自动回收，而回收链里有一个 GUI 线程刚丢弃的 QWidget 包装器，shiboken 就会
@@ -50,10 +56,20 @@ _CALL_TIMEOUT = 10.0
 
 @pytest.fixture(scope="session")
 def qapp():
-    """offscreen 模式的 QApplication。实测 show()+processEvents() 后几何是真的。"""
+    """offscreen 模式的 QApplication，**并在这里把主题落上**。实测 show()+processEvents()
+    后几何是真的。
+
+    主题是进程级的一次性外观改动（`gui/theme.py`，重复调用直接返回）。放在这里而不是各个
+    用例里，是为了让整批界面断言都跑在真主题的字体与内边距下：主题最容易犯的错就是"加个
+    padding 把定宽槽撑破"，而那批槽位（通道状态、报文过滤、状态栏摘要）正是操作员"点哪里"
+    的合同——跑在默认样式上量几何，这类破损永远测不出来。
+    """
     from PySide6 import QtWidgets
 
+    from simbench.gui import theme
+
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    theme.apply_theme(app)
     yield app
     # 不 quit：QApplication 退出后无法再建，同一次会话里还要给后面的用例用
 
@@ -110,7 +126,7 @@ def engine_runner():
     降到 21s 且连跑不红。被停掉的 backend 会把它的 listener 协程留在共享 loop 上，
     这正是我们要测的东西留在内存里，不影响端口。
     """
-    runner = EngineRunner(name="modslave-engine")
+    runner = EngineRunner(name="simbench-engine")
     runner.start()
     try:
         yield runner

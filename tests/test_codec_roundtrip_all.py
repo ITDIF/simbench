@@ -10,8 +10,8 @@
 """
 import pytest
 
-from modslave.codec.point_codec import decode, encode
-from modslave.project.model import (
+from simbench.codec.point_codec import decode, encode
+from simbench.project.model import (
     BOOL, DATATYPES, FLOAT32, FLOAT64, STRING, _FLOAT_LIMIT, _INT_BOUNDS,
     register_span, word_orders_allowed,
 )

@@ -5,11 +5,11 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from modslave.project import validate
-from modslave.project.model import (
+from simbench.project import validate
+from simbench.project.model import (
     DATATYPES, Device, Point, Project, TcpChannel, WAVEFORMS, word_orders_allowed,
 )
-from modslave.project.validate import Issue, error_lines, validate_project
+from simbench.project.validate import Issue, error_lines, validate_project
 
 
 def _p(**kw):

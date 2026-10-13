@@ -19,11 +19,11 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
-from modslave import __main__ as cli
-from modslave.backend.modbus_tcp import ModbusTcpBackend, PortInUseError
-from modslave.codec.point_codec import encode
-from modslave.csv_io_entry import load_point_table
-from modslave.project.validate import error_lines
+from simbench import __main__ as cli
+from simbench.backend.modbus_tcp import ModbusTcpBackend, PortInUseError
+from simbench.codec.point_codec import encode
+from simbench.csv_io_entry import load_point_table
+from simbench.project.validate import error_lines
 from tests.conftest import free_port
 
 # 从仓库根取示例点表：不依赖 pytest 的 cwd（在 IDE 里单跑一个文件时也一样成立）
@@ -35,8 +35,8 @@ HEADER = ("channel,device,unit_id,name,area,address,datatype,word_order,initial,
 
 
 def run_cli(*args, timeout: int = 60) -> subprocess.CompletedProcess:
-    """跑一次 `python -m modslave ...`。stdout/stderr 一律按 utf-8 解（见中文那条用例）。"""
-    return subprocess.run([sys.executable, "-m", "modslave", *args],
+    """跑一次 `python -m simbench ...`。stdout/stderr 一律按 utf-8 解（见中文那条用例）。"""
+    return subprocess.run([sys.executable, "-m", "simbench", *args],
                           capture_output=True, text=True, encoding="utf-8",
                           errors="replace", cwd=str(ROOT), timeout=timeout)
 
@@ -44,7 +44,7 @@ def run_cli(*args, timeout: int = 60) -> subprocess.CompletedProcess:
 def start_server(port: int, table: str = CSV):
     """真起一个 CLI 子进程（`--quiet`）；起来没有只靠"主站读得通"判，不猜延迟。"""
     return subprocess.Popen(
-        [sys.executable, "-m", "modslave", table, "--host", "127.0.0.1",
+        [sys.executable, "-m", "simbench", table, "--host", "127.0.0.1",
          "--port", str(port), "--quiet"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace", cwd=str(ROOT))
@@ -99,7 +99,7 @@ def wave_project(tmp_path, value: str = "424242", lamp_value: str = "") -> str:
 
 
 def test_the_headless_path_drives_the_waveforms(tmp_path):
-    """M4 的曲线在命令行这一路也要动：`python -m modslave x.csv` 与 `--gui` 起的是同一个
+    """M4 的曲线在命令行这一路也要动：`python -m simbench x.csv` 与 `--gui` 起的是同一个
     工程，读到的是同一批点位，不该一个有波形一个没有。
 
     tick 之所以住在 `backend/` 而不是 `Session` 里，就是为了这一刻（无头路径不建 Session）。
@@ -195,7 +195,7 @@ def wait_until_answering(proc, port: int,
         if proc.poll() is not None:
             out, err = drain(proc)
             raise AssertionError(
-                f"modslave exited early with rc={proc.returncode}\n"
+                f"simbench exited early with rc={proc.returncode}\n"
                 f"--- stdout ---\n{out}\n--- stderr ---\n{err}")
         client = ModbusTcpClient("127.0.0.1", port=port, timeout=1.0)
         try:
@@ -462,7 +462,7 @@ def test_gui_entry_loads_the_point_table_and_starts_nothing(qapp):
 
     命令行给的是点表路径，不是"顺便替我把从站起了"的授权；`●` 亮了操作员却没人让他起。
     """
-    from modslave.gui.app import build_app
+    from simbench.gui.app import build_app
 
     _app, window, session = build_app([CSV])
     try:
@@ -503,3 +503,86 @@ def test_point_table_is_required_unless_the_gui_is_opened(capsys):
         cli.main([])
     assert exc.value.code == 2
     assert "point table is required" in capsys.readouterr().err
+
+
+# ---------- 串口通道（M5 接线：能列出、能被点名；后端还没落地时一行错误） ----------
+
+def rtu_table(tmp_path, channel="com-485-1@COM3 19200 8E1"):
+    """一张只有一路串口通道的点表（CSV 的通道列用 `name@COM3 19200 8E1` 写）。"""
+    path = tmp_path / "rtu.csv"
+    path.write_text(HEADER + f"{channel},COVI-1,11,温度,hr,0,uint16,ABCD,7,const,,false\n",
+                    encoding="utf-8")
+    return str(path)
+
+
+def test_list_prints_the_serial_parameters_of_an_rtu_channel(tmp_path):
+    """`--list` 那一行与后端的状态 detail 用同一句话（`model.serial_summary`）。"""
+    result = run_cli(rtu_table(tmp_path), "--list")
+    assert result.returncode == 0, result.stderr
+    assert "com-485-1 (COM3 19200 8E1)" in result.stdout
+
+
+def test_serving_a_channel_whose_serial_port_cannot_be_opened_is_one_line(tmp_path):
+    """串口打不开（本机没有 COM999）：一行错误 + 退出码 2。
+
+    探针那一句必须带 pyserial 的原话与串口名（"这个口不存在" vs "被别的程序占着"要做的事
+    完全不同），不许甩 traceback（现场读不懂），更不许静默成功——那会让人以为从站在跑。
+    """
+    result = run_cli(rtu_table(tmp_path, channel="com-485-1@COM999"), "--quiet")
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "COM999" in result.stderr and "com-485-1" in result.stderr
+    assert "could not open port" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_a_port_override_does_not_touch_an_rtu_channel(tmp_path):
+    """`--port` 是 TCP 的东西：对串口通道要说一句"没作用"，别让它以为自己改到了。"""
+    project, notes, issues = load_point_table(rtu_table(tmp_path),
+                                              port_overrides={"com-485-1": 5020})
+    assert project.channels[0].port == "COM3", "串口名被端口覆盖改掉了"
+    assert any("ignored" in note for note in notes), notes
+    assert error_lines(issues) == []
+
+
+def test_host_and_port_overrides_on_an_all_serial_table_are_reported(tmp_path):
+    """全串口的点表 + `--port`：命令行要明说这两个参数对这份点表没作用（不许静默）。"""
+    result = run_cli(rtu_table(tmp_path), "--port", "5020", "--check")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "only apply to TCP channels" in result.stderr
+
+
+def test_a_socket_backed_rtu_channel_serves_a_real_master(tmp_path):
+    """串口那一整条命令行路：`socket://` 当虚拟串口（M5 计划 §2 实测的路径）。
+
+    真 `ModbusSerialClient` 读得到点表初值、写进去的那一格能读回来——不需要任何硬件，
+    也不需要新的命令行开关：串口名本来就是 CSV 通道列里那一段。
+    """
+    from pymodbus import FramerType
+    from pymodbus.client import ModbusSerialClient
+
+    port = free_port()
+    table = rtu_table(tmp_path, channel=f"com-485-1@socket://127.0.0.1:{port}")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "simbench", table, "--quiet"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", cwd=str(ROOT))
+    client = ModbusSerialClient(port=f"socket://127.0.0.1:{port}",
+                                framer=FramerType.RTU, baudrate=9600, timeout=2.0)
+    try:
+        assert wait_until_answering_serial(client), drain(proc)
+        assert client.read_holding_registers(0, count=1, device_id=11).registers == [7]
+        client.write_register(0, 4242, device_id=11)
+        assert client.read_holding_registers(0, count=1, device_id=11).registers == [4242]
+    finally:
+        client.close()
+        terminate(proc)
+
+
+def wait_until_answering_serial(client, timeout: float = 10.0) -> bool:
+    """等主站真读得到（子进程起监听要几百毫秒）：只靠"读得通"判，不猜延迟。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if client.connect():
+            return True
+        time.sleep(0.05)
+    return False

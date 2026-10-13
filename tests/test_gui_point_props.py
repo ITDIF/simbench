@@ -22,14 +22,14 @@ import pathlib
 import pytest
 from PySide6 import QtWidgets
 
-from modslave.csv_io_entry import load_point_table
-from modslave.engine.packets import PacketStore
-from modslave.engine.session import Session
-from modslave.gui import main_window as main_window_module
-from modslave.gui.point_props import PointPropertiesDialog
-from modslave.gui.main_window import MainWindow
-from modslave.project.model import DATATYPES, Device, Point, TcpChannel
-from modslave.project.validate import error_lines, validate_project
+from simbench.csv_io_entry import load_point_table
+from simbench.engine.packets import PacketStore
+from simbench.engine.session import Session
+from simbench.gui import main_window as main_window_module
+from simbench.gui.point_props import PointPropertiesDialog
+from simbench.gui.main_window import MainWindow
+from simbench.project.model import DATATYPES, Device, Point, TcpChannel
+from simbench.project.validate import error_lines, validate_project
 from tests.conftest import free_port
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]

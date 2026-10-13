@@ -20,12 +20,12 @@
 import pytest
 from PySide6 import QtWidgets
 
-from modslave.backend.events import ChannelState, LogLine, PacketEvent
-from modslave.csv_io_entry import load_point_table
-from modslave.engine.runner import EngineRunner
-from modslave.engine.session import Session
-from modslave.gui.channel_panel import STATUS_LABELS, ChannelPanel
-from modslave.project.model import TcpChannel
+from simbench.backend.events import ChannelState, LogLine, PacketEvent
+from simbench.csv_io_entry import load_point_table
+from simbench.engine.runner import EngineRunner
+from simbench.engine.session import Session
+from simbench.gui.channel_panel import STATUS_LABELS, ChannelPanel
+from simbench.project.model import TcpChannel
 from tests.conftest import free_port
 
 CSV = "examples/covi-tunnel.csv"

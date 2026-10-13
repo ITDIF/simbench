@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from modslave.engine.runner import EngineRunner
+from simbench.engine.runner import EngineRunner
 
 
 async def noop():
@@ -31,7 +31,7 @@ def test_submit_returns_result_and_runs_on_engine_thread():
     try:
         assert runner.submit(noop).result(5) == 42
         assert runner.thread_ident != threading.get_ident()
-        assert runner.thread_name.startswith("modslave-engine")
+        assert runner.thread_name.startswith("simbench-engine")
     finally:
         runner.stop()
 
@@ -158,8 +158,8 @@ def test_stop_raises_when_a_thread_refuses_to_die(monkeypatch):
     try:
         with pytest.raises(RuntimeError, match="did not stop") as caught:
             runner.stop()
-        assert "modslave-engine" in str(caught.value)
-        assert "modslave-engine-events" in str(caught.value)
+        assert "simbench-engine" in str(caught.value)
+        assert "simbench-engine-events" in str(caught.value)
     finally:
         monkeypatch.undo()
         pump_thread.join(5)

@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from modslave.project.json_io import VERSION, from_dict, load, save, to_dict, to_json
-from modslave.project.model import Device, Point, Project, TcpChannel
-from modslave.project.validate import error_lines, validate_project
+from simbench.project.json_io import VERSION, from_dict, load, save, to_dict, to_json
+from simbench.project.model import Device, Point, Project, TcpChannel
+from simbench.project.validate import error_lines, validate_project
 
 
 def sample():

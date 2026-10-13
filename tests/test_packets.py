@@ -19,14 +19,14 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
-from modslave.backend.events import PacketEvent
-from modslave.backend.modbus_tcp import parse_packet
-from modslave.csv_io_entry import load_point_table
-from modslave.engine.packets import (
+from simbench.backend.events import PacketEvent
+from simbench.backend.modbus_tcp import parse_packet
+from simbench.csv_io_entry import load_point_table
+from simbench.engine.packets import (
     ALL, EXCEPTIONS, FILTERS, REQUESTS, RESPONSES, PacketStore, filters_for,
 )
-from modslave.engine.runner import EngineRunner
-from modslave.engine.session import Session
+from simbench.engine.runner import EngineRunner
+from simbench.engine.session import Session
 from tests.conftest import free_port
 
 
@@ -215,7 +215,7 @@ def session_store():
 
     runner 由本夹具持有并传进 Session，所以 `session.shutdown()` **不会**停它
     （`_owns_runner` 为 False，M2 的归属口径）——不在这里 `runner.stop()`，
-    每条端到端用例都会留下 `modslave-engine` + `-events` 两个线程。
+    每条端到端用例都会留下 `simbench-engine` + `-events` 两个线程。
     """
     project, _notes, issues = load_point_table("examples/covi-tunnel.csv")
     assert not [i for i in issues if i.level == "error"]

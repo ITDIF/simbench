@@ -13,15 +13,16 @@
 import ast
 import pathlib
 
-import modslave
+import simbench
 
 LIBRARY_ONLY = ("pymodbus", "serial")        # 只许出现在 backend/
 GUI_ONLY = ("PySide6", "PyQt5")              # 只许出现在 gui/（M2 才落地）
 BACKEND = "backend"
 GUI_PACKAGE = "gui"
+SYSTEM_NET = "net"                        # 唯一允许碰系统网络（netsh / PowerShell）的包
 
-# 由包自己的位置推出根目录：pytest 的 cwd 变了也不影响判定（不依赖 "modslave" 这个相对路径）
-ROOT = pathlib.Path(modslave.__file__).resolve().parent
+# 由包自己的位置推出根目录：pytest 的 cwd 变了也不影响判定（不依赖 "simbench" 这个相对路径）
+ROOT = pathlib.Path(simbench.__file__).resolve().parent
 
 
 def _top_module(name: str) -> str:
@@ -114,7 +115,9 @@ def test_backend_actually_ownes_the_library_imports():
     """
     importers = {file.name for file in _python_files(BACKEND)
                  if "pymodbus" in _imported_modules(file)}
-    assert {"simdev.py", "raw_writer.py", "modbus_tcp.py"} <= importers
+    # `modbus_rtu.py` 也 import pymodbus（RTU 从站），一并列进"该有的人"里：
+    # 少了它，这一条只证明"TCP 那半边还在"，串口那半边的依赖被删掉也不会红。
+    assert {"simdev.py", "raw_writer.py", "modbus_tcp.py", "modbus_rtu.py"} <= importers
 
 
 def test_project_and_codec_do_not_touch_gui():
@@ -133,7 +136,7 @@ def test_backend_does_not_touch_gui():
 
 
 def test_only_gui_touches_pyside6():
-    """PySide6 只许出现在 modslave/gui/。
+    """PySide6 只许出现在 simbench/gui/。
 
     这条是 M2 新增的线：引擎/点表/后端一旦摸 Qt，pytest 就必须起事件循环，
     内核测试立刻和界面绑死——那是 M1 特意拆开的东西。
@@ -151,7 +154,7 @@ def test_gui_actually_exists_and_is_the_only_qt_owner():
     那么把 gui/ 的 Qt import 全删掉（或目录名拼错导致没人被豁免）这条照样绿。
     """
     files = _python_files(GUI_PACKAGE)
-    assert files, "modslave/gui/ 还不存在——M2 没开始，别留一条空守卫"
+    assert files, "simbench/gui/ 还不存在——M2 没开始，别留一条空守卫"
     importers = {f.name for f in files if "PySide6" in _imported_modules(f)}
     assert importers, "gui/ 里没有任何 PySide6 import，守卫失去意义"
 
@@ -284,3 +287,33 @@ def test_scanner_does_not_flag_a_local_import(tmp_path):
     sample.write_text("from . import events\n"
                       "from ..project.model import Point\n", encoding="utf-8")
     assert _imported_modules(sample) == []
+
+
+# ---- 系统网络：只有 net/ 能碰 ----
+
+def test_only_net_touches_system_network():
+    """`subprocess` 只许出现在 `net/`。
+
+    加/删网卡地址要跑 netsh 或 PowerShell，那是**唯一**一个会改变现场机器网络状态的动作。
+    把它圈在一个包里，才能保证"校验流程不可能顺手改系统"这句话是结构上成立的，
+    而不是靠每个调用点自觉。判据用 import 而不是搜字符串：`netsh` 写进文档、
+    写进帮助文本都不算违规，真的去调用才算。
+    """
+    offenders = _offenders(None, ("subprocess",), skip_packages=(SYSTEM_NET,))
+    assert offenders == [], offenders
+    assert _scanned_files(None, skip_packages=(SYSTEM_NET,))       # 扫描清单不许是空的
+
+
+def test_planted_subprocess_outside_net_is_flagged(tmp_path):
+    """植入样本：同样的 import 放在 gui/ 或 engine/ 必须报出来（守卫不是恒真）。"""
+    root = _fake_root(tmp_path, {
+        "net/apply.py": "import subprocess\n",
+        "engine/session.py": "import subprocess\n",
+        "gui/main_window.py": "from subprocess import run\n",
+    })
+    scanned = _scanned_files(None, root, skip_packages=(SYSTEM_NET,))
+    assert [f.name for f in scanned] == ["session.py", "main_window.py"], scanned
+    offenders = _offenders(None, ("subprocess",), root, skip_packages=(SYSTEM_NET,))
+    leaked = {pathlib.Path(o.rsplit(": ", 1)[0]).relative_to(root).as_posix()
+              for o in offenders}
+    assert leaked == {"engine/session.py", "gui/main_window.py"}, offenders

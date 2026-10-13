@@ -26,13 +26,13 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
-from modslave.backend.events import ChannelState, LogLine, PacketEvent
-from modslave.backend.modbus_tcp import PortInUseError, check_port_is_free
-from modslave.codec.point_codec import encode
-from modslave.csv_io_entry import load_point_table
-from modslave.engine.runner import EngineRunner
-from modslave.engine.session import Row, Session, WriteResult
-from modslave.project.model import Device, Point, Project, TcpChannel
+from simbench.backend.events import ChannelState, LogLine, PacketEvent
+from simbench.backend.modbus_tcp import PortInUseError, check_port_is_free
+from simbench.codec.point_codec import encode
+from simbench.csv_io_entry import load_point_table
+from simbench.engine.runner import EngineRunner
+from simbench.engine.session import Row, Session, WriteResult
+from simbench.project.model import Device, Point, Project, TcpChannel
 from tests.conftest import free_port
 
 CSV = "examples/covi-tunnel.csv"          # M1 的点表：unit 11 有 CDAB 浮点与只读点
@@ -320,14 +320,14 @@ def test_a_runtime_start_failure_becomes_an_error_state_not_a_half_started_chann
 
 
 def engine_idents() -> set[int]:
-    """当前活着的 `modslave-engine*` 线程**身份**（ident）。
+    """当前活着的 `simbench-engine*` 线程**身份**（ident）。
 
     为什么不按名字做集合差：同一次 pytest 里可能有用例（或真 GUI）留着同名的线程，
     按名字差会把"本用例新建的那两个"减掉，变成一条会假失败的断言。
     点名判"是引擎线程"、ident 判"是本次新建的那一个"，两件事各管各的。
     """
     return {t.ident for t in threading.enumerate()
-            if t.name.startswith("modslave-engine") and t.is_alive()}
+            if t.name.startswith("simbench-engine") and t.is_alive()}
 
 
 def test_shutdown_of_an_owned_runner_leaves_no_engine_thread():
@@ -807,6 +807,29 @@ def test_a_same_or_shorter_string_edit_still_lands(session):
     shorter = session.set_point("tcp-5020", 11, "hr", 9, "AB")
     assert shorter.ok, shorter.error
     assert session.manual_count("tcp-5020") == 1
+
+
+def test_a_shorter_string_edit_clears_the_tail_of_its_own_span(session):
+    """改短要把它**自己那一段的尾巴清成零**（2026-10-13 全面审查定的口径，M4 计划判给
+    "人定"的那条老账）。
+
+    不补零的话，主站按跨度读回来是 "AB" + 上一版留下的尾巴（"ABMP07"）——那是界面在报一个
+    没人写过的值。补的范围**只到 `pt.span`**：补到别处就是 A2 那个"一次编辑接管三个点"的事故
+    （邻居的格子被零写掉）。
+    """
+    port = free_port()
+    session.load(loaded(port))
+    session.start_channel("tcp-5020")
+    assert session.set_point("tcp-5020", 11, "hr", 9, "PUMP07").ok
+    shorter = session.set_point("tcp-5020", 11, "hr", 9, "AB")
+    assert shorter.ok, shorter.error
+    assert shorter.registers == (0x4142, 0, 0), shorter.registers
+    client = connect(port)
+    try:
+        assert client.read_holding_registers(9, count=3, device_id=11).registers \
+            == [0x4142, 0, 0], "改短之后尾巴还留着上一版的值"
+    finally:
+        client.close()
 
 
 def test_a_bit_point_still_takes_exactly_one_address(session):

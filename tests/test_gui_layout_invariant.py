@@ -14,11 +14,11 @@ from collections import Counter
 import pytest
 from PySide6 import QtWidgets
 
-from modslave.csv_io_entry import load_point_table
-from modslave.engine.packets import PacketStore
-from modslave.engine.session import Session
-from modslave.gui.main_window import MainWindow
-from modslave.project.model import Device, Point, TcpChannel
+from simbench.csv_io_entry import load_point_table
+from simbench.engine.packets import PacketStore
+from simbench.engine.session import Session
+from simbench.gui.main_window import MainWindow
+from simbench.project.model import Device, Point, TcpChannel
 from tests.conftest import free_port
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -49,7 +49,7 @@ def no_modal_dialogs(monkeypatch):
         def exec(self, *_args) -> int:
             return 0
 
-    monkeypatch.setattr("modslave.gui.main_window.IssueDialog", Recorder)
+    monkeypatch.setattr("simbench.gui.main_window.IssueDialog", Recorder)
 
 
 @pytest.fixture
@@ -205,7 +205,7 @@ def test_the_packet_panel_does_not_get_a_written_height(window, qapp):
 
 
 def _flood(store, count: int) -> None:
-    from modslave.backend.events import PacketEvent
+    from simbench.backend.events import PacketEvent
 
     store.paused = False
     for index in range(count):

@@ -2,7 +2,7 @@
 import struct
 
 import pytest
-from modslave.project.model import (
+from simbench.project.model import (
     BOOL, DATATYPES, FLOAT32, FLOAT64, INT16, INT64, REG16, STRING, UINT16,
     UINT64, Device, Point, Project, TcpChannel, area_is_bit, brief,
     parse_value, register_span, struct_format, word_orders_allowed,

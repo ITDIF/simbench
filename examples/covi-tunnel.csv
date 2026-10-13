@@ -1,4 +1,4 @@
-# 示例点表：.venv/Scripts/python.exe -m modslave examples/covi-tunnel.csv --port 5020
+# 示例点表：.venv/Scripts/python.exe -m simbench examples/covi-tunnel.csv --port 5020
 # address 一律是 0-based 裸协议地址（4x/3x 惯例自己减偏移，模型里不藏隐式规则）；
 # readonly 列不许留空——未识别的值一律报错，宁可启动失败也不静默当成可写。
 channel,device,unit_id,name,area,address,datatype,word_order,initial,waveform,wave_param,readonly

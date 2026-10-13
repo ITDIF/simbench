@@ -1,9 +1,9 @@
 # tests/test_codec_single.py
 import pytest
-from modslave.codec import point_codec
-from modslave.codec.point_codec import decode, encode
-from modslave.project import model
-from modslave.project.model import BOOL, DATATYPES, STRING
+from simbench.codec import point_codec
+from simbench.codec.point_codec import decode, encode
+from simbench.project import model
+from simbench.project.model import BOOL, DATATYPES, STRING
 
 @pytest.mark.parametrize("dt,value,regs", [
     ("int16", -2, [0xFFFE]),

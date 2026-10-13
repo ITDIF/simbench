@@ -6,11 +6,11 @@ import pytest
 from pymodbus.constants import ExcCodes
 from pymodbus.simulator import DataType, SimDevice
 from pymodbus.simulator.simcore import SimCore
-from modslave.backend import simdev
-from modslave.backend.events import ChannelState, LogLine, PacketEvent, PointChanged
-from modslave.backend.simdev import area_to_index, build_sim_devices, simdata_for_point
-from modslave.codec.point_codec import encode
-from modslave.project.model import AREAS, Device, Point, Project, TcpChannel
+from simbench.backend import simdev
+from simbench.backend.events import ChannelState, LogLine, PacketEvent, PointChanged
+from simbench.backend.simdev import area_to_index, build_sim_devices, simdata_for_point
+from simbench.codec.point_codec import encode
+from simbench.project.model import AREAS, Device, Point, Project, TcpChannel
 
 
 def _proj(*points, unit=11, name="c1"):
@@ -287,10 +287,12 @@ def test_event_dataclass_fields_are_the_contract():
         return [f.name for f in dataclasses.fields(cls)
                 if f.default_factory is not dataclasses.MISSING]
 
+    # M5 加了 `pdu_offset`（默认 7）：`write_targets` 靠它找 PDU 的起点，TCP 是 MBAP 之后、
+    # RTU 是单元号之后。带默认值，所以既有那五处构造 `PacketEvent(...)` 的调用一个字没改。
     assert names(PacketEvent) == ["channel", "direction", "raw", "unit_id",
-                                  "function_code", "parsed", "mono"]
+                                  "function_code", "parsed", "mono", "pdu_offset"]
     assert defaults(PacketEvent) == {"unit_id": None, "function_code": None,
-                                     "parsed": "", "mono": 0.0}
+                                     "parsed": "", "mono": 0.0, "pdu_offset": 7}
     assert names(ChannelState) == ["channel", "state", "detail"]
     assert defaults(ChannelState) == {"detail": ""}
     assert names(LogLine) == ["level", "text"]
