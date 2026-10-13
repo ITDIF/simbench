@@ -449,6 +449,10 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
 
 每个里程碑都能单独跑起来。
 
+> **分支说明（2026-10-13）**：M1 到打包这一段全部在**本地分支 `m1-kernel`** 上做（下面
+> 各条与 M2 计划抬头写的“分支 `m1-kernel`”就是它）。2026-10-13 该分支改名为 `main`
+> 并推到 `origin/main`——**改的只是名字，里程碑内容一个字符没动**，历史记录保持原样。
+
 1. **M1 地基（已完成）**：project 模型 + codec + TCP backend + 上述集成测试全绿。
    验收：命令行起一个从站，第三方主站（QModMaster / 平台网关）能读到值。
    落地在计划 `docs/superpowers/plans/2026-10-08-modslave-m1-kernel.md`、分支 `m1-kernel`，
