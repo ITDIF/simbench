@@ -14,6 +14,19 @@ AREAS = ("co", "di", "hr", "ir")
 BIT_AREAS = ("co", "di")
 WAVEFORMS = ("const", "ramp", "sine", "random", "step")
 
+# ---------- S7（S7comm / ISO-on-TCP）----------
+
+# 区域：`mk`/`pe`/`pa` 三个字母名 + `db<号>` 写在区名里（S7 的 DB 号是地址的一部分，
+# 不像 Modbus 的区那样只有四个字母）。类型用 **S7 自己的名字**，与 Modbus 那套明确分开：
+# 同一条通道上的点位类型必须与传输匹配（validate 拦"Modbus 类型落在 S7 通道上"这类混填）。
+S7_AREAS = ("mk", "pe", "pa")
+S7_MAX_DB = 4095                      # 区域编号是 16 位的，留足现场余量即可
+S7_TYPES = ("bool", "byte", "char", "word", "int", "dword", "dint", "real", "string")
+# 类型 -> 字节数（string 按初值长度另算；bool 占 1 位、落在 1 个字节里，见 `Point.bit`）
+S7_TYPE_BYTES = {"byte": 1, "char": 1, "word": 2, "int": 2, "dword": 4,
+                 "dint": 4, "real": 4}
+S7_DEFAULTS = {"host": "0.0.0.0", "port": 102, "rack": 0, "slot": 1}
+
 WORD_ABCD, WORD_CDAB, WORD_BADC, WORD_DCBA = "ABCD", "CDAB", "BADC", "DCBA"
 WORD_ORDERS = (WORD_ABCD, WORD_CDAB, WORD_BADC, WORD_DCBA)
 
@@ -234,6 +247,10 @@ class Point:
     wave_param: dict[str, str] = field(default_factory=dict)
     readonly: bool = False
     row: int | None = None       # CSV 行号，只在校验报错时用，不进 project.json
+    # S7 的位地址（`DBX0.3` 里的那个 3）：只有 S7 通道上的 bool 点会填它，Modbus 点恒为 None。
+    # 不把"位"塞进 `address`（那会变成 `字节*8+位` 的裸位号），因为 S7 的地址显示、点表填写
+    # 与重叠判定看的都是"字节 + 位"这一对。
+    bit: int | None = None
 
     @property
     def span(self) -> int:
@@ -280,6 +297,68 @@ def serial_summary(channel) -> str:
             f"{format_frame(channel.bytesize, channel.parity, channel.stopbits)}")
 
 
+def parse_s7_area(text) -> tuple[str, int | None] | None:
+    """`db3` -> `("db", 3)`；`mk`/`pe`/`pa` -> `(区名, None)`；不是 S7 区名回 None。
+
+    只做**转换**：`db0`、`db99999` 这种"形状对、值不合法"的照样解析出来（`("db", 0)`），
+    由 validate 报；形状不对的回 None。
+    """
+    if not isinstance(text, str):
+        return None
+    lowered = text.strip().lower()
+    if lowered in S7_AREAS:
+        return lowered, None
+    if lowered.startswith("db") and lowered[2:].isdigit():
+        return "db", int(lowered[2:])
+    return None
+
+
+def s7_area_name(area: str, db: int | None) -> str:
+    """反方向：`("db", 3)` -> `"db3"`；`("mk", None)` -> `"mk"`。与 `parse_s7_area` 同一份语法。"""
+    return area if db is None else f"db{db}"
+
+
+def parse_s7_address(text) -> tuple[int, int | None] | None:
+    """S7 的地址格：`5` -> `(5, None)`（字节偏移）、`0.3` -> `(0, 3)`（`DBX0.3` 那一位）。
+
+    同样只做转换：`0.9`（位越界）解析成 `(0, 9)` 交给 validate；形状不对（`a.b`、`1.2.3`、
+    空串）回 None——那不是值，是点表里写坏的一格。
+    """
+    raw = str(text if text is not None else "").strip()
+    if not raw:
+        return None
+    head, dot, tail = raw.partition(".")
+    if not head.isdigit():
+        return None
+    if not dot:
+        return int(head), None
+    if not tail.isdigit():
+        return None
+    return int(head), int(tail)
+
+
+def s7_span_bytes(datatype: str, initial: str) -> int:
+    """这个 S7 类型占几个**字节**（bool 也回 1：它占的那一位落在一个字节里）。
+
+    string 按初值长度算——与 Modbus 那边的 string 同一条口径（跨度归点表初值管），
+    与"真 S7 STRING"（前两字节是最大长度/当前长度）不同，这一点在 `codec/s7_codec.py`
+    与 spec 里都要写明。
+    """
+    if datatype == STRING:
+        return max(1, len(initial or ""))
+    return S7_TYPE_BYTES.get(datatype, 1)
+
+
+def s7_summary(channel) -> str:
+    """S7 通道的"一句话摘要"：`192.168.0.10:102 rack 0 slot 1`。
+
+    与 `serial_summary` 并列：命令行那一行与后端的状态 detail 用同一句，`s7` 后端
+    `describe()` 直接调它。
+    """
+    return (f"{channel.host}:{channel.port} "
+            f"rack {channel.rack} slot {channel.slot}")
+
+
 @dataclass
 class TcpChannel:
     name: str
@@ -307,6 +386,19 @@ class SerialChannel:
     devices: list[Device] = field(default_factory=list)
 
 
+@dataclass
+class S7Channel:
+    """一路 S7（ISO-on-TCP / S7comm）通道。`type` 同样不设字段，写盘时由 `json_io` 补 `"s7"`。"""
+    name: str
+    host: str = S7_DEFAULTS["host"]
+    port: int = S7_DEFAULTS["port"]
+    # rack/slot 是客户端**连上来时报的**（不是我们校验的对象）：留着是为了在 102 上区分
+    # "谁连了哪台"的那类现场问题（报文窗/日志里带出来），以及给界面那一行一个可读的摘要。
+    rack: int = S7_DEFAULTS["rack"]
+    slot: int = S7_DEFAULTS["slot"]
+    devices: list[Device] = field(default_factory=list)
+
+
 def channel_transport(channel) -> str:
     """这一路用哪种传输：`"rtu"` / `"tcp"`（未知的手写 type 原样回，由 validate 报）。
 
@@ -316,12 +408,14 @@ def channel_transport(channel) -> str:
     """
     if isinstance(channel, SerialChannel):
         return "rtu"
+    if isinstance(channel, S7Channel):
+        return "s7"
     return getattr(channel, "type", "tcp")
 
 
 @dataclass
 class Project:
-    channels: list[TcpChannel] = field(default_factory=list)
+    channels: list[TcpChannel | SerialChannel | S7Channel] = field(default_factory=list)
     tick_ms: int = 100
 
     def iter_points(self):
@@ -330,7 +424,7 @@ class Project:
                 for pt in dev.points:
                     yield ch, dev, pt
 
-    def find_channel(self, name: str) -> TcpChannel | SerialChannel:
+    def find_channel(self, name: str) -> TcpChannel | SerialChannel | S7Channel:
         for ch in self.channels:
             if ch.name == name:
                 return ch

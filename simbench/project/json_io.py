@@ -6,8 +6,9 @@ import json
 from dataclasses import MISSING, fields
 from pathlib import Path
 
-from .model import (BOOL, SERIAL_DEFAULTS, Device, Point, Project, SerialChannel,
-                    TcpChannel, brief, channel_transport, parse_value)
+from .model import (BOOL, S7_DEFAULTS, SERIAL_DEFAULTS, Device, Point, Project,
+                    S7Channel, SerialChannel, TcpChannel, brief, channel_transport,
+                    parse_value)
 
 VERSION = 1
 _POINT_FIELDS = ("name", "area", "address", "datatype", "initial", "word_order",
@@ -112,6 +113,10 @@ def _point_to_dict(point: Point) -> dict:
     out = {name: getattr(point, name) for name in _POINT_FIELDS}
     out["wave_param"] = dict(point.wave_param)
     out["readonly"] = bool(point.readonly)
+    if point.bit is not None:
+        # 只有 S7 的位点位多这一个键（Modbus 点恒为 None）：**不写 null**，否则既有
+        # project.json 的逐字节往返（那条用例拿 spec §5 的样例做基准）会全体变样。
+        out["bit"] = point.bit
     return out
 
 
@@ -128,7 +133,8 @@ def _point_from_dict(raw: dict, index: int, device_name: str) -> Point:
         word_order=raw.get("word_order", "ABCD"),
         waveform=raw.get("waveform", "const"),
         wave_param=dict(_require_object(raw.get("wave_param", {}), "wave_param")),
-        readonly=_require_bool(raw.get("readonly", False), "readonly"))
+        readonly=_require_bool(raw.get("readonly", False), "readonly"),
+        bit=(_require_int(raw["bit"], "bit", loc) if "bit" in raw else None))
 
 
 def _device_to_dict(device: Device) -> dict:
@@ -156,6 +162,10 @@ def _channel_to_dict(channel) -> dict:
     插入序走，所以这里手写而不是 dict 推导。
     """
     devices = [_device_to_dict(d) for d in channel.devices]
+    if channel_transport(channel) == "s7":
+        return {"name": channel.name, "type": "s7", "host": channel.host,
+                "port": channel.port, "rack": channel.rack, "slot": channel.slot,
+                "devices": devices}
     if channel_transport(channel) == "rtu":
         return {"name": channel.name, "type": "rtu", "port": channel.port,
                 "baudrate": channel.baudrate, "parity": channel.parity,
@@ -169,6 +179,8 @@ def _channel_from_dict(raw: dict, index: int):
     _require_object(raw, "channel")
     if raw.get("type") == "rtu":
         return _serial_channel_from_dict(raw, index)
+    if raw.get("type") == "s7":
+        return _s7_channel_from_dict(raw, index)
     _require_keys(raw, TcpChannel, f"channel #{index}")
     name = raw["name"]
     return TcpChannel(
@@ -183,6 +195,22 @@ def _devices_from_dict(raw: dict, channel_name: str) -> list[Device]:
     return [_device_from_dict(d, i, channel_name)
             for i, d in enumerate(
                 _require_array(raw.get("devices", []), "devices"), 1)]
+
+
+def _s7_channel_from_dict(raw: dict, index: int) -> S7Channel:
+    """S7 通道：`host` 原样收下（是不是合法主机名由 validate 判，与 TCP 的 host 同口径），
+    `port`/`rack`/`slot` 必须是 JSON 整数——`int(102.7)` 那种静默截断会让现场连去另一个端口。
+    """
+    _require_keys(raw, S7Channel, f"channel #{index}")
+    name = raw["name"]
+    loc = f"channel {brief(name)}"
+    return S7Channel(
+        name=name,
+        host=raw.get("host", S7_DEFAULTS["host"]),
+        port=_require_int(raw.get("port", S7_DEFAULTS["port"]), "port", loc),
+        rack=_require_int(raw.get("rack", S7_DEFAULTS["rack"]), "rack", loc),
+        slot=_require_int(raw.get("slot", S7_DEFAULTS["slot"]), "slot", loc),
+        devices=_devices_from_dict(raw, name))
 
 
 def _serial_channel_from_dict(raw: dict, index: int) -> SerialChannel:

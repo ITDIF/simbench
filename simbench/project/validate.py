@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .model import (
-    AREAS, BOOL, DATATYPES, SERIAL_MARK, STRING, WAVEFORMS, WORD_ABCD, WORD_ORDERS,
-    SerialChannel, area_is_bit, brief, brief_name, channel_transport, register_span,
+    AREAS, BOOL, DATATYPES, S7_MAX_DB, S7_TYPES, SERIAL_MARK, STRING, WAVEFORMS,
+    WORD_ABCD, WORD_ORDERS, S7Channel, SerialChannel, area_is_bit, brief, brief_name,
+    channel_transport, parse_s7_area, register_span, s7_area_name, s7_span_bytes,
     word_orders_allowed,
 )
 
@@ -71,7 +72,8 @@ def validate_project(project) -> list[Issue]:
         if SERIAL_MARK in (ch.name or ""):
             issues.append(Issue("error", "channel_name", name,
                                 f"channel name must not contain {SERIAL_MARK!r}; CSV writes "
-                                f"a serial channel as name{SERIAL_MARK}COM3 9600 8N1"))
+                                f"a serial channel as name{SERIAL_MARK}COM3 9600 8N1 and an "
+                                f"S7 channel as name{SERIAL_MARK}host:port"))
         # 分派：TCP 那几条判定一个字没动，串口走自己那一份，未知 type 仍然报 channel_type。
         # 判据用**类**而不是 `channel_transport()`：这里问的是"这个对象身上有哪些字段"，
         # 而 `TcpChannel(type="rtu")` 那种自相矛盾的对象（只可能来自代码或手拼测试）
@@ -83,19 +85,10 @@ def validate_project(project) -> list[Issue]:
         serial_key: str | None = None
         if isinstance(ch, SerialChannel):
             serial_key = _serial(ch, issues, name)
+        elif isinstance(ch, S7Channel):
+            host_ok, port_ok = _s7(ch, issues, name)
         elif transport == "tcp":
-            port_ok = _is_int(ch.port) and 1 <= ch.port <= 65535
-            host_ok = isinstance(ch.host, str) and bool(ch.host)
-            if not host_ok:
-                issues.append(Issue("error", "host", name,
-                                    f"host must be a non-empty string, got {brief(ch.host)}"))
-            # 只判“非空字符串”，不判 IP 字面量语法（裁决 T）：主机名/IPv6/前导零都合法，
-            # 这里造第二套判定容易误杀，真绑不上时 bind 的 OSError 已经足够明确。
-            if not port_ok:
-                # port=0（“让系统随便给一个”）在 M1 也是 error：要从 pymodbus 内部摸
-                # transport 对象才能读回实际端口，版本一变就碎
-                issues.append(Issue("error", "port", name,
-                                    f"port {brief(ch.port)} must be in 1..65535"))
+            host_ok, port_ok = _tcp(ch, issues, name)
         else:
             issues.append(Issue("error", "channel_type", name,
                                 f"channel type {brief(transport)} is not supported"))
@@ -124,6 +117,58 @@ def validate_project(project) -> list[Issue]:
         issues.append(Issue("error", "tick_ms", "project",
                             f"tick_ms {brief(project.tick_ms)} must be in 10..60000"))
     return issues
+
+
+def _tcp(ch, issues: list[Issue], where: str) -> tuple[bool, bool]:
+    """TCP 通道的 host/port 判定（顺序与消息原样保留：既有用例逐条比过）。"""
+    port_ok = _is_int(ch.port) and 1 <= ch.port <= 65535
+    host_ok = isinstance(ch.host, str) and bool(ch.host)
+    if not host_ok:
+        issues.append(Issue("error", "host", where,
+                            f"host must be a non-empty string, got {brief(ch.host)}"))
+    # 只判“非空字符串”，不判 IP 字面量语法（裁决 T）：主机名/IPv6/前导零都合法，
+    # 这里造第二套判定容易误杀，真绑不上时 bind 的 OSError 已经足够明确。
+    if not port_ok:
+        # port=0（“让系统随便给一个”）在 M1 也是 error：要从 pymodbus 内部摸
+        # transport 对象才能读回实际端口，版本一变就碎
+        issues.append(Issue("error", "port", where,
+                            f"port {brief(ch.port)} must be in 1..65535"))
+    return host_ok, port_ok
+
+
+S7_RACKS = (0, 1, 2, 3, 4, 5, 6, 7)
+S7_SLOTS = tuple(range(1, 32))          # 300/400 常用 2、1200/1500 常用 1，范围给足
+
+
+def _s7(ch, issues: list[Issue], where: str) -> tuple[bool, bool]:
+    """S7 通道的 host/port/rack/slot 判定。返回 `(host_ok, port_ok)` 给"同 host:port 重复"
+    那条共用（S7 与 TCP 抢同一个端口同样是冲突）。"""
+    port_ok = _is_int(ch.port) and 1 <= ch.port <= 65535
+    host_ok = isinstance(ch.host, str) and bool(ch.host)
+    if not host_ok:
+        issues.append(Issue("error", "host", where,
+                            f"host must be a non-empty string, got {brief(ch.host)}"))
+    elif SERIAL_MARK in ch.host or ":" in ch.host or ch.host.split() != [ch.host] \
+            or "/" in ch.host:
+        # 这几样都会把 CSV 那条 `name@host:port` 语法拆坏：`:` 是端口分隔符、`/` 会与
+        # pyserial 的 URL（`socket://`）撞车、空格是段分隔符。host 本身不判 IP 语法（同 TCP）。
+        host_ok = False
+        issues.append(Issue("error", "host", where,
+                            f"S7 host {brief(ch.host)} must not contain "
+                            f"{SERIAL_MARK!r}, ':', '/' or whitespace (CSV writes it as "
+                            f"name{SERIAL_MARK}host:port)"))
+    if not port_ok:
+        issues.append(Issue("error", "port", where,
+                            f"port {brief(ch.port)} must be in 1..65535"))
+    if ch.rack not in S7_RACKS:
+        issues.append(Issue("error", "s7_rack", where,
+                            f"rack {brief(ch.rack)} must be in "
+                            f"{S7_RACKS[0]}..{S7_RACKS[-1]}"))
+    if ch.slot not in S7_SLOTS:
+        issues.append(Issue("error", "s7_slot", where,
+                            f"slot {brief(ch.slot)} must be in "
+                            f"{S7_SLOTS[0]}..{S7_SLOTS[-1]}"))
+    return host_ok, port_ok
 
 
 def _serial(ch, issues: list[Issue], where: str) -> str | None:
@@ -188,10 +233,18 @@ def _devices(ch, issues: list[Issue]) -> None:
                                     f"{brief_name(units[dev.unit_id])}"))
             # 跨通道重复 unit_id 不在这里判：那是 Task 8 build_sim_devices 的 ValueError
             units[dev.unit_id] = dev.name
-        _points(ch.name, dev, issues)
+        _points(ch, dev, issues)
 
 
-def _points(channel_name: str, dev, issues: list[Issue]) -> None:
+def _points(channel, dev, issues: list[Issue]) -> None:
+    """点位判定按传输分派：S7 的区/类型/地址（字节+位）与 Modbus 那套完全不同。
+
+    `unit_id` 的 1..247 那条在 `_devices` 里对两种传输都照旧（S7 不上线它、只做设备分组，
+    但同一个模型里保持一套规则，免得"哪条通道要填 unit"变成看传输猜的事）。
+    """
+    if channel_transport(channel) == "s7":
+        return _points_s7(channel, dev, issues)
+    channel_name = channel.name
     used: dict[tuple[str, int], str] = {}
     for pt in dev.points:
         loc = (f"{brief_name(channel_name)}/{brief_name(dev.name)}/"
@@ -207,6 +260,86 @@ def _points(channel_name: str, dev, issues: list[Issue]) -> None:
         if pt.datatype in DATATYPES and pt.area in AREAS:
             _shape(channel_name, dev, pt, loc, used, issues)
         _wave(pt, loc, issues)
+
+
+def _points_s7(channel, dev, issues: list[Issue]) -> None:
+    """S7 点位的判定：区名 / 类型 / 地址（字节偏移与位）/ **按位**的重叠。
+
+    与 Modbus 那套分开写而不是硬套：三处语义都不一样——S7 的地址单位是**字节**（bool 还要
+    带一位）、类型是 S7 自己的名字、重叠要按**位**判（`DBX0.0` 与 `DBX0.3` 同占一个字节但
+    互不冲突，套 Modbus 那套会把它们报成重叠，现场就得把点位挪到不同字节去，那是假约束）。
+    """
+    used: dict[tuple[str, int | None], list[tuple[int, int, str]]] = {}
+    for pt in dev.points:
+        loc = (f"{brief_name(channel.name)}/{brief_name(dev.name)}/"
+               f"{brief_name(pt.name)}")
+        if pt.row:
+            loc = f"{loc} (line {pt.row})"
+        _name(pt, dev, loc, issues)
+        _s7_point_shape(pt, loc, issues)
+        _s7_overlap(pt, loc, used, issues)
+        _wave(pt, loc, issues)          # 波形参数与传输无关，复用 Modbus 那一份
+
+
+def _s7_point_shape(pt, loc, issues) -> None:
+    area = parse_s7_area(pt.area)
+    if area is None:
+        issues.append(Issue("error", "s7_area", loc,
+                            f"unknown S7 area {brief(pt.area)} "
+                            f"(use mk/pe/pa or db<n>)"))
+    elif area[0] == "db" and not 1 <= (area[1] or 0) <= S7_MAX_DB:
+        issues.append(Issue("error", "s7_area", loc,
+                            f"DB number {brief(area[1])} outside 1..{S7_MAX_DB}"))
+    if pt.datatype not in S7_TYPES:
+        issues.append(Issue("error", "s7_datatype", loc,
+                            f"{brief(pt.datatype)} is not an S7 type "
+                            f"({'/'.join(S7_TYPES)})"))
+    if not _is_int(pt.address) or not 0 <= pt.address <= 65535:
+        issues.append(Issue("error", "address", loc,
+                            f"address {brief(pt.address)} outside 0..65535"))
+    # 位只有 bool 有，而且必须写出来：`DBX0.3` 的那一位是地址的一部分，缺了它就没法寻址
+    # （不像 Modbus 的位区那样"地址即位号"）。
+    if pt.datatype == BOOL:
+        if pt.bit is None:
+            issues.append(Issue("error", "s7_bit", loc,
+                                "bool points need a bit: write the address as "
+                                "byte.bit (like 0.3)"))
+        elif not _is_int(pt.bit) or not 0 <= pt.bit <= 7:
+            issues.append(Issue("error", "s7_bit", loc,
+                                f"bit {brief(pt.bit)} outside 0..7"))
+    elif pt.bit is not None:
+        issues.append(Issue("error", "s7_bit", loc,
+                            f"bit is only for bool points, got {brief(pt.bit)}"))
+    if pt.word_order != WORD_ABCD:
+        # S7 一律大端、没有字序这回事：给警告不拦启动（与"单寄存器类型填了字序"同一个姿态）
+        issues.append(Issue("warning", "s7_word_order", loc,
+                            f"S7 has no word order: {brief(pt.word_order)} is ignored"))
+
+
+def _s7_overlap(pt, loc, used, issues) -> None:
+    """按位判重叠：bool 占 1 位，其余按类型占 `8 * 字节数` 位（string 按初值长度）。
+
+    区/地址/类型本身有错时直接跳过——占位算不出来，硬算会喷出一串假重叠把真错挤出屏幕。
+    """
+    area = parse_s7_area(pt.area)
+    if area is None or not _is_int(pt.address):
+        return
+    if pt.datatype == BOOL:
+        if not _is_int(pt.bit):
+            return
+        start, length = pt.address * 8 + pt.bit, 1
+    elif pt.datatype in S7_TYPES:
+        start, length = pt.address * 8, 8 * s7_span_bytes(pt.datatype, pt.initial)
+    else:
+        return
+    end = start + length
+    short = loc.split("/")[-1].split(" (")[0]
+    for other_start, other_end, other_name in used.get(area, ()):
+        if start < other_end and other_start < end:
+            issues.append(Issue("error", "s7_overlap", loc,
+                                f"overlaps {other_name} in {s7_area_name(*area)}"))
+            break
+    used.setdefault(area, []).append((start, end, short))
 
 
 def _name(pt, dev, loc, issues) -> None:
