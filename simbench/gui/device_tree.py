@@ -24,10 +24,22 @@ _STATUS_MARK = {"stopped": "○", "starting": "◐", "running": "●", "error": 
 _NAME_WIDTH = 240
 _MARK_WIDTH = 40
 _ROLE_CHANNEL = QtCore.Qt.UserRole
+_ROLE_UNIT = QtCore.Qt.UserRole + 1
 
 
 class DeviceTree(QtWidgets.QTreeWidget):
-    """两级树：通道行带状态灯，设备行只带名字与 unit id。"""
+    """两级树：通道行带状态灯，设备行只带名字与 unit id。右键菜单是"加/删"的入口。
+
+    为什么加/删住在这里：通道与设备**就是这棵树上的东西**（点位在表里，所以点位的加删
+    在表上）。工具栏里没有一排小按钮——那排按钮的每一条都要配图标，而图标与定宽槽正是
+    几条界面用例逐格量的对象，能不添就不添。
+    """
+
+    add_channel_requested = QtCore.Signal()
+    add_device_requested = QtCore.Signal(str)          # 通道名
+    add_point_requested = QtCore.Signal(str, int)      # 通道名 + unit_id
+    remove_channel_requested = QtCore.Signal(str)
+    remove_device_requested = QtCore.Signal(str, int)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -56,10 +68,73 @@ class DeviceTree(QtWidgets.QTreeWidget):
                 child = QtWidgets.QTreeWidgetItem(
                     [f"{device.name} (unit {device.unit_id})", ""])
                 child.setData(0, _ROLE_CHANNEL, channel.name)
+                child.setData(0, _ROLE_UNIT, device.unit_id)
                 top.addChild(child)
         # 宽度在内容进去之后再定：clear() 会把列宽复位成默认值，先设等于白设
         self.setColumnWidth(0, _NAME_WIDTH)
         self.setColumnWidth(1, _MARK_WIDTH)
+
+    def item_for(self, channel: str) -> QtWidgets.QTreeWidgetItem | None:
+        """通道那一项（主窗在换工程/增删之后用它把选中项挪回去）。没有就回 None。"""
+        return self._items.get(channel)
+
+    def unit_of(self, item: QtWidgets.QTreeWidgetItem | None) -> int | None:
+        """这一项是不是设备行：是就回 unit_id，通道行/空处回 None。"""
+        if item is None:
+            return None
+        return item.data(0, _ROLE_UNIT)
+
+    # ---------- 右键菜单 ----------
+
+    def menu_actions(self, item: QtWidgets.QTreeWidgetItem | None) -> list[QtGui.QAction]:
+        """那一项的右键动作清单：`contextMenuEvent` 与用例走**同一个**构造口。
+
+        空白处给"添加通道"（空工程里这是唯一能起步的地方），通道行给"添加设备/删除通道"，
+        设备行给"添加点位/删除设备"。设备行必须有"添加点位"：点位在表里，而**一个点位都
+        没有的设备在表上没有任何一行可以右键**——不从这里给，第一个点位就永远加不出来。
+        """
+        menu = self._menu_for(item)
+        return [] if menu is None else menu.actions()
+
+    def contextMenuEvent(self, event) -> None:                # noqa: N802
+        menu = self._menu_for(self.itemAt(event.pos()))
+        if menu is None:
+            event.ignore()
+            return
+        self._popup(menu, event.globalPos())
+
+    def _popup(self, menu, pos) -> None:
+        """弹层唯一的入口（与 `point_table._popup` 同一写法）：`exec` 会吞掉用例的模态嵌套。"""
+        menu.exec(pos)
+        menu.deleteLater()
+
+    def _menu_for(self, item) -> QtWidgets.QMenu | None:
+        channel = self.channel_of(item)
+        unit = self.unit_of(item)
+        menu = QtWidgets.QMenu(self)
+        if not channel:
+            action = menu.addAction("添加通道…")
+            action.triggered.connect(
+                lambda _checked=False: self.add_channel_requested.emit())
+            return menu
+        if unit is None:
+            action = menu.addAction("添加设备…")
+            action.triggered.connect(
+                lambda _checked=False, name=channel: self.add_device_requested.emit(name))
+            drop = menu.addAction(f"删除通道 {channel}…")
+            drop.triggered.connect(
+                lambda _checked=False, name=channel:
+                self.remove_channel_requested.emit(name))
+            return menu
+        action = menu.addAction("添加点位…")
+        action.triggered.connect(
+            lambda _checked=False, name=channel, unit_id=unit:
+            self.add_point_requested.emit(name, unit_id))
+        drop = menu.addAction("删除设备…")
+        drop.triggered.connect(
+            lambda _checked=False, name=channel, unit_id=unit:
+            self.remove_device_requested.emit(name, unit_id))
+        return menu
 
     def channel_of(self, item: QtWidgets.QTreeWidgetItem | None) -> str:
         """这一项属于哪个通道。None / 没有归属都回空串（不是"第一个通道"）。"""

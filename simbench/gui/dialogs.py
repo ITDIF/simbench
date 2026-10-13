@@ -124,6 +124,17 @@ def open_project(parent=None):
         raise ProjectFileError(path, exc) from exc
 
 
+def export_csv_path(parent=None, suggested: str = "") -> str | None:
+    """导出 CSV 要落到哪（回 None = 用户取消）。
+
+    新建的工程在落盘之前**没有路径**，导不出 CSV 就等于"新建的工程换不到现场去"，
+    而 CSV 正是这个工具跟现场交换点表的方式。原来这里直接拒绝，现在先问一次。
+    """
+    path, _ = QtWidgets.QFileDialog.getSaveFileName(parent, "导出 CSV 点表", suggested,
+                                                    CSV_FILTER)
+    return path or None
+
+
 def save_project_as(parent, project, suggested: str = ""):
     """返回落盘路径或 None（用户取消）。路径回传给主窗记住。"""
     path, _ = QtWidgets.QFileDialog.getSaveFileName(

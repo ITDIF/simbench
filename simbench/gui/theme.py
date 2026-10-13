@@ -466,10 +466,10 @@ _ICON_2X = 2                # 图标按 2 倍图建再交给 Qt 缩放：HiDPI �
 _ICON_COLORS = {
     "light": {"play": "#1a7f37", "stop": "#c62828", "in": "#1f6fb2", "out": "#1f6fb2",
               "folder": "#b26a00", "save": "#42546a", "check": "#0f766e",
-              "wave": "#1f6fb2", "dark": "#42546a"},
+              "wave": "#1f6fb2", "dark": "#42546a", "new": "#7c3aed"},
     "dark": {"play": "#3fb950", "stop": "#f85149", "in": "#58a6ff", "out": "#58a6ff",
              "folder": "#d29922", "save": "#adbac7", "check": "#39c5bb",
-             "wave": "#58a6ff", "dark": "#adbac7"},
+             "wave": "#58a6ff", "dark": "#adbac7", "new": "#a78bfa"},
 }
 
 
@@ -569,11 +569,30 @@ def _draw_moon(painter: QtGui.QPainter) -> None:
     painter.drawPath(path.subtracted(bite))
 
 
+def _draw_new(painter: QtGui.QPainter) -> None:
+    """"新建工程"那个按钮：一张纸 + 右上角折角。
+
+    不用一个 `+`：`+` 在这个界面上更像"加一行"，而这是**换一份空工程**（把当前这份放下）。
+    折角是"一份新文件"最省笔墨的形状，也和 `folder`/`save` 那几个图标同一套线宽。
+    """
+    painter.setBrush(QtCore.Qt.NoBrush)
+    path = QtGui.QPainterPath()
+    path.moveTo(3.5, 2.5)
+    path.lineTo(10.0, 2.5)
+    path.lineTo(14.5, 7.0)
+    path.lineTo(14.5, 15.5)
+    path.lineTo(3.5, 15.5)
+    path.closeSubpath()
+    painter.drawPath(path)
+    painter.drawPolyline([QtCore.QPointF(10.0, 2.5), QtCore.QPointF(10.0, 7.0),
+                          QtCore.QPointF(14.5, 7.0)])
+
+
 _DRAW = {"play": _draw_play, "stop": _draw_stop,
          "in": lambda p: _draw_arrow(p, down=True),
          "out": lambda p: _draw_arrow(p, down=False),
          "folder": _draw_folder, "save": _draw_save, "check": _draw_check,
-         "wave": _draw_wave, "dark": _draw_moon}
+         "wave": _draw_wave, "dark": _draw_moon, "new": _draw_new}
 
 
 def icon(name: str, mode: str | None = None) -> QtGui.QIcon:

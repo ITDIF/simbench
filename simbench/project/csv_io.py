@@ -395,6 +395,15 @@ def _serial_params(channel) -> tuple:
             channel.stopbits, channel.timeout)
 
 
+def port_from_name(name: str) -> int:
+    """CSV 里 TCP 通道的端口从**名字尾数**读（读不出回 502）。
+
+    与导入用的是同一个函数（`read_csv` 那句"猜了要说"的 note 就是它）：导出那边要检查
+    "端口是否真的写在名字里"，两边必须是同一套读法，否则导出侧会报一个导入侧不认的结论。
+    """
+    return _guessed_port(name)
+
+
 def _guessed_port(name: str) -> int:
     tail = name.rsplit("-", 1)[-1]
     return int(tail) if tail.isdigit() and 1 <= int(tail) <= 65535 else 502

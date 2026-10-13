@@ -99,6 +99,19 @@ class PointTableModel(QtCore.QAbstractTableModel):
             return self._rows[row]
         return None
 
+    def detach(self) -> None:
+        """没有通道可展示：把表清空，**不许**留着上一份工程的行。
+
+        空工程不是"表空着"，是"没得看"（新建空白工程、把最后一条通道删掉都会走到这里）。
+        留着上一份的行，操作员会以为那份点表还在——本项目最防的就是"界面演出现场没发生的
+        事"。清空走 `beginResetModel`：条目变了本来就该 reset（刷新口径只管"条目没变"）。
+        """
+        self._source = None
+        self._channel = ""
+        self._rows = []
+        self.beginResetModel()
+        self.endResetModel()
+
     def attach(self, source: PointSource, channel: str = "") -> None:
         """换一个数据源。默认展示这个通道**全部**点位（口径 2：不给"跟随当前上下文"）。"""
         self._source = source
@@ -200,15 +213,20 @@ class PointTableModel(QtCore.QAbstractTableModel):
 
 
 class PointTableView(QtWidgets.QTableView):
-    """点位表的视图：右键一行 = 两条命令——把这一行的点交还给波形、打开点位属性面板。
+    """点位表的视图：右键一行 = 四条命令——交还波形、属性、**加点位**、**删这一个点位**。
 
-    每一条行**都**给这两项菜单，恢复项按归属置灰而**不删**：删项会让弹框高度随行变，
+    每一条行**都**给这四项菜单，恢复项按归属置灰而**不删**：删项会让弹框高度随行变，
     操作员两次右键看见两种菜单（本项目把"状态变化动布局"记成缺陷）。恢复的文案带上点位名，
     因为一次只可能恢复右键的那一行，操作员不需要在弹层里再认一次地址。
+
+    "加点位"落在**这一行所属的设备**上（表是按通道看的，行里带 unit），"删点位"删的就是
+    右键的这一行；两个都以 `Row.key` 交出去，跟另外两项同一份身份。
     """
 
     restore_requested = QtCore.Signal(tuple)      # payload = 那一行的 `Row.key`
     props_requested = QtCore.Signal(tuple)        # 同一份身份：属性面板按 key 找点位本体
+    add_point_requested = QtCore.Signal(tuple)
+    remove_point_requested = QtCore.Signal(tuple)
 
     def row_key(self, row: int) -> tuple | None:
         """行号 -> 点位身份 `(channel, unit_id, area, address)`；越界回 `None`。"""
@@ -257,6 +275,11 @@ class PointTableView(QtWidgets.QTableView):
         # （通道在跑、验不过回滚都会点名），菜单先置灰就成了"没打开就拒"，
         # 操作员看不见那一句为什么。
         props.triggered.connect(lambda _checked=False: self.props_requested.emit(key))
+        add = menu.addAction("添加点位…")
+        # 指哪加哪：加的永远是右键那一行所属的设备（空的设备在表上没有行，那条路走设备树）
+        add.triggered.connect(lambda _checked=False: self.add_point_requested.emit(key))
+        drop = menu.addAction(f"删除点位：{found.name}…")
+        drop.triggered.connect(lambda _checked=False: self.remove_point_requested.emit(key))
         return menu
 
 

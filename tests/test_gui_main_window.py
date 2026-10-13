@@ -379,11 +379,15 @@ def test_the_row_menu_offers_restore_only_for_taken_over_rows(make_window, qapp)
                                                         VALUE_COLUMN), "42")
     qapp.processEvents()
     actions = window.point_table.row_menu_actions(row_of(window, "风机状态"))
-    assert [a.text() for a in actions] == ["恢复波形：风机状态", "属性…"]
-    assert [a.isEnabled() for a in actions] == [True, True]
+    # 四项：交还波形、属性、加点位、删这一个点位（后两项属于"从零搭工程"那一步）
+    assert [a.text() for a in actions] == ["恢复波形：风机状态", "属性…",
+                                           "添加点位…", "删除点位：风机状态…"]
+    assert [a.isEnabled() for a in actions] == [True, True, True, True]
     other = window.point_table.row_menu_actions(row_of(window, "CO浓度"))
     assert other[0].isEnabled() is False         # 没被接管的行：看得见，点不动
     assert other[1].isEnabled() is True          # 但属性照样能打开
+    assert other[2].isEnabled() is True          # 加点位/删点位对每一行都开着
+    assert other[3].isEnabled() is True
 
 
 def test_triggering_the_restore_command_puts_the_rows_back_under_the_waveform(
@@ -658,10 +662,28 @@ def test_export_csv_writes_the_point_table_next_to_the_project(window, tmp_path)
     assert "已导出 CSV" in window.log_view.toPlainText()
 
 
-def test_export_without_a_path_says_so_instead_of_crashing(window):
+def test_export_without_a_path_asks_where_to_put_it(window, monkeypatch, tmp_path):
+    """新建的工程还没有路径：导出要先问一次落哪。
+
+    原来这里直接拒绝（"没有工程路径，导出已取消"）——那是"新建的工程换不到现场去"，
+    而 CSV 正是这个工具跟现场交换点表的方式。现在问一次；用户取消就什么都不写。
+    """
     window._path = None
+    target = tmp_path / "fresh.csv"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(target), "CSV (*.csv)")))
     window._export_csv()
-    assert "没有工程路径" in window.log_view.toPlainText()
+    assert "CO浓度" in target.read_text(encoding="utf-8")
+    assert "已导出 CSV" in window.log_view.toPlainText()
+
+
+def test_a_cancelled_export_path_writes_nothing(window, monkeypatch, tmp_path):
+    window._path = None
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: ("", "")))
+    window._export_csv()
+    assert list(tmp_path.iterdir()) == []
+    assert "已导出" not in window.log_view.toPlainText()
 
 
 # ---------- 检查点表 ----------

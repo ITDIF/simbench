@@ -29,16 +29,19 @@ import time
 from PySide6 import QtGui, QtCore, QtWidgets
 
 from ..engine.point_source import session_source
-from ..project.csv_io import write_csv_file
+from ..project import edit
+from ..project.csv_io import port_from_name, write_csv_file
+from ..project.model import channel_transport
 from ..project.validate import Issue, error_lines, validate_project
 from . import theme
 from .bridge import EngineBridge
 from .channel_panel import ChannelPanel
 from .device_tree import DeviceTree
 from .dialogs import (
-    IssueDialog, ProjectFileError, choose_offset, format_issues, import_csv,
-    open_project, read_point_table, save_project_as,
+    IssueDialog, ProjectFileError, choose_offset, export_csv_path, format_issues,
+    import_csv, open_project, read_point_table, save_project_as,
 )
+from .new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
 from .net_panel import NetPanel
 from .packet_view import PacketPanel
 from .point_props import STRUCTURAL_FIELDS, PointPropertiesDialog
@@ -114,6 +117,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.point_changed.connect(lambda _event: self.point_model.refresh())
         self.point_table.restore_requested.connect(self._restore_waveform)
         self.point_table.props_requested.connect(self._show_point_props)
+        self.point_table.add_point_requested.connect(self._add_point)
+        self.point_table.remove_point_requested.connect(self._remove_point)
+        self.tree.add_channel_requested.connect(self._add_channel)
+        self.tree.add_device_requested.connect(self._add_device)
+        self.tree.add_point_requested.connect(self._add_point_to_device)
+        self.tree.remove_channel_requested.connect(self._remove_channel)
+        self.tree.remove_device_requested.connect(self._remove_device)
         self.session.subscribe(self.bridge.forward)
 
         self.timer = QtCore.QTimer(self)
@@ -196,6 +206,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_start = self._toolbar_action(bar, "play", "全部启动", self._start_all)
         self.act_stop = self._toolbar_action(bar, "stop", "全部停止", self._stop_all)
         bar.addSeparator()
+        self.act_new = self._toolbar_action(bar, "new", "新建工程", self._new_project)
         self.act_import = self._toolbar_action(bar, "in", "导入CSV", self._import_csv)
         self.act_export = self._toolbar_action(bar, "out", "导出CSV", self._export_csv)
         self.act_open = self._toolbar_action(bar, "folder", "打开工程", self._open_project)
@@ -231,13 +242,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- 工程 ----------
 
-    def use_project(self, project, path=None, notes=()) -> list:
-        """换一份工程并把五个视图一起对上。返回校验清单（有 error 也照样装）。"""
+    def use_project(self, project, path=None, notes=(), announce=True) -> list:
+        """换一份工程并把五个视图一起对上。返回校验清单（有 error 也照样装）。
+
+        `announce=False` 给**改动**那条路用（新建/增删之后刷新视图）：那一步本来就不该
+        用模态清单打断连续动作，但清单仍要逐条进日志——带着旧错的工程改完还带着那些错，
+        不写出来就等于假装干净了。
+        """
         issues = self.session.load(project, source=path)
         names = self.session.channel_names()
         self.tree.rebuild(project)
         if names:
             self.point_model.attach(session_source(self.session))
+        else:
+            # 一条通道都没有：表必须是**空的**，不许留着上一份的行（那是在演一份不存在的点表）
+            self.point_model.detach()
         # 空点表不能悄悄给一张"看着合法的空白表"：CLI 那句在这里说同一遍
         self.channels.rebuild(project)
         self.store.clear()
@@ -249,16 +268,241 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(f"[note] {note}")
         self._refresh_title()
         self.status_label.setText(self._summary())
-        self._show_issues(issues)
+        if announce:
+            self._show_issues(issues)
+        else:
+            for line in format_issues(issues):
+                self._log(f"[issue] {line}")
         if self.tabs.currentWidget() is self.net_panel:
             # 正好停在网络页时换工程：那一页的字是上一份声明的，得跟着换
             self.net_panel.refresh()
         return issues
 
+    # ---------- 工程结构：新建 / 增删（口径见计划 §3） ----------
+
+    def _new_project(self) -> None:
+        """工具栏"新建工程"：空白起步，或 TCP / 串口 / S7 骨架起步。"""
+        if not self._confirm_discard():
+            return
+        dialog = NewProjectDialog(self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        self.use_project(dialog.project, path=None, announce=False)
+        if dialog.project.channels:
+            self._log(f"[edit] 已新建工程（{len(dialog.project.channels)} 条通道）")
+            # 有内容才置脏：一份空工程在关窗时拦一下问"要不要保存"是在为空气操心
+            self._mark_dirty()
+        else:
+            self._log("[edit] 已新建空工程：在设备树上右键『添加通道』")
+            self.status.showMessage("空工程：设备树上右键『添加通道』", _NOTICE_MS)
+
+    def _add_channel(self) -> None:
+        # 加通道要走 `Session.load()`（通道集合变了），而它第一步停掉**所有**在跑的通道：
+        # 正在给网关服务的那一路会掉线，所以有通道在跑就整体拒绝（口径 6）。
+        if self._guard_running(self.session.channel_names()):
+            return
+        dialog = AddChannelDialog(self, self.session.project)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        self._after_edit(f"已添加通道 {dialog.channel.name}", keep=dialog.channel.name)
+
+    def _add_device(self, channel: str) -> None:
+        if self._guard_running([channel]):
+            return
+        try:
+            dialog = AddDeviceDialog(self, self.session.project, channel)
+        except KeyError:
+            self._log(f"[refused] 添加设备：{channel} 已经不在这份工程里了")
+            return
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        self._after_edit(f"已添加设备 {dialog.device.name}"
+                         f"（unit {dialog.device.unit_id}）")
+
+    def _add_point(self, key: tuple) -> None:
+        """点位表右键"添加点位…"：落在**右键那一行所属的设备**上。"""
+        channel, unit_id, _area, _address = key
+        self._create_point(channel, unit_id)
+
+    def _add_point_to_device(self, channel: str, unit_id: int) -> None:
+        """设备树右键"添加点位…"：空设备在表上没有行，这条是它唯一的加点入口。"""
+        self._create_point(channel, unit_id)
+
+    def _create_point(self, channel: str, unit_id: int) -> None:
+        """加一个点位：按默认值落地，**然后立刻打开属性面板**让它改名/改类型。
+
+        为什么不先弹一个"新建点位"表单：那 10 个字段的表单 `point_props` 已经有一份
+        （带类型联动、定宽槽、一组几何断言）。抄第二份必然漂移，漂了的表现是"新建时
+        能选的组合，打开属性面板就报错"。
+        """
+        if self._guard_running([channel]):
+            return
+        try:
+            transport = channel_transport(self.session.project.find_channel(channel))
+            device = edit.find_device(self.session.project, channel, unit_id)
+            point = edit.default_point(device, edit.default_area(transport),
+                                       transport == "s7")
+            edit.add_point(self.session.project, channel, unit_id, point)
+        except edit.EditRefused as exc:
+            self._show_refused("添加点位", exc.reasons)
+            return
+        except KeyError:
+            self._log(f"[refused] 添加点位：{channel} / unit {unit_id} "
+                      f"已经不在这份工程里了")
+            return
+        self._after_edit(f"已添加点位 {point.name}（{channel} unit {unit_id}）")
+        self._show_point_props((channel, unit_id, point.area, point.address))
+
+    def _remove_channel(self, channel: str) -> None:
+        if self._guard_running(self.session.channel_names()):
+            return
+        try:
+            target = self.session.project.find_channel(channel)
+        except KeyError:
+            self._log(f"[refused] 删除通道：{channel} 已经不在这份工程里了")
+            return
+        points = sum(len(device.points) for device in target.devices)
+        if not self._confirm(f"删除通道 {channel}？",
+                             f"连同 {len(target.devices)} 个设备、{points} 个点位一起删除，"
+                             f"删掉就回不来了。"):
+            return
+        if self._edit_call("删除通道",
+                           lambda: edit.remove_channel(self.session.project, channel)):
+            self._after_edit(f"已删除通道 {channel}")
+
+    def _remove_device(self, channel: str, unit_id: int) -> None:
+        if self._guard_running([channel]):
+            return
+        try:
+            device = edit.find_device(self.session.project, channel, unit_id)
+        except KeyError:
+            self._log(f"[refused] 删除设备：{channel} / unit {unit_id} "
+                      f"已经不在这份工程里了")
+            return
+        if not self._confirm(f"删除设备 {device.name}？",
+                             f"连同它的 {len(device.points)} 个点位一起删除，"
+                             f"删掉就回不来了。"):
+            return
+        if self._edit_call("删除设备",
+                           lambda: edit.remove_device(self.session.project, channel,
+                                                      unit_id)):
+            self._after_edit(f"已删除设备 {device.name}（{channel} unit {unit_id}）")
+
+    def _remove_point(self, key: tuple) -> None:
+        channel, unit_id, area, address = key
+        if self._guard_running([channel]):
+            return
+        try:
+            device = edit.find_device(self.session.project, channel, unit_id)
+        except KeyError:
+            self._log(f"[refused] 删除点位：{channel} / unit {unit_id} "
+                      f"已经不在这份工程里了")
+            return
+        try:
+            point = edit.find_point(device, area, address)
+        except edit.EditRefused as exc:
+            self._show_refused("删除点位", exc.reasons)
+            return
+        except KeyError:
+            self._log(f"[refused] 删除点位：{channel} / {area} {address} "
+                      f"已经不在这份工程里了")
+            return
+        if not self._confirm(f"删除点位 {point.name}？",
+                             f"{channel} / unit {unit_id} / {area} {address}，"
+                             f"删掉就回不来了。"):
+            return
+        if self._edit_call(f"删除点位 {point.name}",
+                           lambda: edit.remove_point(self.session.project, channel,
+                                                     unit_id, area, address)):
+            self._after_edit(f"已删除点位 {point.name}（{channel} unit {unit_id}）")
+
+    # ---------- 结构性改动共用的几步 ----------
+
+    def _guard_running(self, channel_names) -> bool:
+        """要动的通道里只要有一条在跑，就整体拒绝并点名（口径 6）。
+
+        为什么不"先停再改"：加/删通道要走 `Session.load()`，而它第一步就是
+        `_stop_all_locked()`——为一个已停通道的编辑把正在给网关服务的那一路停掉，是新的
+        现场事故（M4 对"改点位地址"已经因为同一个理由拒绝过一次）。加/删设备点位走的
+        `reindex()` 也在文档里写死了：不许在那一路上跑着的时候调用。
+        """
+        running = [name for name in channel_names
+                   if (runtime := self.session.channel(name)) is not None
+                   and runtime.running]
+        if not running:
+            return False
+        names = "、".join(running)
+        self._log(f"[refused] {names} 正在运行；改点表要先停止（只影响这一路）")
+        self.status.showMessage(f"{names} 正在运行，先停止再改点表", _NOTICE_MS)
+        return True
+
+    def _confirm(self, title: str, text: str) -> bool:
+        """删除这种不可撤销的动作先问一次，默认按钮是"否"。"""
+        answer = QtWidgets.QMessageBox.question(
+            self, title, text, QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No)
+        return answer == QtWidgets.QMessageBox.Yes
+
+    def _edit_call(self, what: str, action) -> bool:
+        """跑一次结构性改动：被拒就点名进日志与状态栏，成功回 True（调用方再去刷视图）。
+
+        两种都是"这件事做不成"而不是 bug：`EditRefused` 带校验原话（或分配器的理由），
+        `KeyError` 是"目标已经不在了"（换工程那一瞬间）。两种都不许炸在 Qt 槽里。
+        """
+        try:
+            action()
+        except edit.EditRefused as exc:
+            self._show_refused(what, exc.reasons)
+            return False
+        except KeyError as exc:
+            self._log(f"[refused] {what}：目标已经不在这份工程里了（{exc}）")
+            self.status.showMessage("目标已不在工程里", _NOTICE_MS)
+            return False
+        return True
+
+    def _show_refused(self, what: str, reasons) -> None:
+        """拒绝理由一条都不许只留在返回值里：日志各一条，状态栏给第一句。"""
+        for line in reasons:
+            self._log(f"[refused] {what}: {line}")
+        if reasons:
+            self.status.showMessage(f"{what}被拒：{_one_line(str(reasons[0]))}", _NOTICE_MS)
+
+    def _after_edit(self, message: str, keep: str | None = None) -> None:
+        """结构性改动落地之后：把会话与五个视图对上，并保住"有未保存改动"。
+
+        `use_project` 内部走 `Session.load`，而它会把 `dirty` 清回 False——不补回来的话，
+        "我刚加了一条通道"在标题上不显示、关窗也不问，改动会被静默丢掉。选中的通道也
+        要保住：往第二条通道里加点位，表不该自己跳回第一条。
+        """
+        current = keep or self.point_model.channel()
+        self.use_project(self.session.project, path=self._path, announce=False)
+        self._mark_dirty()
+        names = self.session.channel_names()
+        target = current if current in names else (names[0] if names else "")
+        if target:
+            self._select_channel(target)
+        self._log(f"[edit] {message}")
+
+    def _select_channel(self, channel: str) -> None:
+        """把树的选中项挪到某个通道（表跟着树走）。名字不在工程里就什么都不做。"""
+        item = self.tree.item_for(channel)
+        if item is not None:
+            self.tree.setCurrentItem(item)
+
     def _on_tab_changed(self, index: int) -> None:
         """网络页被选中时重新对一次账（只读）。别的时候一个系统调用都不发。"""
         if self.tabs.widget(index) is self.net_panel:
             self.net_panel.refresh()
+
+    def _mark_dirty(self) -> None:
+        """置脏并**立刻**把标题上的 `*` 打上。
+
+        只调 `session.mark_dirty()` 的话，`*` 要等下一次心跳（最多 100ms）才出现——
+        "刚加完一个点位，界面上什么反应都没有"是真的会让人再点一次。
+        """
+        self.session.mark_dirty()
+        self._dirty_shown = True
+        self._refresh_title()
 
     def _refresh_title(self) -> None:
         name = self._path.name if self._path else "未命名工程"
@@ -312,6 +556,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def _import_csv(self) -> None:
+        if not self._confirm_discard():
+            return
         path = import_csv(self)
         if not path:
             return
@@ -324,6 +570,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.use_project(project, path, notes=notes)
 
     def _open_project(self) -> None:
+        if not self._confirm_discard():
+            return
         try:
             project, path = open_project(self)
         except ProjectFileError as exc:
@@ -349,10 +597,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _export_csv(self) -> None:
         if self._path is None:
-            self._log("[error] 没有工程路径，请先打开或导入一份点表")
-            self.status.showMessage("没有工程路径，导出已取消", _NOTICE_MS)
-            return
-        target = self._path.with_suffix(".csv")
+            # 新建的工程还没有路径：问一次要落到哪（原来这里直接拒绝，等于"新建的工程
+            # 导不出来"，而 CSV 正是这个工具跟现场交换点表的方式）。
+            chosen = export_csv_path(self)
+            if not chosen:
+                return
+            target = pathlib.Path(chosen)
+        else:
+            target = self._path.with_suffix(".csv")
         try:
             write_csv_file(self.session.project, target)
         except OSError as exc:
@@ -360,6 +612,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status.showMessage("导出 CSV 失败，原因见日志页", _NOTICE_MS)
             return
         self._log(f"[info] 已导出 CSV -> {target}")
+        for channel in self.session.project.channels:
+            # CSV 没有端口列：TCP 的端口是靠**通道名尾数**带过去的（`tcp-5020`）。
+            # 名字与端口对不上时，这份 CSV 导回来会读到另一个端口——导入那边"猜了要说"，
+            # 导出这边也得说，否则就是一条静默变味的路。
+            if channel_transport(channel) == "tcp" \
+                    and port_from_name(channel.name) != channel.port:
+                self._log(f"[note] {channel.name}: 端口 {channel.port} 不在名字里；"
+                          f"这份 CSV 按名字读回来会是 {port_from_name(channel.name)}"
+                          f"（把名字改成 {channel.name}-{channel.port} 之类再导出）")
 
     def _restore_waveform(self, key: tuple) -> None:
         """右键"恢复波形"：把这一行的点交还给波形，再报还剩几处在人工接管。
@@ -505,25 +766,38 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- 关闭（口径 ε） ----------
 
+    def _confirm_discard(self) -> bool:
+        """有未保存的改动时问一次（保存 / 丢弃 / 取消）。回 False = **整个动作放弃**。
+
+        四个"会把当前工程换掉/丢掉"的动作共用它：关窗、新建、打开、导入。原来只有关窗问，
+        另外三个是实测确认过的缺陷——`use_project` → `Session.load` 会 `_dirty = False`，
+        标题上的 `*` 就这么消失、关窗也不再问，改动静默丢。`_confirming` 是重入闸：
+        `_save_project` 自己会弹另存为，不许在那条路上再进一次这个框。
+        """
+        if not self.session.dirty or self._confirming:
+            return True
+        answer = QtWidgets.QMessageBox.question(
+            self, "有未保存的改动",
+            "点表有未保存的改动（标题栏有 *）。要先保存吗？",
+            QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Save)
+        if answer == QtWidgets.QMessageBox.Cancel:
+            return False
+        if answer == QtWidgets.QMessageBox.Discard:
+            return True
+        self._confirming = True
+        try:
+            path = self._save_project()
+        finally:
+            self._confirming = False
+        # 另存为里按了取消：改动一片都没落盘，这时候放动作继续就是静默丢数据
+        return path is not None
+
     def closeEvent(self, event) -> None:                # noqa: N802
-        if self.session.dirty and not self._confirming:
-            answer = QtWidgets.QMessageBox.question(
-                self, "有未保存的改动",
-                "点表有未保存的改动（标题栏有 *）。确定要退出吗？改动不会写盘。",
-                QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
-                | QtWidgets.QMessageBox.Cancel,
-                QtWidgets.QMessageBox.Save)
-            if answer == QtWidgets.QMessageBox.Cancel:
-                event.ignore()
-                return
-            if answer == QtWidgets.QMessageBox.Save:
-                self._confirming = True
-                path = self._save_project()
-                self._confirming = False
-                if path is None:
-                    # 另存为里按了取消：改动一片都没落盘，这时候放窗口走就是静默丢数据
-                    event.ignore()
-                    return
+        if not self._confirm_discard():
+            event.ignore()
+            return
         self.timer.stop()
         self.session.shutdown()
         event.accept()
