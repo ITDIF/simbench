@@ -307,8 +307,8 @@ def test_the_file_menu_holds_the_six_actions_with_shortcuts(window):
     assert len(menu) == 1, [m.title() for m in window.menuBar().findChildren(
         QtWidgets.QMenu)]
     actions = menu[0].actions()
-    assert [a.text() for a in actions] == ["新建工程", "打开工程", "导入CSV", "保存工程",
-                                           "另存为…", "导出CSV"]
+    assert [a.text() for a in actions] == ["新建工程", "打开工程", "导入点表", "保存工程",
+                                           "另存为…", "导出点表"]
     assert [a.shortcut().toString() for a in actions] == \
         ["Ctrl+N", "Ctrl+O", "Ctrl+I", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+E"]
     assert [a for a in actions][:1] == [window.act_new]
@@ -749,49 +749,66 @@ def test_a_dirty_point_table_is_an_issue_list_not_a_traceback(window, monkeypatc
     assert "line 2" in issue_lists[-1][0], "行号要在清单里，不然厂商改不动那张表"
 
 
-def test_import_csv_logs_the_guessed_port_note(window, monkeypatch, tmp_path):
+def test_import_logs_the_guessed_port_note(window, monkeypatch, tmp_path):
     """导入时端口是按通道名猜的，这条提醒必须进日志（GUI 不能比 CLI 少说话）。"""
     src = tmp_path / "vendor.csv"
     src.write_text("channel,device,unit_id,name,area,address,datatype,word_order,"
                    "initial,waveform,wave_param,readonly\n"
                    "tcp-1502,D,11,x,hr,0,uint16,ABCD,1,const,,false\n",
                    encoding="utf-8")
-    monkeypatch.setattr(main_window_module, "import_csv", lambda parent=None: str(src))
+    monkeypatch.setattr(main_window_module, "import_table", lambda parent=None: str(src))
     monkeypatch.setattr(main_window_module, "choose_offset", lambda parent=None: 0)
-    window._import_csv()
+    window._import_table()
     assert "port guessed as 1502" in window.log_view.toPlainText()
     assert window.session.channel("tcp-1502") is not None
     assert window.point_model.rowCount() == 1
 
 
-def test_export_csv_writes_the_point_table_next_to_the_project(window, tmp_path):
+def test_export_writes_the_point_table_next_to_the_project(window, tmp_path):
     window._path = tmp_path / "proj.json"
-    window._export_csv()
+    window._export_table()
     exported = (tmp_path / "proj.csv").read_text(encoding="utf-8")
     assert "CO浓度" in exported
-    assert "已导出 CSV" in window.log_view.toPlainText()
+    assert "已导出点表" in window.log_view.toPlainText()
+
+
+def test_export_honours_an_xlsx_destination(window, monkeypatch, tmp_path):
+    """导出对话框里那两行都是点表，**后缀说了算**：选 Excel 就得真写出一个 Excel。
+
+    原来固定写 CSV：选了 Excel 也照样写 CSV 字节，Excel 打开一句"文件格式不对"。
+    """
+    import openpyxl
+
+    window._path = None
+    target = tmp_path / "points.xlsx"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(target), "Excel (*.xlsx)")))
+    window._export_table()
+    sheet = openpyxl.load_workbook(target).active
+    assert [cell.value for cell in next(sheet.iter_rows())][0] == "channel"
+    assert "已导出点表" in window.log_view.toPlainText()
 
 
 def test_export_without_a_path_asks_where_to_put_it(window, monkeypatch, tmp_path):
     """新建的工程还没有路径：导出要先问一次落哪。
 
     原来这里直接拒绝（"没有工程路径，导出已取消"）——那是"新建的工程换不到现场去"，
-    而 CSV 正是这个工具跟现场交换点表的方式。现在问一次；用户取消就什么都不写。
+    而点表正是这个工具跟现场交换数据的方式。现在问一次；用户取消就什么都不写。
     """
     window._path = None
     target = tmp_path / "fresh.csv"
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: (str(target), "CSV (*.csv)")))
-    window._export_csv()
+    window._export_table()
     assert "CO浓度" in target.read_text(encoding="utf-8")
-    assert "已导出 CSV" in window.log_view.toPlainText()
+    assert "已导出点表" in window.log_view.toPlainText()
 
 
 def test_a_cancelled_export_path_writes_nothing(window, monkeypatch, tmp_path):
     window._path = None
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: ("", "")))
-    window._export_csv()
+    window._export_table()
     assert list(tmp_path.iterdir()) == []
     assert "已导出" not in window.log_view.toPlainText()
 

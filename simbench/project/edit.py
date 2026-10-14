@@ -134,7 +134,7 @@ def next_point_name(device) -> str:
     return f"点位{serial}"
 
 
-def _occupied_end(device, area: str, s7: bool) -> int:
+def _occupied_end(device, area: str, transport: str) -> int:
     """这个设备在这个区里已经占到的**末尾**（开区间）。位置算不出来（脏地址/脏类型）的点跳过。
 
     跳过而不是抛：`edit` 经常在**带着错**的工程上工作（那份点表本来就是被开出来修的），
@@ -144,7 +144,7 @@ def _occupied_end(device, area: str, s7: bool) -> int:
     for pt in device.points:
         if pt.area != area or not isinstance(pt.address, int) or pt.address < 0:
             continue
-        if s7:
+        if transport == "s7":
             if pt.datatype == BOOL and isinstance(pt.bit, int):
                 start = pt.address * 8 + pt.bit
                 end = max(end, start + 1)
@@ -163,7 +163,7 @@ def _occupied_end(device, area: str, s7: bool) -> int:
     return end
 
 
-def next_point_address(device, area: str, s7: bool, bit_point: bool = False,
+def next_point_address(device, area: str, transport: str, bit_point: bool = False,
                        span: int = 1) -> tuple[int, int | None]:
     """这个区里第一个不与现有点重叠的位置，回 `(address, bit)`。
 
@@ -179,8 +179,8 @@ def next_point_address(device, area: str, s7: bool, bit_point: bool = False,
     "末格也要在范围内"：validate 只看首地址，`65535` 上放一个占 4 格的点它不报，真跑起来
     主站会读到越界——分配这一层必须替它把住（今天界面只用跨度 1 的类型，但这是公开 API）。
     """
-    end = _occupied_end(device, area, s7)
-    if s7:
+    end = _occupied_end(device, area, transport)
+    if transport == "s7":
         address, bit = divmod(end, 8) if bit_point else ((end + 7) // 8, None)
     else:
         address, bit = end, None
@@ -191,11 +191,11 @@ def next_point_address(device, area: str, s7: bool, bit_point: bool = False,
     return address, bit
 
 
-def _point_span(datatype: str, area: str, s7: bool) -> int:
+def _point_span(datatype: str, area: str, transport: str) -> int:
     """新点要占几格（单位与地址一致）。类型不认识时回 1：那份点会被 validate 拦下，
     这里只要不算错格子、不把邻居顶掉就行。"""
     try:
-        if s7:
+        if transport == "s7":
             return s7_span_bytes(datatype, "0")
         if area_is_bit(area):
             return 1
@@ -204,7 +204,7 @@ def _point_span(datatype: str, area: str, s7: bool) -> int:
         return 1
 
 
-def default_point(device, area: str, s7: bool, datatype: str | None = None) -> Point:
+def default_point(device, area: str, transport: str, datatype: str | None = None) -> Point:
     """一个新点的默认值：名字唯一、地址不重叠、类型取该区/该传输最普通的那一格。
 
     类型只给"最普通"的一种（Modbus `uint16`、S7 `word`），别的留给属性面板改：
@@ -212,10 +212,11 @@ def default_point(device, area: str, s7: bool, datatype: str | None = None) -> P
     位区（Modbus 的 `co`/`di`）与显式要 bool 的调用，按位点分配。
     """
     if datatype is None:
-        datatype = BOOL if (not s7 and area_is_bit(area)) else ("word" if s7 else UINT16)
+        datatype = (BOOL if (transport != "s7" and area_is_bit(area))
+                    else ("word" if transport == "s7" else UINT16))
     bit_point = datatype == BOOL
-    address, bit = next_point_address(device, area, s7, bit_point=bit_point,
-                                      span=_point_span(datatype, area, s7))
+    address, bit = next_point_address(device, area, transport, bit_point=bit_point,
+                                      span=_point_span(datatype, area, transport))
     return Point(name=next_point_name(device), area=area,
                  address=address, datatype=datatype,
                  initial="0", word_order=WORD_ABCD, bit=bit)
@@ -275,7 +276,7 @@ def new_project(transport: str, probe=None, **values) -> Project:
     device = Device(name=next_device_name(channel), unit_id=next_unit_id(channel))
     add_device(project, channel.name, device)
     add_point(project, channel.name, device.unit_id,
-              default_point(device, default_area(transport), transport == "s7"))
+              default_point(device, default_area(transport), transport))
     return project
 
 

@@ -85,29 +85,29 @@ def test_point_names_are_unique_by_default():
 def test_a_new_register_point_lands_after_the_last_one_span_included():
     """uint32 占两格，所以下一个点必须落在 2 之后——只看首地址会算出重叠。"""
     dev = device(points=[point(address=0, datatype="uint32")])
-    assert edit.next_point_address(dev, "hr", s7=False) == (2, None)
+    assert edit.next_point_address(dev, "hr", "tcp") == (2, None)
 
 
 def test_a_new_coil_lands_after_the_last_bit():
     dev = device(points=[point(area="co", datatype="bool", address=4)])
-    assert edit.next_point_address(dev, "co", s7=False) == (5, None)
+    assert edit.next_point_address(dev, "co", "tcp") == (5, None)
 
 
 def test_a_new_s7_word_lands_on_a_byte_boundary_and_never_carries_a_bit():
     """非 bool 带 bit 会被 validate 拒（`s7_bit`），所以这里必须回 None 并向上取整到字节。"""
     dev = device(points=[point(area="db1", address=0, datatype="bool", bit=3)])
-    assert edit.next_point_address(dev, "db1", s7=True) == (1, None)
+    assert edit.next_point_address(dev, "db1", "s7") == (1, None)
 
 
 def test_a_new_s7_bool_takes_the_next_free_bit():
     dev = device(points=[point(area="db1", address=0, datatype="bool", bit=0)])
-    assert edit.next_point_address(dev, "db1", s7=True, bit_point=True) == (0, 1)
+    assert edit.next_point_address(dev, "db1", "s7", bit_point=True) == (0, 1)
 
 
 def test_the_allocator_refuses_past_the_address_ceiling():
     dev = device(points=[point(address=65535, datatype="uint32")])
     with pytest.raises(edit.EditRefused):
-        edit.next_point_address(dev, "hr", s7=False)
+        edit.next_point_address(dev, "hr", "tcp")
 
 
 def test_the_ceiling_check_counts_the_whole_span_not_just_the_first_cell():
@@ -117,11 +117,11 @@ def test_the_ceiling_check_counts_the_whole_span_not_just_the_first_cell():
     """
     dev = device(points=[point(address=65530, datatype="uint16")])      # 占 65530，末尾 65531
     # 一个 uint32 需要 2 格：落在 65531 会到 65532（可以）
-    assert edit.next_point_address(dev, "hr", s7=False, span=2) == (65531, None)
+    assert edit.next_point_address(dev, "hr", "tcp", span=2) == (65531, None)
     tight = device(points=[point(address=65500, datatype="uint16")])
     with pytest.raises(edit.EditRefused) as excinfo:
         for _ in range(40):                       # 一路加到贴住上限
-            address, _bit = edit.next_point_address(tight, "hr", s7=False, span=4)
+            address, _bit = edit.next_point_address(tight, "hr", "tcp", span=4)
             tight.points.append(point(address=address, datatype="uint32"))
     assert "past 65535" in str(excinfo.value)
 
@@ -261,7 +261,7 @@ def test_remove_device_takes_its_points_with_it():
 def test_add_point_lands_without_overlapping():
     dev = device(points=[point(address=0, datatype="uint32")])
     project = Project(channels=[channel([dev])])
-    new = edit.default_point(dev, "hr", s7=False)
+    new = edit.default_point(dev, "hr", "tcp")
     edit.add_point(project, "tcp-5020", 1, new)
     assert [(pt.name, pt.address) for pt in dev.points] == [("点位1", 0), ("点位2", 2)]
     assert errors(project) == []

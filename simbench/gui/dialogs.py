@@ -19,11 +19,7 @@ import pathlib
 
 from PySide6 import QtWidgets
 
-from ..project.csv_io import read_csv_file, write_csv_file
-from ..project.json_io import load as load_project, save as save_project
-
-CSV_FILTER = "CSV (*.csv);;所有文件 (*)"
-PROJECT_FILTER = "工程 (*.json *.csv);;所有文件 (*)"
+from ..project import formats
 
 
 class ProjectFileError(ValueError):
@@ -70,10 +66,10 @@ class IssueDialog(QtWidgets.QDialog):
         box.addWidget(buttons)
 
 
-def import_csv(parent=None):
-    """只要路径。读文件交给调用方：偏移量是选完文件之后才问的。"""
-    path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "导入 CSV 点表", "",
-                                                    CSV_FILTER)
+def import_table(parent=None):
+    """导入点表（CSV / Excel，两种都行）只要路径。读文件交给调用方：偏移量是选完文件之后才问的。"""
+    path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "导入点表", "",
+                                                    formats.table_filter())
     return path or None
 
 
@@ -89,49 +85,45 @@ def choose_offset(parent=None) -> int:
 def read_point_table(path, address_offset: int = 0):
     """CSV -> `(project, notes)`；`address_offset` 是导入时问出来的整体地址偏移。
 
-    端口不在这里覆盖：没给 `ports` 时 `read_csv` 按通道名尾数猜并记一条 note，主窗把
-    note 原样写进日志——"导入时不猜端口"是不可能的（CSV 里根本没有端口列），
+    端口不在这里覆盖：`csv_io` 按通道名尾数猜并记一条 note（新格式的导出把 host/port 写在
+    名字里，所以只有老点表需要猜），主窗把 note 原样写进日志——"导入时不猜端口"是不可能的，
     能做到的正确姿势是**猜了要说**，和 CLI 同一份口径。
+    支持哪些后缀由 `project/formats.py` 那张表说了算（CSV / Excel 两种点表都走这条路）。
     """
     try:
-        return read_csv_file(path, with_notes=True, address_offset=address_offset)
-    except ValueError as exc:
-        raise ProjectFileError(path, exc) from exc
-    except OSError as exc:
+        return formats.read_project(path, address_offset=address_offset)
+    except (ValueError, OSError) as exc:
         raise ProjectFileError(path, exc) from exc
 
 
 def open_project(parent=None):
     """返回 `(project | None, path | None)`；用户取消就是 `(None, None)`。
 
-    `.json` 走工程装载，其余按 CSV 读（和命令行那两个入口一一对应）。
+    按后缀分派（`project/formats.py` 那张表），与命令行那个入口一一对应。
     CSV 的 notes 在这里丢掉是刻意的：这条路上端口已经是工程的一部分（JSON 里存着，
     CSV 里按通道名猜出来后就摆在通道面板上可编辑），再往日志抄一遍就是噪音；
     需要 note 的是"导入点表"那条路（`read_point_table`）。
     """
-    path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "打开工程", "",
-                                                    PROJECT_FILTER)
+    path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "打开点表 / 工程", "",
+                                                    formats.open_filter())
     if not path:
         return None, None
     try:
-        if path.lower().endswith(".json"):
-            return load_project(path), path
-        project, _notes = read_csv_file(path, with_notes=True)
+        project, _notes = formats.read_project(path)
         return project, path
-    except ValueError as exc:
-        raise ProjectFileError(path, exc) from exc
-    except OSError as exc:
+    except (ValueError, OSError) as exc:
         raise ProjectFileError(path, exc) from exc
 
 
-def export_csv_path(parent=None, suggested: str = "") -> str | None:
-    """导出 CSV 要落到哪（回 None = 用户取消）。
+def export_table_path(parent=None, suggested: str = "") -> str | None:
+    """导出**点表**要落到哪（回 None = 用户取消）。
 
-    新建的工程在落盘之前**没有路径**，导不出 CSV 就等于"新建的工程换不到现场去"，
-    而 CSV 正是这个工具跟现场交换点表的方式。原来这里直接拒绝，现在先问一次。
+    两种点表都给（CSV / Excel，见 `project/formats.py`），**后缀决定真写哪一种**。
+    新建的工程在落盘之前**没有路径**，导不出点表就等于"新建的工程换不到现场去"，
+    而点表正是这个工具跟现场交换数据的方式。原来这里直接拒绝，现在先问一次。
     """
-    path, _ = QtWidgets.QFileDialog.getSaveFileName(parent, "导出 CSV 点表", suggested,
-                                                    CSV_FILTER)
+    path, _ = QtWidgets.QFileDialog.getSaveFileName(parent, "导出点表", suggested,
+                                                    formats.table_filter())
     return path or None
 
 
@@ -143,10 +135,7 @@ def save_project_to(project, path) -> pathlib.Path:
     """
     target = pathlib.Path(path)
     try:
-        if target.suffix.lower() == ".json":
-            save_project(project, str(target))
-        else:
-            write_csv_file(project, target)
+        formats.write_project(project, target)
     except (ValueError, OSError) as exc:
         raise ProjectFileError(target, exc) from exc
     return target
@@ -155,14 +144,11 @@ def save_project_to(project, path) -> pathlib.Path:
 def save_project_as(parent, project, suggested: str = ""):
     """返回落盘路径或 None（用户取消）。路径回传给主窗记住。"""
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
-        parent, "保存工程", suggested, "JSON (*.json);;CSV (*.csv)")
+        parent, "保存点表 / 工程", suggested, formats.save_filter())
     if not path:
         return None
     try:
-        if path.lower().endswith(".json"):
-            save_project(project, path)
-        else:
-            write_csv_file(project, path)
+        formats.write_project(project, path)
     except (ValueError, OSError) as exc:
         raise ProjectFileError(path, exc) from exc
     return path

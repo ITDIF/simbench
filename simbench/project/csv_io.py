@@ -80,6 +80,31 @@ def read_csv_file(path: Path, **kwargs):
     return read_csv(Path(path).read_text(encoding="utf-8-sig"), **kwargs)
 
 
+def rows_of(project: Project) -> list[list[str]]:
+    """工程 -> **表格形状**：第一行是表头，其余一行一个点位，12 格都是字符串。
+
+    这是**所有"点表格式"的共用形状**（2026-10-14）：CSV 用它拼文本、Excel 用它填单元格——
+    两份各写一遍"哪一列写什么"迟早漂（加一列时改了一处忘了另一处，导出的 Excel 就少一列）。
+    通道名那点语法（`name@tcp:host:port` 等）也在这里烘好，见 `_csv_channel_name`。
+    """
+    # 一个点位都没有的工程会写成**只有表头**的一份点表，而读回来是 `csv is empty` 的错——
+    # 那等于产出一个谁也读不回来的文件（新建一个空通道、导一次、再想导入就撞上）。点表格式
+    # 里没有"空通道"的表示法，所以这里就说清楚，并指到工程文件（`.json`）那条路上。
+    if not any(True for _ in project.iter_points()):
+        raise ValueError("this project has no point; a point table cannot express an "
+                         "empty channel — save it as .json instead")
+    rows = [list(HEADER)]
+    for ch in project.channels:
+        for dev in ch.devices:
+            for pt in dev.points:
+                rows.append([_csv_channel_name(ch), dev.name, str(dev.unit_id),
+                             pt.name, pt.area, _address_cell_text(pt, ch),
+                             pt.datatype, pt.word_order, pt.initial,
+                             pt.waveform, format_wave_param(pt.wave_param),
+                             "true" if pt.readonly else "false"])
+    return rows
+
+
 def write_csv(project: Project) -> str:
     """Project -> CSV 文本。`row` 是 CSV 自己的行号，不写回表里。
 
@@ -87,23 +112,10 @@ def write_csv(project: Project) -> str:
     `newline=""` 原样落盘，同一份工程会因平台/路径不同产出不同字节（读回倒是
     两种都全等，实测过）。行尾钉死才有可比对的导出文件，也才谈得上进 git。
     """
-    # 一个点位都没有的工程写出**表头一行**，而读回来是 `csv is empty` 的错——那等于产出一个
-    # 谁也读不回来的文件（新建一个空通道、导一次、再想导入就撞上）。CSV 是点表：空通道在它
-    # 里面没有表示法，所以这里就说清楚，并指到工程文件（`.json`）那条路上。
-    if not any(True for _ in project.iter_points()):
-        raise ValueError("this project has no point; a CSV is a point table and cannot "
-                         "express an empty channel — save it as .json instead")
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(HEADER)
-    for ch in project.channels:
-        for dev in ch.devices:
-            for pt in dev.points:
-                writer.writerow([_csv_channel_name(ch), dev.name, dev.unit_id,
-                                 pt.name, pt.area, _address_cell_text(pt, ch),
-                                 pt.datatype, pt.word_order, pt.initial,
-                                 pt.waveform, format_wave_param(pt.wave_param),
-                                 "true" if pt.readonly else "false"])
+    for row in rows_of(project):
+        writer.writerow(row)
     return buf.getvalue()
 
 

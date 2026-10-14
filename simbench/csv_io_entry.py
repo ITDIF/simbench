@@ -9,14 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .project.csv_io import read_csv_file
-from .project.json_io import load as load_project
+from .project import formats
 from .project.model import Project, channel_transport
 from .project.validate import Issue, validate_project
 
 
 def load_point_table(path: str, port_overrides: dict[str, int] | None = None):
-    """返回 `(Project, notes, issues)`；CSV 与 project.json 两种入口都支持。
+    """返回 `(Project, notes, issues)`；格式表里登记的三种（CSV / Excel / project.json）都支持。
 
     `port_overrides` 是"通道名 -> 端口"，值为 0/None 视为没填（留给通道名尾数猜，
     并记一条 note 让人确认）。
@@ -34,10 +33,8 @@ def load_point_table(path: str, port_overrides: dict[str, int] | None = None):
     ports = {name: port for name, port in overrides.items() if port}
     notes: list[str] = []
     try:
-        if source.suffix.lower() == ".json":
-            project = load_project(source)
-        else:
-            project, notes = read_csv_file(source, ports=ports, with_notes=True)
+        # 哪种后缀用哪个读写函数住在 `project/formats.py` 那张表里（加格式只改那一处）
+        project, notes = formats.read_project(source, ports=ports)
     except ValueError as exc:
         return project_placeholder(), [], [
             Issue("error", "parse", source.name, str(exc))]

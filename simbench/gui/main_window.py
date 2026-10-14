@@ -30,8 +30,8 @@ from PySide6 import QtGui, QtCore, QtWidgets
 
 from ..engine import ports
 from ..engine.point_source import session_source
-from ..project import edit
-from ..project.csv_io import port_from_name, write_csv_file
+from ..project import edit, formats
+from ..project.csv_io import port_from_name
 from ..project.model import channel_transport
 from ..project.validate import Issue, error_lines, validate_project
 from . import theme
@@ -39,8 +39,8 @@ from .bridge import EngineBridge
 from .channel_panel import ChannelPanel
 from .device_tree import DeviceTree
 from .dialogs import (
-    IssueDialog, ProjectFileError, choose_offset, export_csv_path, format_issues,
-    import_csv, open_project, read_point_table, save_project_as, save_project_to,
+    IssueDialog, ProjectFileError, choose_offset, export_table_path, format_issues,
+    import_table, open_project, read_point_table, save_project_as, save_project_to,
 )
 from .new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
 from .net_panel import NetPanel
@@ -242,8 +242,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_stop = self._toolbar_action(bar, "stop", "全部停止", self._stop_all)
         bar.addSeparator()
         self.act_new = self._toolbar_action(bar, "new", "新建工程", self._new_project)
-        self.act_import = self._toolbar_action(bar, "in", "导入CSV", self._import_csv)
-        self.act_export = self._toolbar_action(bar, "out", "导出CSV", self._export_csv)
+        self.act_import = self._toolbar_action(bar, "in", "导入点表", self._import_table)
+        self.act_export = self._toolbar_action(bar, "out", "导出点表", self._export_table)
         self.act_open = self._toolbar_action(bar, "folder", "打开工程", self._open_project)
         self.act_save = self._toolbar_action(bar, "save", "保存工程", self._save_project)
         bar.addSeparator()
@@ -431,8 +431,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             transport = channel_transport(self.session.project.find_channel(channel))
             device = edit.find_device(self.session.project, channel, unit_id)
-            point = edit.default_point(device, edit.default_area(transport),
-                                       transport == "s7")
+            point = edit.default_point(device, edit.default_area(transport), transport)
             edit.add_point(self.session.project, channel, unit_id, point)
         except edit.EditRefused as exc:
             self._show_refused("添加点位", exc.reasons)
@@ -693,10 +692,10 @@ class MainWindow(QtWidgets.QMainWindow):
         IssueDialog(issues, self).exec()
         return False
 
-    def _import_csv(self) -> None:
+    def _import_table(self) -> None:
         if not self._confirm_discard():
             return
-        path = import_csv(self)
+        path = import_table(self)
         if not path:
             return
         offset = choose_offset(self)
@@ -743,33 +742,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_title()
         return path
 
-    def _export_csv(self) -> None:
+    def _export_table(self) -> None:
+        """导出一份**点表**：写 CSV 还是写 Excel 由落盘路径的后缀说了算（`project/formats.py`）。
+
+        为什么不再固定写 CSV：导出对话框里那两行（CSV / Excel）都是点表，现场点表绝大多数
+        就是 Excel——选了 Excel 却写出 CSV 字节，Excel 打开会报"文件格式不对"。
+        """
         if self._path is None:
             # 新建的工程还没有路径：问一次要落到哪（原来这里直接拒绝，等于"新建的工程
-            # 导不出来"，而 CSV 正是这个工具跟现场交换点表的方式）。
-            chosen = export_csv_path(self)
+            # 导不出来"，而点表正是这个工具跟现场交换数据的方式）。
+            chosen = export_table_path(self)
             if not chosen:
                 return
             target = pathlib.Path(chosen)
         else:
+            # 有工程路径时给个顺手的默认名（工程文件旁边的同名 .csv），用户仍可在对话框里改成 .xlsx
             target = self._path.with_suffix(".csv")
         try:
-            write_csv_file(self.session.project, target)
+            formats.write_project(self.session.project, target)
         except (OSError, ValueError) as exc:
-            # ValueError 是"这份工程 CSV 表示不了"（一个点位都没有）：那也是一句人话，
+            # ValueError 是"这份工程点表表示不了"（一个点位都没有）：那也是一句人话，
             # 不是 traceback——从 Qt 槽里逃出去的表现是"点了没反应"。
-            self._log(f"[error] 导出 CSV 失败：{exc}")
-            self.status.showMessage("导出 CSV 失败，原因见日志页", _NOTICE_MS)
+            self._log(f"[error] 导出点表失败：{exc}")
+            self.status.showMessage("导出点表失败，原因见日志页", _NOTICE_MS)
             return
-        self._log(f"[info] 已导出 CSV -> {target}")
+        self._log(f"[info] 已导出点表 -> {target}")
         for channel in self.session.project.channels:
-            # CSV 没有端口列：TCP 的端口是靠**通道名尾数**带过去的（`tcp-5020`）。
-            # 名字与端口对不上时，这份 CSV 导回来会读到另一个端口——导入那边"猜了要说"，
-            # 导出这边也得说，否则就是一条静默变味的路。
+            # 点表没有端口列：TCP 的端口是靠**通道名尾数**带过去的（`tcp-5020`）。
+            # 名字与端口对不上时，这份点表导回来会读到另一个端口——导入那边"猜了要说"，
+            # 导出这边也得说，否则就是一条静默变味的路（CSV 与 Excel 都是这条规则）。
             if channel_transport(channel) == "tcp" \
                     and port_from_name(channel.name) != channel.port:
                 self._log(f"[note] {channel.name}: 端口 {channel.port} 不在名字里；"
-                          f"这份 CSV 按名字读回来会是 {port_from_name(channel.name)}"
+                          f"这份点表按名字读回来会是 {port_from_name(channel.name)}"
                           f"（把名字改成 {channel.name}-{channel.port} 之类再导出）")
 
     def _restore_waveform(self, key: tuple) -> None:

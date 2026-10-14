@@ -433,10 +433,10 @@ def test_open_and_import_ask_about_unsaved_changes_first(make_window, monkeypatc
     called: list[int] = []
     monkeypatch.setattr(main_window_module, "open_project",
                         lambda parent=None: called.append(1))
-    monkeypatch.setattr(main_window_module, "import_csv",
+    monkeypatch.setattr(main_window_module, "import_table",
                         lambda parent=None: called.append(2))
     window._open_project()
-    window._import_csv()
+    window._import_table()
     assert called == []
     assert window.session.dirty is True
 
@@ -472,7 +472,7 @@ def test_a_new_project_exports_a_csv_that_comes_back_the_same(
     target = tmp_path / "fresh.csv"
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: (str(target), "CSV (*.csv)")))
-    window._export_csv()
+    window._export_table()
     project, _notes, issues = load_point_table(str(target))
     assert not [i for i in issues if i.level == "error"], [str(i) for i in issues]
     assert [(ch.name, ch.port) for ch in project.channels] == [("tcp-5020", 5020)]
@@ -489,7 +489,7 @@ def test_exporting_says_when_the_port_is_not_written_in_the_channel_name(
     window.use_project(project, None)
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
                         staticmethod(lambda *a, **k: (str(tmp_path / "x.csv"), "CSV (*.csv)")))
-    window._export_csv()
+    window._export_table()
     assert "不在名字里" in window.log_view.toPlainText()
 
 
