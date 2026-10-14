@@ -673,7 +673,7 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
     换成**传输串**（布尔只有两态，第四种协议加不进来，是硬卡点；行为一个字不变），并把
     "加一种协议要改哪 16 处"实测成清单。`openpyxl` 进 `requirements.txt`（延迟 import，
     只用 CSV/JSON 的人不被它拦住）；冻结包那侧 `packaging/smoke.py` 加一条"读 `.xlsx`"。
-    验收：`tests/test_formats.py` 全绿、全量串行 **1376 → 1387 passed**（0 失败 0 跳过）、
+    验收：`tests/test_formats.py` 全绿、全量串行 **1376 → 1389 passed**（0 失败 0 跳过）、
     `packaging/smoke.py` **11 → 12 通过**。计划在
     `docs/superpowers/plans/2026-10-14-import-export-formats.md`（含协议适配器的结论：**适配器
     已经有了**，缺的是"注册"，而注册表这一轮**不做**——等第四种协议知道形状之后再抽）。

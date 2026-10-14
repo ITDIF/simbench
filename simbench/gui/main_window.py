@@ -743,21 +743,20 @@ class MainWindow(QtWidgets.QMainWindow):
         return path
 
     def _export_table(self) -> None:
-        """导出一份**点表**：写 CSV 还是写 Excel 由落盘路径的后缀说了算（`project/formats.py`）。
+        """导出一份**点表**给现场：写 CSV 还是写 Excel 由落盘路径的后缀说了算。
 
-        为什么不再固定写 CSV：导出对话框里那两行（CSV / Excel）都是点表，现场点表绝大多数
-        就是 Excel——选了 Excel 却写出 CSV 字节，Excel 打开会报"文件格式不对"。
+        **每次都要问一次落哪**（默认名 = 工程旁边那份 `.csv`，回车即就地落一份 CSV）。
+        为什么不学"保存"那样有路径就直接写：导出对话框给的是**两种**格式，不问就等于
+        "这个按钮只能出 CSV"——要 Excel 只能绕道"另存为"，而那一动作会把 Ctrl+S 的落点
+        也换成点表文件（工程里的 `tick_ms` 那份设定就丢了）。导出是明确要一份**给别人的
+        文件**，问一次路径才配得上"选格式"这件事；也顺带修掉"选了 Excel 却写 CSV 字节"
+        （Excel 打开会报"文件格式不对"）。
         """
-        if self._path is None:
-            # 新建的工程还没有路径：问一次要落到哪（原来这里直接拒绝，等于"新建的工程
-            # 导不出来"，而点表正是这个工具跟现场交换数据的方式）。
-            chosen = export_table_path(self)
-            if not chosen:
-                return
-            target = pathlib.Path(chosen)
-        else:
-            # 有工程路径时给个顺手的默认名（工程文件旁边的同名 .csv），用户仍可在对话框里改成 .xlsx
-            target = self._path.with_suffix(".csv")
+        suggested = str(self._path.with_suffix(".csv")) if self._path is not None else ""
+        chosen = export_table_path(self, suggested)
+        if not chosen:
+            return
+        target = pathlib.Path(chosen)
         try:
             formats.write_project(self.session.project, target)
         except (OSError, ValueError) as exc:

@@ -764,11 +764,24 @@ def test_import_logs_the_guessed_port_note(window, monkeypatch, tmp_path):
     assert window.point_model.rowCount() == 1
 
 
-def test_export_writes_the_point_table_next_to_the_project(window, tmp_path):
+def test_export_asks_for_a_path_and_suggests_the_projects_own_name(window, monkeypatch,
+                                                                  tmp_path):
+    """导出**总要问一次**（默认名 = 工程旁边那份 `.csv`）。
+
+    为什么不问不行：对话框里是**两种**格式，有路径就直接写等于"这个按钮只能出 CSV"，
+    要 Excel 只能绕道"另存为"——而那一动作会把 Ctrl+S 的落点也换成点表文件。
+    """
     window._path = tmp_path / "proj.json"
+    asked: list[str] = []
+
+    def fake(parent, title, suggested, filters):
+        asked.append(suggested)
+        return (str(tmp_path / "proj.csv"), "CSV (*.csv)")
+
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", staticmethod(fake))
     window._export_table()
-    exported = (tmp_path / "proj.csv").read_text(encoding="utf-8")
-    assert "CO浓度" in exported
+    assert asked == [str(tmp_path / "proj.csv")], "默认名不是工程旁边那份 CSV"
+    assert "CO浓度" in (tmp_path / "proj.csv").read_text(encoding="utf-8")
     assert "已导出点表" in window.log_view.toPlainText()
 
 
@@ -790,16 +803,22 @@ def test_export_honours_an_xlsx_destination(window, monkeypatch, tmp_path):
 
 
 def test_export_without_a_path_asks_where_to_put_it(window, monkeypatch, tmp_path):
-    """新建的工程还没有路径：导出要先问一次落哪。
+    """新建的工程还没有路径（默认名给空，没什么可沿用的）。
 
     原来这里直接拒绝（"没有工程路径，导出已取消"）——那是"新建的工程换不到现场去"，
     而点表正是这个工具跟现场交换数据的方式。现在问一次；用户取消就什么都不写。
     """
     window._path = None
     target = tmp_path / "fresh.csv"
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
-                        staticmethod(lambda *a, **k: (str(target), "CSV (*.csv)")))
+    asked: list[str] = []
+
+    def fake(parent, title, suggested, filters):
+        asked.append(suggested)
+        return (str(target), "CSV (*.csv)")
+
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", staticmethod(fake))
     window._export_table()
+    assert asked == [""], "没有工程路径时不该给一个凭空的默认名"
     assert "CO浓度" in target.read_text(encoding="utf-8")
     assert "已导出点表" in window.log_view.toPlainText()
 

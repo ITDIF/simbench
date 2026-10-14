@@ -99,12 +99,13 @@ spec §5 / README / requirements。
 | D1 | 四个分派点改走格式表 | **多一个**：界面"导出"那条（原来固定 `write_csv_file`）。现在走 `formats.write_project`，后缀说了算 | 导出对话框的过滤器里有 Excel 那一行；选了 Excel 却写 CSV 字节，Excel 打开一句"文件格式不对" |
 | D2 | 界面文字不动 | 工具栏/菜单那两个字：「导入CSV / 导出CSV」→「**导入点表 / 导出点表**」（快捷键与动作对象不变） | 加了 Excel 之后"CSV"这两个字已经是假的；用例同步改了两处断言，并新增一条"选 .xlsx 就真写 Excel" |
 | D3 | §2 口径 7："协议那半边**不抽**注册表" | 照旧不抽，只把布尔 `s7` 换成传输串 | 计划就是这么定的，记一条免得下次又从头纠结 |
+| D4 | 导出沿用老行为（有工程路径就**就地**写一份 CSV，不问） | 改成**每次都问落到哪**，默认名 = 工程旁边那份 `.csv` | 不问就配不上「选格式」这件事：对话框里明明是两种点表，有路径就直接写等于这个按钮只能出 CSV，要 Excel 得绕道「另存为」——而那一动会把 Ctrl+S 的落点也换成点表文件。默认名 + 回车 = 老行为，成本是一次回车 |
 
 ## 4c. 实测数字（收工记录）
 
 * 全量串行 `.venv\Scripts\python.exe -m pytest -q`（`QT_QPA_PLATFORM=offscreen`、
-  `SIMBENCH_NET_AUTO=0`）：**1376 → 1387 passed**，0 失败、0 跳过（新增 11 条：
-  `tests/test_formats.py` 10 条 + 界面上"选 Excel 就真写 Excel" 1 条）。
+  `SIMBENCH_NET_AUTO=0`）：**1376 → 1389 passed**，0 失败、0 跳过（新增 13 条：
+  `tests/test_formats.py` 12 条 + 界面上"选 Excel 就真写 Excel" 1 条）。
 * 格式表本身：`FORMATS` 3 行、四个分派点 + 三个过滤器；`grep -n "s7: bool"` 在两个文件里
   一处不剩。
 * 冻结包：`packaging/smoke.py` **11 → 12 通过**（新增那条读一个带标题行的 `.xlsx`，

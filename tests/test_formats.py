@@ -11,6 +11,7 @@ import pathlib
 
 import pytest
 
+from simbench.csv_io_entry import load_point_table
 from simbench.gui import dialogs
 from simbench.project import csv_io, formats, json_io, xlsx_io
 from simbench.project.model import Project, TcpChannel, Device, Point
@@ -148,6 +149,36 @@ def test_our_own_xlsx_export_writes_such_values_as_text(tmp_path):
     assert cell.value == "72623859790382856" and isinstance(cell.value, str)
     back, _notes = formats.read_project(target)
     assert rows(back) == rows(project)
+
+
+
+# ---------- 命令行那一路 ----------
+
+def test_the_command_line_entry_loads_an_xlsx_too(tmp_path):
+    """命令行（`csv_io_entry.load_point_table`）与界面走**同一张**格式表。
+
+    冻结包那条冒烟（`packaging/smoke.py`）打的就是这条路：源码里不钉住的话，改了界面那一侧
+    的过滤器而漏了这里的后缀分派，只有到打包验收才会发现。
+    """
+    target = tmp_path / "t.xlsx"
+    formats.write_project(example(), target)
+    project, notes, issues = load_point_table(str(target))
+    assert not [issue for issue in issues if issue.level == "error"], \
+        [str(issue) for issue in issues]
+    assert [(ch.name, ch.port) for ch in project.channels] == [("tcp-5020", 5020)]
+    # 演示点表把 host/port 都写在通道名里（`tcp-5020@tcp:0.0.0.0:5020`），所以
+    # **没有**"端口按名字尾数猜的"那条 note——两种点表拿到的 notes 都该是空的
+    assert notes == [], notes
+
+
+def test_the_command_line_entry_refuses_an_unknown_suffix(tmp_path):
+    """后缀不认识：一行 `[error] [parse]`，不是 traceback（命令行那句人话就是这么来的）。"""
+    target = tmp_path / "t.txt"
+    target.write_text("channel,device\n", encoding="utf-8")
+    project, notes, issues = load_point_table(str(target))
+    assert project.channels == [] and notes == []
+    assert [issue.level for issue in issues] == ["error"]
+    assert ".xlsx" in str(issues[0]), str(issues[0])
 
 
 # ---------- 图形界面那两条入口 ----------
