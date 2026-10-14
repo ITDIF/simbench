@@ -20,7 +20,9 @@ from __future__ import annotations
 from collections import Counter
 
 from .model import (
+    AREAS,
     BOOL,
+    REG16,
     S7_DEFAULTS,
     SERIAL_DEFAULTS,
     UINT16,
@@ -32,6 +34,7 @@ from .model import (
     SerialChannel,
     TcpChannel,
     area_is_bit,
+    channel_transport,
     is_serial,
     is_socket,
     register_span,
@@ -374,6 +377,83 @@ def remove_device(project, channel_name: str, unit_id: int) -> None:
 def find_device(project, channel_name: str, unit_id: int):
     """按通道 + unit 找设备本体（界面要它来算新点位的默认区/地址）。找不到抛 KeyError。"""
     return _find_device(_find_channel(project, channel_name), unit_id)
+
+
+def fill_gaps(project, *, start: int = 0) -> list[tuple[str, int, Point]]:
+    """把每个（通道, 设备, 区）里**没被声明的格**补成"保留"点，回补出来的那些。
+
+    为什么要它（2026-10-14）：Modbus 的一条请求**要么整条成功、要么整条回异常码 2**，
+    而点表里有空洞时，主站那种"读一整块"的用法（Modbus Poll 起手就是读 10 格）看到的是
+    "怎么都读不到"——现场只会得出"模拟器坏了"。补成显式的保留点之后，那些格子**真的在
+    点表里**（`reg16` / `bool`、初值 0、可写、名字 `保留<地址>`），界面上也看得见，
+    **不是**隐式的"读不到就回 0"（那会把没声明的东西演成设备报的值，正是本项目最防的）。
+
+    `start` 是补的起点，默认 0（Modbus Poll 那种"从 0 读一块"的习惯）。只补 **Modbus
+    通道**：S7 的区是按 DB/字节的，没有"整块连续地址"这回事（补出来的东西在组态软件里
+    也没有对应物）。走 `_apply` 那条管线：补完**验一遍**，验不过整批撤回。
+    """
+    planned: list[tuple[str, Device, list[Point]]] = []
+    for channel in project.channels:
+        transport = channel_transport(channel)
+        if not (is_socket(transport) or is_serial(transport)):
+            continue                     # S7：见 docstring
+        for device in channel.devices:
+            for area in AREAS:
+                points = _plan_area(device, area, start)
+                if points:
+                    planned.append((channel.name, device, points))
+    if not planned:
+        return []
+
+    def mutate() -> None:
+        for _name, device, points in planned:
+            device.points.extend(points)
+
+    def undo() -> None:
+        for _name, device, points in planned:
+            device.points[:] = [pt for pt in device.points if pt not in points]
+
+    _apply(project, mutate, undo)
+    return [(name, device.unit_id, point)
+            for name, device, points in planned for point in points]
+
+
+def _plan_area(device, area: str, start: int) -> list[Point]:
+    """一个区里要补哪些格：按已声明点的跨度算占位，补 `start` 到"声明末尾"之间的空格。"""
+    occupied: set[int] = set()
+    end = start
+    for pt in device.points:
+        if pt.area != area or not isinstance(pt.address, int) or pt.address < 0:
+            continue
+        try:
+            span = 1 if area_is_bit(area) else register_span(pt.datatype, pt.initial)
+        except ValueError:
+            span = 1                     # 跨度算不出来（脏类型）：当一格，validate 会报那一行
+        occupied.update(range(pt.address, pt.address + span))
+        end = max(end, pt.address + span)
+    points: list[Point] = []
+    names = {pt.name for pt in device.points}
+    for address in range(start, end):
+        if address in occupied:
+            continue
+        name = _reserved_name(names, address)
+        names.add(name)
+        points.append(Point(name=name, area=area, address=address,
+                            datatype=BOOL if area_is_bit(area) else REG16,
+                            initial="false" if area_is_bit(area) else "0",
+                            word_order=WORD_ABCD))
+    return points
+
+
+def _reserved_name(used: set[str], address: int) -> str:
+    """保留点的名字：`保留<地址>`；撞名（用户自己起过）就往后加号。"""
+    base = f"保留{address}"
+    if base not in used:
+        return base
+    serial = 2
+    while f"{base}-{serial}" in used:
+        serial += 1
+    return f"{base}-{serial}"
 
 
 def add_point(project, channel_name: str, unit_id: int, point) -> None:

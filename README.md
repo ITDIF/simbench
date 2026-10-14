@@ -59,6 +59,45 @@ setuptools>=81 移除的 `pkg_resources`）。**没装也能用 Modbus**：只�
 `device show` 只读；`up` / `clean` / `device create|remove` 会动系统网络（要提权）；
 `init` 从点表和 IP 清单生成声明骨架。
 
+## 一台虚拟设备，5 分钟用 Modbus Poll 读起来
+
+```powershell
+.\.venv\Scripts\python.exe -m simbench examples\virtual-device.csv
+```
+
+`examples/virtual-device.csv` 是一台**虚拟设备**（"隧道机电 1 号机"，unit id **11**）：
+四区都有点、保持寄存器 hr 0..17 **连续**，里面既有会动的（回路温度 sine、风速 ramp、
+启动命令 step）也有不动的（状态字、累计电量 uint64、铭牌 string）。
+
+Modbus Poll 里：Connection 选 **Modbus TCP/IP**、IP `127.0.0.1`、Port `5020`、Slave ID `11`；
+然后 `F8` 读保持寄存器：地址 1（勾着 "PLC Addresses (Base 1)"）/ 0（勾掉）、数量 10
+→ 值就该动起来。完整清单（含 32 位 float 的字序怎么设）在
+`docs/superpowers/notes/2026-10-14-modbus-poll.md`。
+
+三条现场最容易被坑的（都是实测形状）：
+
+- **读的范围必须落在点表声明过的格上**：点表里有空洞时，那一条请求会**整条**回异常码 2
+  （Modbus 的语义就是"要么整条成功、要么整条失败"），现场看着像模拟器坏了。有空洞就先把
+  点表补连续：`python -m simbench 现场点表.csv --fill-gaps --result 现场点表-连续.csv`
+  ——补出来的是**看得见的**保留点（`reg16`/`bool`、值 0、名字 `保留<地址>`），不是隐式回 0；
+- **Slave ID 不对回的是异常码 4**（不是超时）：扫 unit 时"有应答"就说明那个号被回应了；
+- **一次最多读 125 格**，超过回异常码 1（协议上限）。
+
+## 支持哪些传输（点表里怎么写）
+
+| 传输 | 通道名写法 | 说明 | 主站侧怎么连 |
+|---|---|---|---|
+| Modbus TCP | `tcp-5020@tcp:0.0.0.0:5020` | 最常见的一路 | Modbus Poll / QModMaster 直接连 |
+| Modbus UDP | `udp-5020@udp:0.0.0.0:5020` | 现场的网关与老平台 | 主站客户端选 UDP |
+| RTU over TCP | `gw-1@rtutcp:192.168.0.9:4001` | 以太网转串口的网关：网络上跑的是 RTU 帧 | `ModbusTcpClient(framer=RTU)` |
+| 串口 RTU | `com-485-1@COM3 19200 8E1` | 一条串口总线，多个 unit 挂上面 | 串口主站（参数照抄） |
+| 串口 ASCII | `com-485-1@COM3 19200 8E1 ascii` | 少数设备说的是 ASCII | 主站选 ASCII framer |
+| S7 | `s7-1@192.168.0.10:102 0/1` | ISO-on-TCP / S7comm（区是 `db<n>`/`mk`/`pe`/`pa`） | 组态软件/S7 驱动连 102 |
+
+一张点表里可以**混装**这六种（各通道按自己的传输走）。`@` 后面那一段把"这台设备在哪儿"
+写全，所以**导出再导入逐字一致**；老写法（不带 `@`、端口按名字尾数猜）仍然能读，读的时候
+会有一条提示。第四段（`ascii`）只在 ASCII 通道上写——它是帧类型，不是第四个串口参数。
+
 ## 从零建一份工程（不用先写 CSV）
 
 界面上点"**新建工程**"：选**空白**起步，或选 TCP / 串口 / S7 的**骨架**（一条通道 + 一个

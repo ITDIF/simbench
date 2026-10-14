@@ -9,6 +9,7 @@ r"""冻结包冒烟：拿**真主站**去打 `dist/` 里的 exe（不是打源�
 1. `--check` / `--list` / 缺文件；
 2. Excel 点表（`.xlsx`）读得进（**这条才验得到 `openpyxl` 真进包了**）；
 2b. 主站模式（`--scan` / `--verify`：同一个 exe 一边当从站一边去读它）；
+2c. 虚拟设备示例（`examples/virtual-device.csv`：Modbus Poll 的入口）；
 3. TCP 从站 + pymodbus 真主站读/写；
 4. RTU 从站（`socket://` 虚拟串口）+ pymodbus 真串口主站读/写；
 5. S7 从站 + `pys7` 真主站读/写（**这条才验得到 `snap7.dll` 真进包了**）；
@@ -266,6 +267,46 @@ def smoke_s7(exe: pathlib.Path, tmp: pathlib.Path) -> None:
         close(proc)
 
 
+# ---------- 虚拟设备示例（Modbus Poll 的入口）----------
+
+def smoke_virtual_device(exe: pathlib.Path, tmp: pathlib.Path) -> None:
+    """冻结包里的"虚拟设备"示例**能起、能用真主站读整块**，`--fill-gaps` 也在。
+
+    Modbus Poll 是现场的尺子，它的起手动作就是"读 10 格"：示例点表因此是连续的。
+    这一条把"示例能过校验 + 冻结包里读得到 10 格 + `--fill-gaps` 那个旗标进了包"钉住。
+    """
+    from pymodbus.client import ModbusTcpClient
+
+    table = ROOT / "examples" / "virtual-device.csv"
+    check = run(exe, str(table), "--check")
+    if check.returncode != 0 or "point table is valid" not in check.stdout:
+        record("虚拟设备示例：冻结包 --check 通过", False, check.stderr.strip()[-200:])
+        return
+    gap = run(exe, str(table), "--fill-gaps")
+    record("虚拟设备示例：示例本来就是连续的（--fill-gaps 说「不用补」）",
+           "没有空洞" in gap.stdout, gap.stdout.strip()[-120:])
+
+    port = free_port()
+    served = write(tmp / "virtual.csv",
+                   table.read_text(encoding="utf-8").replace(
+                       "channel,device", "channel,device"))
+    proc = spawn(exe, str(served), "--host", "127.0.0.1", "--port", str(port), "--quiet")
+    client = ModbusTcpClient("127.0.0.1", port=port, timeout=2.0)
+    try:
+        if not wait_for(client.connect, 15, "virtual device listener"):
+            out, err = close(proc)
+            record("虚拟设备示例：冻结包里真主站读得到 10 格", False, (err or out)[-300:])
+            return
+        # Modbus Poll 起手那一下：读 10 个保持寄存器（示例里 hr 0..17 是连续的）
+        first = client.read_holding_registers(0, count=10, device_id=11).registers
+        second = client.read_holding_registers(4, count=1, device_id=11).registers
+        record("虚拟设备示例：冻结包里真主站读得到 10 格（hr 0..9）",
+               len(first) == 10 and second == [11], f"regs={first}")
+    finally:
+        client.close()
+        close(proc)
+
+
 # ---------- 主站模式 ----------
 
 def smoke_master(exe: pathlib.Path, tmp: pathlib.Path) -> None:
@@ -382,6 +423,7 @@ def main() -> int:
         smoke_tcp(exe, tmp)
         smoke_rtu(exe, tmp)
         smoke_s7(exe, tmp)
+        smoke_virtual_device(exe, tmp)
         smoke_master(exe, tmp)
         if not args.skip_gui:
             smoke_gui(exe_dir, tmp)

@@ -155,6 +155,36 @@ def _master_channel(project, name: str | None = None):
     return None
 
 
+def _run_fill(args, project) -> int:
+    """`--fill-gaps`：把点表里没声明的空格补成"保留"点（值 0），便于主站整块读。
+
+    为什么需要它：Modbus 的一条请求要么整条成功、要么整条回异常码 2。点表里有空洞时，
+    Modbus Poll 那种"读 10 格"的默认用法会**整条失败**——现场只会得出"模拟器坏了"。
+    补出来的行是**真的点位**（`reg16`/`bool`、初值 0、名字 `保留<地址>`），点表里看得见、
+    界面上也显示，而不是"读不到就悄悄回 0"（那会把没声明的东西演成设备报的值）。
+    """
+    from .project import edit, formats
+
+    added = edit.fill_gaps(project)
+    if not added:
+        print("[simbench] 这份点表没有空洞，不用补")
+        return 0
+    sample = "、".join(f"{point.area} {point.address}" for _name, _unit, point in added[:8])
+    more = " 等" if len(added) > 8 else ""
+    print(f"[simbench] 补了 {len(added)} 格保留点（值 0）：{sample}{more}")
+    if not args.result:
+        print("[simbench] 想存下来的话加 --result 文件名（.csv / .xlsx / .json）",
+              file=sys.stderr)
+        return 0
+    try:
+        target = formats.write_project(project, args.result)
+    except (OSError, ValueError) as exc:
+        print(f"[error] [file] 写不出去：{exc}", file=sys.stderr)
+        return 2
+    print(f"[simbench] 已写出 {target}")
+    return 0
+
+
 def _run_master(args, project) -> int:
     """`--scan` / `--verify` 的实现：只读，读完就退。
 
@@ -324,7 +354,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--units", default="",
                         help="--scan 扫哪些 unit，例如 1-20 或 1,2,11（默认 1-247）")
     parser.add_argument("--result", default="",
-                        help="--verify 把报告写到这个文件（.csv / .xlsx）")
+                        help="--verify 的报告 / --fill-gaps 补完的点表写到这个文件")
+    # 点表里有空洞时，主站那种"整块读"会**整条**回异常码 2（Modbus 的语义就是如此），
+    # 现场看着像"模拟器坏了"。这一条把空格补成**看得见的**保留点（值 0、可写）。
+    parser.add_argument("--fill-gaps", action="store_true",
+                        help="把每个区里没声明的空格补成「保留」点（便于主站整块读）")
     parser.add_argument("--no-net", action="store_true",
                         help="这次启动不碰系统网络（跳过按声明自动配 IP）")
     args = parser.parse_args(argv)
@@ -381,6 +415,9 @@ def main(argv: list[str] | None = None) -> int:
         for channel in project.channels:
             _print_table(channel)
         return 0
+
+    if args.fill_gaps:
+        return _run_fill(args, project)
 
     if args.scan or args.verify:
         # 主站模式：读别人的从站，**自己一个端口都不监听**
