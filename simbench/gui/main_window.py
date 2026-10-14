@@ -63,6 +63,10 @@ from .point_table import COLUMNS, PointTableModel, PointTableView
 from .verify_panel import VerifyPanel
 
 _TICK_MS = 100
+# 起手尺寸 = 当前屏幕**可用区域**的这个比例（2026-10-14 用户口径：一半偏小，桌上还要摆
+# 主站工具/浏览器；2/3 是"看得全 + 还留得下别的东西"那一档）。分子/分母写在一起，
+# 免得"一半"这种说法散在注释与用例里各说各的。
+_START_SIZE = (2, 3)
 _NOTICE_MS = 8000                       # 拒绝理由要在状态栏留够一读的时间，别一闪就没
 # 界面上每点一次导入/换工程都会留下一批已经没人引用的 widget；引用环得破，但**只能在
 # 这条线程上破**（口径见 spec §13：引擎线程上触发的一次自动回收如果碰到界面刚丢弃的
@@ -397,26 +401,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.use_project(project, path, notes=notes)
 
     def _fit_to_screen(self) -> None:
-        """起手尺寸 = **当前屏幕可用区域的一半**，并居中。
+        """起手尺寸 = **当前屏幕可用区域的 2/3**（`_START_SIZE`），并居中。
 
         为什么不按布局的 `sizeHint` 起手：那个尺寸是"控件刚好装得下"（本机实测 1058×317），
-        又矮又宽，看着像一条带子；整屏铺满在小屏/多显示器上又太霸道。取一半是现场最省事的
-        一档——左右还能摆一个主站工具或浏览器。
+        又矮又宽，看着像一条带子；整屏铺满在小屏/多显示器上又太霸道。2/3 是现场最省事的
+        一档——报文窗与日志页都还得往下翻，而左边/右边仍然留得下一个主站工具或浏览器。
 
         两个细节：屏幕用 `self.screen()`（还没 show 时是主屏）的**可用区域**（去掉任务栏），
         按整屏算的话窗口会被任务栏盖掉一条边；装不下的窄屏交给 Qt——它按布局的最小尺寸
-        （`minimumSizeHint`）兜底，不会把控件压没，也不会让"一半"变成 0。
+        （`minimumSizeHint`）兜底，不会把控件压没，也不会让"2/3"变成 0。
         """
         if getattr(self, "_geometry_restored", False):
-            # 上次的窗口尺寸已经恢复了：用户明确调过的大小优先于"屏幕一半"
+            # 上次的窗口尺寸已经恢复了：用户明确调过的大小优先于"屏幕的 2/3"
             return
         screen = self.screen()
         if screen is None:                          # 极端情况下没有屏幕信息：不猜尺寸
             return
         area = screen.availableGeometry()
         hint = self.minimumSizeHint()
-        self.resize(max(area.width() // 2, hint.width()),
-                    max(area.height() // 2, hint.height()))
+        numerator, denominator = _START_SIZE
+        self.resize(max(area.width() * numerator // denominator, hint.width()),
+                    max(area.height() * numerator // denominator, hint.height()))
         frame = self.frameGeometry()
         frame.moveCenter(area.center())
         self.move(frame.topLeft())

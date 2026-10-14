@@ -149,12 +149,14 @@ def relaunch(window, project, qapp):
     return window.session.channel("tcp-5020")
 
 
-def test_a_fresh_window_opens_at_half_of_the_screen_and_centred(qapp, engine_runner):
-    """起手尺寸 = 当前屏幕可用区域的一半，并且居中。
+def test_a_fresh_window_opens_at_two_thirds_of_the_screen_and_centred(qapp, engine_runner):
+    """起手尺寸 = 当前屏幕可用区域的 **2/3**（`_START_SIZE`），并且居中。
 
     为什么不是布局的 `sizeHint`：那是"控件刚好装得下"（本机实测 1058×317），又矮又宽。
+    2/3 而不是一半（2026-10-14 用户口径）：一半时报文窗与日志页下得太浅、表格常常要横着滚，
+    而 2/3 仍然在左右各留得下一块地方摆主站工具。
     窄屏时按布局的最小尺寸兜底（`minimumSizeHint`），所以断言里也带着那个 max——
-    这条在 offscreen 的小假屏上跑（1024×768 → 一半 512，小于最小宽 514）正好验到兜底那一支。
+    期望值**与实现同一个来源**（`_START_SIZE`），不写死数字：口径再改一次只用改一处。
     """
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
@@ -162,9 +164,10 @@ def test_a_fresh_window_opens_at_half_of_the_screen_and_centred(qapp, engine_run
     try:
         area = qapp.primaryScreen().availableGeometry()
         hint = window.minimumSizeHint()
+        numerator, denominator = main_window_module._START_SIZE
         assert (window.width(), window.height()) == \
-            (max(area.width() // 2, hint.width()),
-             max(area.height() // 2, hint.height()))
+            (max(area.width() * numerator // denominator, hint.width()),
+             max(area.height() * numerator // denominator, hint.height()))
         frame = window.frameGeometry()
         assert abs(frame.center().x() - area.center().x()) <= 2, frame
         assert abs(frame.center().y() - area.center().y()) <= 2, frame

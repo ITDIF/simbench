@@ -83,7 +83,7 @@ def test_a_window_without_settings_is_untouched(qapp, engine_runner):
     window = make_window(qapp, engine_runner, None)
     try:
         assert window.settings is None
-        # 没给设置 → 走"屏幕一半 + 居中"那条老路（`_geometry_restored` 一个字节都没设）
+        # 没给设置 → 走"屏幕的 2/3 + 居中"那条老路（`_geometry_restored` 一个字节都没设）
         assert getattr(window, "_geometry_restored", False) is False
     finally:
         teardown(window, qapp)
