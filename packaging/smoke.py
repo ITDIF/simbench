@@ -8,6 +8,7 @@ r"""冻结包冒烟：拿**真主站**去打 `dist/` 里的 exe（不是打源�
 
 1. `--check` / `--list` / 缺文件；
 2. Excel 点表（`.xlsx`）读得进（**这条才验得到 `openpyxl` 真进包了**）；
+2b. 主站模式（`--scan` / `--verify`：同一个 exe 一边当从站一边去读它）；
 3. TCP 从站 + pymodbus 真主站读/写；
 4. RTU 从站（`socket://` 虚拟串口）+ pymodbus 真串口主站读/写；
 5. S7 从站 + `pys7` 真主站读/写（**这条才验得到 `snap7.dll` 真进包了**）；
@@ -48,6 +49,13 @@ S7_TABLE = """channel,device,unit_id,name,area,address,datatype,word_order,initi
 s7-1@127.0.0.1:{port} 0/1,D1,11,温度,db1,0,real,ABCD,12.5,const,,false
 s7-1@127.0.0.1:{port} 0/1,D1,11,状态字,db1,4,word,ABCD,11,const,,false
 s7-1@127.0.0.1:{port} 0/1,D1,11,启动,db1,6.3,bool,ABCD,true,const,,false
+"""
+
+# 主站模式那条用的表：通道名把"在哪儿"写全（`name@tcp:host:port`），
+# 于是**同一个 exe** 一边当从站、一边当主站去扫它/核对它
+MASTER_TABLE = """channel,device,unit_id,name,area,address,datatype,word_order,initial,waveform,wave_param,readonly
+tcp-1@tcp:127.0.0.1:{port},D1,11,温度,hr,0,uint16,ABCD,25,const,,false
+tcp-1@tcp:127.0.0.1:{port},D2,12,别家,hr,0,uint16,ABCD,7,const,,false
 """
 
 results: list[tuple[str, bool, str]] = []
@@ -258,6 +266,34 @@ def smoke_s7(exe: pathlib.Path, tmp: pathlib.Path) -> None:
         close(proc)
 
 
+# ---------- 主站模式 ----------
+
+def smoke_master(exe: pathlib.Path, tmp: pathlib.Path) -> None:
+    """冻结包里的主站模式：**同一个 exe** 一边当从站，一边 `--scan` / `--verify` 去读它。
+
+    这条同时验到三件事：`--scan` / `--verify` 两个旗标进了包、`simbench/master/` 那一包被
+    打进去了（漏了的话 import 就炸）、报告能写到盘上。
+    """
+    port = free_port()
+    table = write(tmp / "master.csv", MASTER_TABLE.format(port=port))
+    slave = spawn(exe, str(table), "--quiet")
+    try:
+        if not wait_for(lambda: run(exe, str(table), "--scan", "--units", "10-13",
+                                    "--host", "127.0.0.1").stdout.count("11") > 0,
+                        timeout=30, what="master slave up"):
+            out, err = close(slave)
+            record("主站模式：冻结包扫得到自己起的那个从站", False, (err or out)[-300:])
+            return
+        report_path = tmp / "report.csv"
+        verify = run(exe, str(table), "--verify", "--result", str(report_path))
+        ok = (verify.returncode == 0 and report_path.exists()
+              and "温度" in report_path.read_text(encoding="utf-8"))
+        record("主站模式：--verify 在冻结包里核对并写出报告", ok,
+               f"rc={verify.returncode} {verify.stdout.strip()[-160:]}")
+    finally:
+        close(slave)
+
+
 # ---------- GUI ----------
 
 def _gui_alive(gui: pathlib.Path, args: list[str], name: str) -> None:
@@ -346,6 +382,7 @@ def main() -> int:
         smoke_tcp(exe, tmp)
         smoke_rtu(exe, tmp)
         smoke_s7(exe, tmp)
+        smoke_master(exe, tmp)
         if not args.skip_gui:
             smoke_gui(exe_dir, tmp)
         smoke_onefile(pathlib.Path(args.onefile), tmp)

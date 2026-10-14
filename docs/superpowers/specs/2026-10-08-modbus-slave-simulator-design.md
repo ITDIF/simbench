@@ -218,6 +218,11 @@ word_order, initial, waveform, wave_param, readonly
   分开（pyserial 的 URL 与纯端口名是串口，`host:port` 是 S7）；导出时把 host:port 与
   rack/slot 按同一语法烘回名字，**往返不丢参数**。点了 S7 的名字却漏了端口（`s7-1@host`）
   配上一行的 S7 区/类型时带行号拒掉——它与"串口名叫 host"语法一模一样，只问通道名分不出来。
+- **传输有六种**（2026-10-14 起，见 §11 第 13 条）：通道名那一格就是"这台设备在哪儿 +
+  走哪种传输"，写法互不重叠：`name@tcp:host:port`（Modbus TCP）、`name@udp:host:port`
+  （Modbus UDP）、`name@rtutcp:host:port`（TCP 上跑 RTU 帧，以太网转串口网关）、
+  `name@COM3 19200 8E1`（串口 RTU）、`name@COM3 19200 8E1 ascii`（串口 ASCII，第四段是帧类型）、
+  `name@host:port 0/1`（S7）。导出一律写全，所以导出再导入逐字一致。
 - **S7 的点位**：`area` = `db<n>` / `mk` / `pe` / `pa`；`address` 是**字节偏移**，`bool`
   写成 `字节.位`（`6.3` = `DBX6.3`，模型里存成 `address` + `bit` 两个字段）；
   `datatype` 用 S7 的名字 `bool/byte/char/word/int/dword/dint/real/string`；
@@ -679,6 +684,25 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
     已经有了**，缺的是"注册"，而注册表这一轮**不做**——等第四种协议知道形状之后再抽）。
     不做：协议注册表、Excel 多 sheet / 合并单元格 / 公式、别的点表格式（`.mbs` 那些，
     要对着真文件定口径）。
+
+13. **深度审查那一批（已完成，2026-10-14）**：13 条优化 + 2 项扩展，分六批提交，每批都跑
+    全量串行用例。计划与逐条实测在 `docs/superpowers/plans/2026-10-14-deep-review-batch.md`。
+    值得记住的几条：
+    * **数据安全**：保存（点表 / Excel / 工程 / 网络声明）全部改成"临时文件 + 原子替换 + 一份
+      `.bak`"；界面版 exe 是无控制台构建，**崩溃与日志现在有落点**
+      （`%LOCALAPPDATA%\simbench\logs`，含 `faulthandler` 的原生栈），日志页加"另存日志"。
+    * **随规模退化**：4000 点的表一跳 `Session.rows()` 从 36.6ms 降到 16.3ms（行缓存），
+      界面那一跳改成后台线程取快照（主线程永不等引擎）；报文窗按事件序号做差集，
+      写满 5000 帧后从 65.6ms/跳降到 14.4ms/跳且**不再每 100ms 清一次选中行**。
+    * **工程化**：加了 `pyproject.toml`（ruff + mypy，125 条发现全部处理完，mypy 从 42 条到 0）、
+      CI（lint → windows 上跑全量 → 打 tag 时打包）、版本单一来源 + `--version` + CHANGELOG、
+      依赖全部钉死 + `requirements.lock.txt`。
+    * **界面**：设置落盘（主题/几何/最近打开/上次目录）、核对页（主站模式）、
+      吞掉的异常一律留痕（`simbench/swallow.py`）。
+    * **传输**：从两种扩到**六种**（`tcp` / `udp` / `rtutcp` / `rtu` / `ascii` / `s7`），
+      每种都用真主站打过（见 §5 那张表）；`SerialChannel.framing` 区分 RTU 与 ASCII。
+    * **主站模式**：`--scan` / `--verify` + 界面"核对"页，只读别人的设备，四类结论
+      （对得上 / 对不上 / 没应答 / 读出错）。全量 **1389 → 1535 passed**。
 
 **实现计划范围**：第一份计划覆盖 M1–M4，交付一个 TCP 从站 + GUI + CSV + 报文监视 + 预设波形
 的完整可用工具，全程可自动化验证。M5（RTU）单独出第二份计划，因为它需要你在笔记本 + USB-485
