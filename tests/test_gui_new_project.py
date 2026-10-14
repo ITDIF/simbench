@@ -433,7 +433,7 @@ def test_open_and_import_ask_about_unsaved_changes_first(make_window, monkeypatc
     monkeypatch.setattr(main_window_module, "open_project",
                         lambda parent=None: called.append(1))
     monkeypatch.setattr(main_window_module, "import_table",
-                        lambda parent=None: called.append(2))
+                        lambda *a, **k: called.append(2))
     window._open_project()
     window._import_table()
     assert called == []

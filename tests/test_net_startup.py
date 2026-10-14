@@ -342,7 +342,9 @@ def test_device_create_relaunches_with_both_subcommand_words(monkeypatch, tmp_pa
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(net_cli, "is_elevated", lambda: False)
-    monkeypatch.setattr(net_cli.subprocess, "run", fake_powershell)
+    # 提权编排住在 `net/elevate.py`（O10）：拦的是**它**的 subprocess
+    from simbench.net import elevate
+    monkeypatch.setattr(elevate.subprocess, "run", fake_powershell)
     code = net_cli.main(["device", "create", "--ledger", str(tmp_path / "none.json"),
                          "--result", str(result)])
     assert code == 0

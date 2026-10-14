@@ -28,12 +28,14 @@ import sys
 from PySide6 import QtWidgets
 
 from .. import diagnostics
+from .. import settings as settings_module
 from ..__about__ import __version__
 from ..csv_io_entry import load_point_table
 from ..engine.packets import PacketStore
 from ..engine.session import Session
 from ..net import startup as net_startup
 from ..project.validate import error_lines
+from . import theme
 from .main_window import MainWindow
 
 
@@ -67,11 +69,16 @@ def build_app(argv: list[str] | None = None):
     """
     _take_gc_into_gui_thread()
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(argv or [])
+    # 上次那份设置：主题、窗口几何、最近打开、上次用过的目录（`simbench/settings.py`）
+    saved = settings_module.Settings.load()
+    if saved.theme in ("light", "dark"):
+        # 起手就按上次的主题落一次（默认是浅色；用户切过之后不该每次重来）
+        theme.apply_theme(app, mode=saved.theme)
     store = PacketStore()
     session = Session(packet_store=store)
     # 先装证据落点，再建窗：窗口构造期炸的那一类也要能落盘
     log_file = diagnostics.install_crash_handlers(version=__version__)
-    window = MainWindow(session, store, log_file=log_file)
+    window = MainWindow(session, store, log_file=log_file, settings=saved)
     if log_file is None:
         window._log("[warning] 这次的日志没有落盘（见启动时的提示）：崩溃与日志只在窗口里")
     else:

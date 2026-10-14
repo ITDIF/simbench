@@ -39,7 +39,7 @@ from ..project.csv_io import port_from_name
 from ..project.fsio import write_text_atomic
 from ..project.model import channel_transport
 from ..project.validate import Issue, error_lines, validate_project
-from . import theme
+from . import messages, theme
 from .bridge import EngineBridge
 from .channel_panel import ChannelPanel
 from .device_tree import DeviceTree
@@ -85,12 +85,15 @@ _STATUS_ORDER = ("running", "stopped", "error", "starting")
 class MainWindow(QtWidgets.QMainWindow):
     """组装层：只做接线与呈现，判定全部留在 engine/project 那一份里。"""
 
-    def __init__(self, session, store, project=None, log_file=None) -> None:
+    def __init__(self, session, store, project=None, log_file=None, settings=None) -> None:
         """`log_file` 是这次的**证据落点**（`simbench/diagnostics.py` 那份会话日志）。
 
         默认 `None` = 不落盘：用例构造窗口时不该往用户的 `%LOCALAPPDATA%` 里写文件；
         真实入口（`gui/app.py::build_app`）会装好崩溃钩子并把同一份 `LogFile` 递进来。
         界面上"另存日志"那个按钮两条路都能用（它导出的是**窗里**的文本）。
+
+        `settings`（`simbench/settings.py`）给了就**恢复并记住**窗口几何、主题、最近打开的
+        工程；不给就什么都不做（用例的几何断言因此不会被用户机器上的设置影响）。
         """
         super().__init__()
         # 主题只落这一次（构造期）：运行期再动 setStyleSheet 会让 Qt 重新 polish，
@@ -100,6 +103,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session = session
         self.store = store
         self.log_file = log_file
+        self.settings = settings
         # 点位表的取数挪到后台（见 `engine/rows_pump.py`）：主线程那一跳只做模型 diff，
         # 不再等引擎回话——4000 点的表上一次 16ms，卡在心跳里就是 37% 的主线程预算。
         self.rows_pump = RowsPump(session)
@@ -129,6 +133,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self._build_layout())
         self._build_toolbar()
         self._build_menu()
+        self._restore_settings()
         self._build_status_bar()
 
         self.tabs.addTab(self.packet_panel, "报文监视")
@@ -304,6 +309,88 @@ class MainWindow(QtWidgets.QMainWindow):
         self._icon_names.append((action, icon))
         return action
 
+    # ---------- 设置（`simbench/settings.py`）----------
+
+    def _restore_settings(self) -> None:
+        """按上次那份设置恢复窗口几何/分隔条。**没给设置就什么都不做**（用例就是这么跑的）。"""
+        if self.settings is None:
+            return
+        geometry = self._bytes_from_hex(self.settings.geometry)
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+            # 恢复过几何之后不要再按屏幕一半重算——用户明确调过的尺寸优先
+            self._geometry_restored = True
+        state = self._bytes_from_hex(self.settings.window_state)
+        if state is not None:
+            self.restoreState(state)
+
+    @staticmethod
+    def _bytes_from_hex(text: str):
+        """`saveGeometry()` 的十六进制 -> 字节；空/坏值回 `None`（当没存过）。"""
+        if not text:
+            return None
+        try:
+            return QtCore.QByteArray.fromHex(text.encode("ascii"))
+        except (ValueError, UnicodeEncodeError):
+            return None
+
+    def _start_dir(self) -> str:
+        """文件对话框该从哪个目录开：上次用过的那个（没有就是默认）。"""
+        return self.settings.last_dir if self.settings is not None else ""
+
+    def _suggested_export(self) -> str:
+        """没有工程路径时，"导出点表"对话框的起手提议：上次用过的目录 + 一个通用名字。"""
+        if self.settings is None or not self.settings.last_dir:
+            return ""
+        return str(pathlib.Path(self.settings.last_dir) / "点表.csv")
+
+    def _remember_dir(self, path) -> None:
+        """记下这次的目录（导入/导出/另存为都用得上），并落盘。"""
+        if self.settings is None or not path:
+            return
+        self.settings.remember_dir(path)
+        self.settings.save()
+
+    def _remember_settings(self) -> None:
+        """把这次的窗口几何/主题/最近打开记下来（关窗时一次）。失败就算了（见 settings 模块）。"""
+        if self.settings is None:
+            return
+        self.settings.geometry = bytes(self.saveGeometry().toHex()).decode("ascii")
+        self.settings.window_state = bytes(self.saveState().toHex()).decode("ascii")
+        self.settings.save()
+
+    def _rebuild_recent_menu(self) -> None:
+        """现建"最近打开"里那几条（只列**还在**的文件，一个都不在时置灰一条说明）。"""
+        self.act_recent.clear()
+        if self.settings is None:
+            action = self.act_recent.addAction("（这次没有记住任何文件）")
+            action.setEnabled(False)
+            return
+        paths = self.settings.existing_recent()
+        if not paths:
+            action = self.act_recent.addAction("（还没有打开过文件）")
+            action.setEnabled(False)
+            return
+        for text in paths:
+            action = self.act_recent.addAction(text)
+            action.triggered.connect(
+                lambda _checked=False, target=text: self._open_recent(target))
+
+    def _open_recent(self, path: str) -> None:
+        """从"最近打开"里打开一份（与"打开工程"同一条路：先问未保存改动）。"""
+        if not self._confirm_discard():
+            return
+        try:
+            project, notes = read_point_table(path)
+        except ProjectFileError as exc:
+            self._log(f"[refused] 打不开 {path}：{exc}")
+            self.status.showMessage("这个文件打不开，原因见日志页", _NOTICE_MS)
+            # 打不开的多半已经不在/坏了：从最近列表里摘掉，免得菜单里一直挂着一个死条目
+            self.settings.recent = [p for p in self.settings.recent if p != path]
+            self._remember_settings()
+            return
+        self.use_project(project, path, notes=notes)
+
     def _fit_to_screen(self) -> None:
         """起手尺寸 = **当前屏幕可用区域的一半**，并居中。
 
@@ -315,6 +402,9 @@ class MainWindow(QtWidgets.QMainWindow):
         按整屏算的话窗口会被任务栏盖掉一条边；装不下的窄屏交给 Qt——它按布局的最小尺寸
         （`minimumSizeHint`）兜底，不会把控件压没，也不会让"一半"变成 0。
         """
+        if getattr(self, "_geometry_restored", False):
+            # 上次的窗口尺寸已经恢复了：用户明确调过的大小优先于"屏幕一半"
+            return
         screen = self.screen()
         if screen is None:                          # 极端情况下没有屏幕信息：不猜尺寸
             return
@@ -334,6 +424,10 @@ class MainWindow(QtWidgets.QMainWindow):
         菜单项与工具栏按钮是**同一批 QAction 对象**（行为只有一份，不会两处漂移）。
         """
         menu = self.menuBar().addMenu("文件")
+        self.act_recent = QtWidgets.QMenu("最近打开", self)
+        self.act_recent.setToolTip("最近打开过的工程/点表（只列还在的文件）")
+        # 每次弹出前现建：菜单开着的时候文件可能被删了/换了（`existing_recent` 会滤掉）
+        self.act_recent.aboutToShow.connect(self._rebuild_recent_menu)
         self.act_save_as = QtGui.QAction("另存为…", self)
         self.act_save_as.setToolTip("总是问路径（保存是有路径就直接写回）")
         self.act_save_as.triggered.connect(
@@ -344,6 +438,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                  (self.act_export, "Ctrl+E")):
             action.setShortcut(shortcut)
             menu.addAction(action)
+        # "最近打开"插在"打开工程"后面（上面那一段加完之后插，否则它会被插到最前面）
+        menu.insertAction(self.act_import, self.act_recent.menuAction())
 
     def _build_status_bar(self) -> None:
         self.status = self.statusBar()
@@ -382,6 +478,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channels.rebuild(project)
         self.store.clear()
         self._path = pathlib.Path(path) if path else None
+        if path and self.settings is not None:
+            # 记进"最近打开"（去重 + 置顶 + 只留最近 5 个）
+            self.settings.add_recent(path)
         self._states = dict.fromkeys(names, "stopped")
         self._dirty_shown = self.session.dirty
         self._shown_error = ""
@@ -732,7 +831,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _import_table(self) -> None:
         if not self._confirm_discard():
             return
-        path = import_table(self)
+        path = import_table(self, self._start_dir())
         if not path:
             return
         offset = choose_offset(self)
@@ -741,18 +840,20 @@ class MainWindow(QtWidgets.QMainWindow):
         except ProjectFileError as exc:
             self._show_issues([_parse_issue(exc.path, exc.detail)])
             return
+        self._remember_dir(path)
         self.use_project(project, path, notes=notes)
 
     def _open_project(self) -> None:
         if not self._confirm_discard():
             return
         try:
-            project, path = open_project(self)
+            project, path = open_project(self, self._start_dir())
         except ProjectFileError as exc:
             self._show_issues([_parse_issue(exc.path, exc.detail)])
             return
         if project is None:
             return                                 # 用户取消：什么都没发生
+        self._remember_dir(path)
         self.use_project(project, path)
 
     def _save_project(self, ask: bool = False) -> str | None:
@@ -775,6 +876,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         if path:
             self._path = pathlib.Path(path)
+            self._remember_dir(path)
             self.session.clear_dirty()             # 落盘成功了才配清 `*`
         self._refresh_title()
         return path
@@ -790,7 +892,7 @@ class MainWindow(QtWidgets.QMainWindow):
         （Excel 打开会报"文件格式不对"）。
         """
         suggested = str(self._path.with_suffix(".csv")) if self._path is not None else ""
-        chosen = export_table_path(self, suggested)
+        chosen = export_table_path(self, suggested or self._suggested_export())
         if not chosen:
             return
         target = pathlib.Path(chosen)
@@ -802,6 +904,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(f"[error] 导出点表失败：{exc}")
             self.status.showMessage("导出点表失败，原因见日志页", _NOTICE_MS)
             return
+        self._remember_dir(target)
         self._log(f"[info] 已导出点表 -> {target}")
         for channel in self.session.project.channels:
             # 点表没有端口列：TCP 的端口是靠**通道名尾数**带过去的（`tcp-5020`）。
@@ -879,6 +982,8 @@ class MainWindow(QtWidgets.QMainWindow):
         工具栏图标是已经画好的位图，这两类都不是换一张样式表就能刷掉的。
         """
         mode = theme.toggle()
+        if self.settings is not None:
+            self.settings.theme = mode                   # 关窗时随几何一起落盘
         self.act_theme.setChecked(mode == "dark")
         for action, name in self._icon_names:
             action.setIcon(theme.icon(name))
@@ -946,6 +1051,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText(self._summary())
 
     def _on_log(self, line) -> None:
+        """引擎/后端的一行 → 日志页。**原文保留，下面补一句中文**（见 `gui/messages.py`）。
+
+        为什么不直接把引擎的文案改成中文：命令行、README 与冻结冒烟都按英文原话断言它
+        （那是对外合同）；也不改成"界面上只显示中文"——原始英文是现场取证要贴给上游的东西。
+        """
         self._log(f"[{line.level}] {line.text}")
 
     def _on_tree_selection(self, current, _previous) -> None:
@@ -961,6 +1071,9 @@ class MainWindow(QtWidgets.QMainWindow):
         两处一起写是刻意的：窗里那份给人看（还能"清空"、能另存），文件那份给"事后查"
         （崩溃钩子写的也是它）。只写窗里的话，关窗之后什么都没了。
         """
+        # 引擎/后端那些英文报错：原文保留 + 补一行中文（见 `gui/messages.py`）。
+        # 只在这一处补：`_log` 是所有日志的必经之路，别的地方再补一次就会补两行。
+        text = messages.with_explanation(text)
         self.log_view.appendPlainText(text)
         if self.log_file is not None:
             self.log_file.append(text)
@@ -1047,6 +1160,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.stop()
         self.rows_pump.stop()
         self.session.shutdown()
+        self._remember_settings()
         if self.log_file is not None:
             # 收工前把缓冲刷下去：崩溃钩子写的是同一个文件，句柄留着也无妨，但关窗之后
             # 不该再有人往它里面写（这个进程的日志到此为止）。

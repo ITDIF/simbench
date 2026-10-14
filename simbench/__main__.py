@@ -13,8 +13,8 @@ import os
 import signal
 import sys
 
-from .backend import BackendStartError, UnsupportedTransportError, make_backend
 from .__about__ import __version__
+from .backend import BackendStartError, UnsupportedTransportError, make_backend
 from .csv_io_entry import load_point_table
 from .project.model import channel_transport, s7_summary, serial_summary
 from .project.validate import error_lines, validate_project

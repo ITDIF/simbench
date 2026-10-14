@@ -66,9 +66,13 @@ class IssueDialog(QtWidgets.QDialog):
         box.addWidget(buttons)
 
 
-def import_table(parent=None):
-    """导入点表（CSV / Excel，两种都行）只要路径。读文件交给调用方：偏移量是选完文件之后才问的。"""
-    path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "导入点表", "",
+def import_table(parent=None, start_dir: str = ""):
+    """导入点表（CSV / Excel，两种都行）只要路径。读文件交给调用方：偏移量是选完文件之后才问的。
+
+    `start_dir` 是"上次用过的目录"（`settings.last_dir`）：现场的点表散在几个目录里，
+    每次都从默认目录找起是每天要重复十几次的事。
+    """
+    path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "导入点表", start_dir or "",
                                                     formats.table_filter())
     return path or None
 
@@ -96,7 +100,7 @@ def read_point_table(path, address_offset: int = 0):
         raise ProjectFileError(path, exc) from exc
 
 
-def open_project(parent=None):
+def open_project(parent=None, start_dir: str = ""):
     """返回 `(project | None, path | None)`；用户取消就是 `(None, None)`。
 
     按后缀分派（`project/formats.py` 那张表），与命令行那个入口一一对应。
@@ -104,7 +108,8 @@ def open_project(parent=None):
     CSV 里按通道名猜出来后就摆在通道面板上可编辑），再往日志抄一遍就是噪音；
     需要 note 的是"导入点表"那条路（`read_point_table`）。
     """
-    path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "打开点表 / 工程", "",
+    path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "打开点表 / 工程",
+                                                    start_dir or "",
                                                     formats.open_filter())
     if not path:
         return None, None

@@ -311,13 +311,14 @@ def test_the_file_menu_holds_the_six_actions_with_shortcuts(window):
     assert len(menu) == 1, [m.title() for m in window.menuBar().findChildren(
         QtWidgets.QMenu)]
     actions = menu[0].actions()
-    assert [a.text() for a in actions] == ["新建工程", "打开工程", "导入点表", "保存工程",
-                                           "另存为…", "导出点表"]
-    assert [a.shortcut().toString() for a in actions] == \
-        ["Ctrl+N", "Ctrl+O", "Ctrl+I", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+E"]
+    # "最近打开"是子菜单（`act_recent.menuAction()` 也会出现在 actions() 里）
+    assert [a.text() for a in actions] == ["新建工程", "打开工程", "最近打开", "导入点表",
+                                           "保存工程", "另存为…", "导出点表"]
+    shortcuts = [a.shortcut().toString() for a in actions if a.shortcut().toString()]
+    assert shortcuts == ["Ctrl+N", "Ctrl+O", "Ctrl+I", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+E"]
     assert list(actions)[:1] == [window.act_new]
-    assert actions[3] is window.act_save and actions[5] is window.act_export
-    assert actions[4] is window.act_save_as and window.act_save_as.isEnabled()
+    assert actions[4] is window.act_save and actions[6] is window.act_export
+    assert actions[5] is window.act_save_as and window.act_save_as.isEnabled()
 
 
 def test_the_log_tab_has_a_clear_button_that_actually_clears(window, qapp):
@@ -765,7 +766,8 @@ def test_import_logs_the_guessed_port_note(window, monkeypatch, tmp_path):
                    "initial,waveform,wave_param,readonly\n"
                    "tcp-1502,D,11,x,hr,0,uint16,ABCD,1,const,,false\n",
                    encoding="utf-8")
-    monkeypatch.setattr(main_window_module, "import_table", lambda parent=None: str(src))
+    monkeypatch.setattr(main_window_module, "import_table",
+                        lambda *a, **k: str(src))
     monkeypatch.setattr(main_window_module, "choose_offset", lambda parent=None: 0)
     window._import_table()
     assert "port guessed as 1502" in window.log_view.toPlainText()

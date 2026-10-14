@@ -22,6 +22,7 @@ import tempfile
 
 from simbench import __main__ as cli
 from simbench.net import cli as net_cli
+from simbench.net import elevate as net_elevate
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -76,7 +77,7 @@ def _capture_relaunch(monkeypatch, tmp_path, frozen: bool):
 
         return _Proc()
 
-    monkeypatch.setattr(net_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(net_elevate.subprocess, "run", fake_run)
 
     class _Args:
         result = str(result_path)
@@ -155,9 +156,9 @@ def test_relaunch_temp_files_are_unique_per_process(monkeypatch, tmp_path):
     不该在别人的目录里留下。
     """
     seen: dict[str, object] = {}
-    monkeypatch.setattr(net_cli.tempfile, "gettempdir",
+    monkeypatch.setattr(net_elevate.tempfile, "gettempdir",
                         lambda: str(tmp_path))
-    monkeypatch.setattr(net_cli.subprocess, "run",
+    monkeypatch.setattr(net_elevate.subprocess, "run",
                         lambda *a, **k: _FakeProc(seen, a[0]))
 
     class _Args:
