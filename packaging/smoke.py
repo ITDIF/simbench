@@ -7,11 +7,12 @@ r"""冻结包冒烟：拿**真主站**去打 `dist/` 里的 exe（不是打源�
 跑的形态（默认 `dist/simbench/simbench.exe`，另加 `dist/simbench-onefile.exe`）：
 
 1. `--check` / `--list` / 缺文件；
-2. TCP 从站 + pymodbus 真主站读/写；
-3. RTU 从站（`socket://` 虚拟串口）+ pymodbus 真串口主站读/写；
-4. S7 从站 + `pys7` 真主站读/写（**这条才验得到 `snap7.dll` 真进包了**）；
-5. `net show`（只读那条）；
-6. `simbench-gui.exe` 起得来、活着、收得掉。
+2. Excel 点表（`.xlsx`）读得进（**这条才验得到 `openpyxl` 真进包了**）；
+3. TCP 从站 + pymodbus 真主站读/写；
+4. RTU 从站（`socket://` 虚拟串口）+ pymodbus 真串口主站读/写；
+5. S7 从站 + `pys7` 真主站读/写（**这条才验得到 `snap7.dll` 真进包了**）；
+6. `net show`（只读那条）；
+7. `simbench-gui.exe` 起得来、活着、收得掉。
 
 用法（仓库根，用仓库的 venv 跑——主站库都在里面）：
 
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import csv
 import logging
 import pathlib
 import socket
@@ -139,6 +141,32 @@ def smoke_cli(exe: pathlib.Path, tmp: pathlib.Path) -> None:
     proc = run(exe, "net", "show")
     record("net show（只读那一条）", proc.returncode == 0 and "ifIndex" in proc.stdout,
            f"rc={proc.returncode}")
+
+
+# ---------- Excel 点表 ----------
+
+def smoke_xlsx(exe: pathlib.Path, tmp: pathlib.Path) -> None:
+    """`.xlsx` 点表读得进——**这条才验得到 `openpyxl` 真进包了**。
+
+    为什么非要单独一条：源码那上千条用例跑的是 venv 里的库（`import openpyxl` 一定成功），
+    打包漏了它照样全绿；只有拿**冻结包**去读一个真 `.xlsx` 才证明它跟着进了包。
+    表头上面故意压一行标题：顺手把"表头不在第一行"那条真路也走一遍（现场的表常这样）。
+    """
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["某某隧道 点表 V1.2"])
+    for row in csv.reader(TCP_TABLE.splitlines()):
+        sheet.append(row)
+    target = tmp / "points.xlsx"
+    workbook.save(target)
+
+    proc = run(exe, str(target), "--check", timeout=120)
+    record("Excel 点表：冻结包读得进（openpyxl 真进包 + 表头在标题行之下也认）",
+           proc.returncode == 0 and "point table is valid" in proc.stdout
+           and "表头在第 2 行" in proc.stderr,
+           f"rc={proc.returncode} {proc.stderr.strip()[-200:]}")
 
 
 # ---------- 三条通道 + 三个真主站 ----------
@@ -314,6 +342,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="simbench-smoke-") as folder:
         tmp = pathlib.Path(folder)
         smoke_cli(exe, tmp)
+        smoke_xlsx(exe, tmp)
         smoke_tcp(exe, tmp)
         smoke_rtu(exe, tmp)
         smoke_s7(exe, tmp)

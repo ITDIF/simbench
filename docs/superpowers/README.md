@@ -15,6 +15,7 @@
 | `plans/2026-10-13-new-project.md` | 新建工程与增删（通道 / 设备 / 点位） | 已完成；**注意**它的"口径 6（在跑时拒绝增删）"已被 `2026-10-13-review-round2.md` 改掉 |
 | `plans/2026-10-13-s7-point-identity.md` | 点位身份键带"位"（同字节两个 S7 bool 不再互相覆盖） | 已完成 |
 | `plans/2026-10-13-review-round2.md` | 第二轮深度审查的 12 条意见（本批） | 已完成（逐条有结论） |
+| `plans/2026-10-14-import-export-formats.md` | 多种导入导出格式（CSV / Excel / project.json 收进一张表）+ 协议适配器的结论与「加一种协议要改哪 16 处」 | 已完成 |
 | `notes/2026-10-12-m5-rtu-probes.md` | M5 的前置实测（`socket://` 当虚拟串口那条路） | 实测记录 |
 | `notes/2026-10-13-s7-probes.md` | S7 的前置实测（snap7 能当服务端、事件码布局、两套区代码） | 实测记录 |
 | `notes/2026-10-13-manual-checklist.md` | **人工验收总表**（8 项，含 S7 与打包）——自动化替不了的那些 | 等人跑 |

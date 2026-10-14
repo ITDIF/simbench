@@ -294,6 +294,47 @@ JSON 整数、`timeout` 必须是数字（`int(1.9)=1` 那种静默截断会让�
 }
 ```
 
+### 5.1 多种导入导出格式（2026-10-14 补）
+
+三种格式（点表 CSV / 点表 Excel `.xlsx` / 工程 `project.json`）只有**一张登记表**：
+`project/formats.py` 的 `FORMATS`——`Format(后缀, 对话框里那一行文字, 读, 写, kind)`。
+四个分派点（`csv_io_entry.load_point_table`、`dialogs.open_project` / `save_project_to` /
+`save_project_as`，导出那条走 `formats.write_project`）与三个文件对话框过滤器都问这张表，
+**加一种格式 = 加一行 + 一个模块**。原来那套"`.json` 与其余按 CSV"在四处各写一遍，加格式要改
+六处，漏一处的表现是"打开能读、保存却写成了另一种格式"。
+
+三条口径：
+
+* 后缀不认识**拒绝**（`FormatError`，`ValueError` 的子类），消息里列出支持哪些——猜一个格式
+  等于把 JSON 内容当 CSV 解析，报出来的话离真原因很远；
+* 读：读不懂抛 `ValueError`、文件读不到抛 `OSError`（与既有两条路同形，调用方那套处理照旧）；
+* `read()` 一律回 `(Project, notes)`：点表那两种会带"端口按名字尾数猜的""表头不在第一行"
+  这类提醒，`project.json` 没有（它自带全部信息）。
+
+**Excel 那条不另写一套解析**：`project/xlsx_io.py` 把第一张工作表转成 CSV 文本再交给
+`csv_io.read_csv`——通道名里 `name@tcp:host:port` 那套语法、"猜了要说"、逐行的列数/整数/布尔
+判定、带行号的报错一个字都不重写，两边的语义不可能漂。两条现场处理：**表头找**（第一行 12 格
+与表头完全一致的那一行当表头；找到就用**空行补齐**前面几行，报错里的行号因此与 Excel 里看到的
+行号一致；找不到就原样交给 `csv_io` 报它那句 `header mismatch`）、**单元格最小转换**（数字按
+数字读、Excel 的布尔读成 `true`/`false`、空单元格读成空串）。写出去时只有**逐字往返相同**的才
+按数字写（`str(int(t)) == t`），`0008` / `12.50` / `1e5` 一律落成文本——否则 Excel 一存就静默
+改点表。
+
+**已知代价（写在这里免得现场当成 bug）**：Excel 的数值只有 15 位有效数字，17 位的 uint64
+（累计电量那种）**存不精确**；读进来时若发现那一格是数字，给一条 note 点明原因。要精确传这种
+值用 CSV 或 `project.json`。`openpyxl` 是**延迟 import** 的（只用 CSV/JSON 的人不被它拦住，
+与 `snap7` 同一个姿态），`requirements.txt` 里已列。
+
+**"要不要一个协议适配器"的答案：已经有了。** `project/model.channel_transport()` 是唯一的
+传输判据（全包 29 处 / 13 个文件都问它，没有第二套 isinstance 判定）、`backend.make_backend()`
+是唯一的装配口（界面 / 命令行 / 会话三条路都走它）、`ModbusBackendBase` 的钩子是与传输无关的
+那一半（S7 接上去时 Modbus 两条路的既有用例一个断言没改）。真正缺的是**"注册"**：每种协议的
+事实（通道类、区清单、默认区、默认点位类型、名字语法、校验函数）散在 15 个文件里各写一遍，
+第四种协议要动 **16 处**——清单在 `plans/2026-10-14-import-export-formats.md` §4。**本轮不抽
+注册表**：等第四种协议知道形状之后再按它定表，否则抽出来的是一层用不上的间接。唯一先动的是
+**布尔 `s7` 改成传输串**（`engine/session.py`、`project/edit.py`）：布尔只有两态，第四种协议
+加不进来，这一处是硬卡点；**行为一个字不变**（既有用例逐条钉住）。
+
 ## 6. 字序与编码
 
 `PointCodec` 自研，40 行左右，`struct` + 置换。规则分三步：
@@ -622,6 +663,22 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
     of_a_mixed_project`（三类真主站各读一次）、`::test_one_channel_that_cannot_start_does_not_
     stop_the_others`、`::test_list_shows_each_protocols_own_address_form`、
     `tests/test_session.py::test_a_mixed_project_runs_every_protocol_together`。
+
+12. **多种导入导出格式（已完成，2026-10-14）**：`.csv` / `.xlsx` / `project.json` 收进
+    `project/formats.py` **一张表**（原来"`.json` 与其余按 CSV"在四处各写一遍，加格式要改六处），
+    新增 `project/xlsx_io.py`（把工作表转成 CSV 文本再交给同一个解析器：表头可在标题行之下、
+    报错行号与 Excel 一致、17 位整数丢精度时给一条 note）；导出那条路也改成**后缀说了算**
+    （选 Excel 就真写 Excel，不再"按 CSV 写出去但叫 xlsx"），工具栏那两个字跟着改成
+    「导入点表 / 导出点表」。顺手把 `engine/session.py` 与 `project/edit.py` 里的布尔 `s7`
+    换成**传输串**（布尔只有两态，第四种协议加不进来，是硬卡点；行为一个字不变），并把
+    "加一种协议要改哪 16 处"实测成清单。`openpyxl` 进 `requirements.txt`（延迟 import，
+    只用 CSV/JSON 的人不被它拦住）；冻结包那侧 `packaging/smoke.py` 加一条"读 `.xlsx`"。
+    验收：`tests/test_formats.py` 全绿、全量串行 **1376 → 1387 passed**（0 失败 0 跳过）、
+    `packaging/smoke.py` **11 → 12 通过**。计划在
+    `docs/superpowers/plans/2026-10-14-import-export-formats.md`（含协议适配器的结论：**适配器
+    已经有了**，缺的是"注册"，而注册表这一轮**不做**——等第四种协议知道形状之后再抽）。
+    不做：协议注册表、Excel 多 sheet / 合并单元格 / 公式、别的点表格式（`.mbs` 那些，
+    要对着真文件定口径）。
 
 **实现计划范围**：第一份计划覆盖 M1–M4，交付一个 TCP 从站 + GUI + CSV + 报文监视 + 预设波形
 的完整可用工具，全程可自动化验证。M5（RTU）单独出第二份计划，因为它需要你在笔记本 + USB-485
