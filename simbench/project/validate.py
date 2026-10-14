@@ -10,6 +10,7 @@ from .model import (
     DATATYPES,
     S7_MAX_DB,
     S7_TYPES,
+    SERIAL_FRAMINGS,
     SERIAL_MARK,
     STRING,
     WAVEFORMS,
@@ -21,6 +22,7 @@ from .model import (
     brief,
     brief_name,
     channel_transport,
+    is_socket,
     parse_s7_area,
     register_span,
     s7_area_name,
@@ -104,7 +106,9 @@ def validate_project(project) -> list[Issue]:
             serial_key = _serial(ch, issues, name)
         elif isinstance(ch, S7Channel):
             host_ok, port_ok = _s7(ch, issues, name)
-        elif transport == "tcp":
+        elif is_socket(transport):
+            # tcp / udp / rtutcp 共用同一套 host:port 判定（它们就是同一个形状，
+            # 只差帧怎么切——那是后端的事，不是点表的事）
             host_ok, port_ok = _tcp(ch, issues, name)
         else:
             issues.append(Issue("error", "channel_type", name,
@@ -195,6 +199,11 @@ def _serial(ch, issues: list[Issue], where: str) -> str | None:
     为什么白名单而不判范围：见文件头 `SERIAL_BAUDRATES` 的说明。为什么串口名不许含
     `@`/空格：CSV 那条语法用它们当标记与分隔符，允许就等于"导出再导入解析不回来"。
     """
+    if getattr(ch, "framing", "rtu") not in SERIAL_FRAMINGS:
+        # 第四段（帧类型）写错：串口只有 RTU 与 ASCII 两种帧
+        issues.append(Issue("error", "serial_framing", where,
+                            f"serial framing {brief(getattr(ch, 'framing', None))} "
+                            f"must be one of {SERIAL_FRAMINGS}"))
     ok = isinstance(ch.port, str) and bool(ch.port.strip())
     if not ok:
         issues.append(Issue("error", "serial_port", where,

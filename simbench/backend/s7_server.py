@@ -65,6 +65,9 @@ _START_TIMEOUT = 5.0
 
 
 class S7Backend(ModbusBackendBase):
+    """S7（ISO-on-TCP / S7comm）从站。"""
+
+    TRANSPORT = "s7"
     """一个 S7 通道 = 一个 snap7 `Server` + 若干块按点表算出来的区域缓冲。"""
 
     def __init__(self, channel, packet_sink=None, on_connection=None,

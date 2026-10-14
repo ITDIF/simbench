@@ -213,13 +213,20 @@ def parse_packet(raw: bytes) -> tuple[int | None, int | None, str]:
 
 
 class ModbusTcpBackend(ModbusBackendBase):
-    """一个 TCP 通道 = 一个 ModbusTcpServer = 一个 loop 线程里的监听。
+    """一个 socket 通道 = 一个 pymodbus server = 一个 loop 线程里的监听。
 
     与传输无关的行为（波形、归属、报文/日志、启停顺序）全在 `ModbusBackendBase`；
     本类只填那五个钩子，再加"声明里的地址再挂几个监听"。
+
+    **三种 socket 传输共用这一层**（2026-10-14 E7）：`tcp`（MBAP）、`udp`（MBAP over UDP）、
+    `rtutcp`（RTU 帧跑在 TCP 上，现场的以太网转串口网关就是这种）。子类只覆盖三个类属性
+    与"切帧/解帧"那两个钩子——服务器类、framer、PDU 偏移各写三份的话，迟早漂成三种行为。
     """
 
     _pdu_offset = 7                    # MBAP 头 7 字节，PDU 从第 7 字节开始
+    SERVER_CLASS = ModbusTcpServer     # 子类换 `ModbusUdpServer` 之类
+    FRAMER = FramerType.SOCKET         # socket framer = MBAP；RTU-over-TCP 换 `FramerType.RTU`
+    TRANSPORT = "tcp"                  # 这个后端对应哪种传输（`describe()` 与测试都用它）
 
     def __init__(self, channel, packet_sink=None, on_connection=None,
                  tick_ms: int = 0, log_sink=None, extra_endpoints=()) -> None:
@@ -245,10 +252,10 @@ class ModbusTcpBackend(ModbusBackendBase):
         await asyncio.to_thread(check_port_is_free, self.channel.host, self.port,
                                 self.channel_name)
 
-    def _create_server(self, devices) -> ModbusTcpServer:
-        return ModbusTcpServer(
+    def _create_server(self, devices):
+        return self.SERVER_CLASS(
             devices,
-            framer=FramerType.SOCKET,
+            framer=self.FRAMER,
             address=(self.channel.host, self.channel.port),
             ignore_missing_devices=False,
             trace_packet=self._trace_packet,

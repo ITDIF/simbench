@@ -50,6 +50,53 @@ _HEADER_AND_CRC = 9                      # 1 + 1 + 2 + 2 + 1 + 2
 _SOCKET_URL = "socket://"                # pyserial 的"串口挂在 TCP 上"方案
 
 
+def split_rtu_frames(raw: bytes):
+    """一次到达的 rx 字节块 -> 逐帧产出（RTU：单元号 + PDU + CRC）。
+
+    只管**请求**帧（rx 方向 = 主站发下来的命令）：读类请求是定长 8 字节、报告从站 ID
+    是 4 字节、写多个（15/16）由报文字节数决定，每一个长度都量得出来。碰到量不出来的
+    帧型（诊断回显、自定义功能码……）就**整块停手**——与 TCP 那条"长度字段撒谎就整块
+    停手"同一个口径：猜"下一帧大概从这里开始"会把后面的真报文一条条切歪，而切歪的
+    代价是把"主站写的是哪个点"认到别的偏移上，静默停掉一段曲线。
+
+    为什么必须自己切：pymodbus 在**组帧之前**就 trace，一个块里可能挤了两条写请求
+    （TCP 那条实测过一次到达 24 字节），而 `write_targets` 按契约只解第一条。串口一次
+    轮询能读到上百字节，这种形状只会更多。
+
+    **模块级函数而不是方法**（E7）：RTU-over-TCP 那一支用的是同一个帧形状，写两份迟早漂。
+    """
+    offset = 0
+    while True:
+        if len(raw) - offset < 4:        # 连帧头都不完整：等下一次重放
+            return
+        function = raw[offset + 1]
+        if function in _FIXED_REQUEST_LENGTH:
+            length = _FIXED_REQUEST_LENGTH[function]
+        elif function in _VARIABLE_REQUEST:
+            if len(raw) - offset < 7:    # 到"字节数"那一位为止
+                return
+            length = _HEADER_AND_CRC + raw[offset + 6]
+        else:
+            return                       # 量不出来的帧型：这一块到此为止，不猜
+        if len(raw) - offset < length:
+            return                       # 帧还没到齐（重放的那一次会带上余量）
+        yield raw[offset:offset + length]
+        offset += length
+
+
+def parse_rtu_frame(frame: bytes) -> tuple[int | None, int | None, str]:
+    """RTU 帧 -> `(unit_id, function_code, 摘要)`：句式与 TCP 那版逐字一致，
+    报文窗里两条传输的摘要因此长得一样（现场不必学两套读法）。"""
+    if len(frame) < 4:                   # 单元号 + fc + CRC(2) 是最短的帧
+        return None, None, f"short ({len(frame)} bytes): {frame.hex(' ')}"
+    unit, function = frame[0], frame[1]
+    body = frame[2:-2]                   # 去掉单元号与 CRC，剩下的就是 PDU
+    if function & 0x80:
+        code = body[0] if body else "?"
+        return unit, function & 0x7F, f"unit {unit} fc {function & 0x7F} EXCEPTION {code}"
+    return unit, function, f"unit {unit} fc {function} {len(body)}B {body[:8].hex(' ')}"
+
+
 def socket_endpoint(port: str) -> tuple[str, int] | None:
     """`socket://127.0.0.1:5000` -> `("127.0.0.1", 5000)`；不是这个形状就回 None。
 
@@ -106,6 +153,10 @@ def check_serial_is_free(port: str, channel_name: str | None = None) -> None:
 
 
 class ModbusRtuBackend(ModbusBackendBase):
+    """串口上的 Modbus RTU 从站（ASCII 那一支继承它，只换 framer 与切帧）。"""
+
+    TRANSPORT = "rtu"
+    FRAMER = FramerType.RTU            # ASCII 那一支换 `FramerType.ASCII`
     """一个 RTU 通道 = 一个 ModbusSerialServer = 一个 loop 线程里的串口。"""
 
     _pdu_offset = 1                      # RTU：单元号 1 字节之后就是 PDU
@@ -116,11 +167,11 @@ class ModbusRtuBackend(ModbusBackendBase):
         await asyncio.to_thread(check_serial_is_free, self.channel.port,
                                 self.channel_name)
 
-    def _create_server(self, devices) -> ModbusSerialServer:
+    def _create_server(self, devices):
         channel = self.channel
         return ModbusSerialServer(
             devices,
-            framer=FramerType.RTU,
+            framer=self.FRAMER,
             port=channel.port,
             baudrate=channel.baudrate,
             parity=channel.parity,
@@ -164,47 +215,13 @@ class ModbusRtuBackend(ModbusBackendBase):
             await asyncio.sleep(_POLL)
 
     def _parse_frame(self, frame: bytes) -> tuple[int | None, int | None, str]:
-        """RTU 帧 -> `(unit_id, function_code, 摘要)`：句式与 TCP 那版逐字一致，
-        报文窗里两条传输的摘要因此长得一样（现场不必学两套读法）。"""
-        if len(frame) < 4:                   # 单元号 + fc + CRC(2) 是最短的帧
-            return None, None, f"short ({len(frame)} bytes): {frame.hex(' ')}"
-        unit, function = frame[0], frame[1]
-        body = frame[2:-2]                   # 去掉单元号与 CRC，剩下的就是 PDU
-        if function & 0x80:
-            code = body[0] if body else "?"
-            return unit, function & 0x7F, f"unit {unit} fc {function & 0x7F} EXCEPTION {code}"
-        return unit, function, f"unit {unit} fc {function} {len(body)}B {body[:8].hex(' ')}"
+        """一整帧 -> `(unit_id, function_code, 摘要)`：实现是模块级的 `parse_rtu_frame`
+        （RTU-over-TCP 那一支用的是同一个帧形状，E7 把这层提出来共用）。"""
+        return parse_rtu_frame(frame)
 
     def _split_frames(self, raw: bytes):
-        """一次到达的 rx 字节块 -> 逐帧产出（RTU：单元号 + PDU + CRC）。
-
-        只管**请求**帧（rx 方向 = 主站发下来的命令）：读类请求是定长 8 字节、报告从站 ID
-        是 4 字节、写多个（15/16）由报文字节数决定，每一个长度都量得出来。碰到量不出来的
-        帧型（诊断回显、自定义功能码……）就**整块停手**——与 TCP 那条"长度字段撒谎就整块
-        停手"同一个口径：猜"下一帧大概从这里开始"会把后面的真报文一条条切歪，而切歪的
-        代价是把"主站写的是哪个点"认到别的偏移上，静默停掉一段曲线。
-
-        为什么必须自己切：pymodbus 在**组帧之前**就 trace，一个块里可能挤了两条写请求
-        （TCP 那条实测过一次到达 24 字节），而 `write_targets` 按契约只解第一条。串口一次
-        轮询能读到上百字节，这种形状只会更多。
-        """
-        offset = 0
-        while True:
-            if len(raw) - offset < 4:        # 连帧头都不完整：等下一次重放
-                return
-            function = raw[offset + 1]
-            if function in _FIXED_REQUEST_LENGTH:
-                length = _FIXED_REQUEST_LENGTH[function]
-            elif function in _VARIABLE_REQUEST:
-                if len(raw) - offset < 7:    # 到"字节数"那一位为止
-                    return
-                length = _HEADER_AND_CRC + raw[offset + 6]
-            else:
-                return                       # 量不出来的帧型：这一块到此为止，不猜
-            if len(raw) - offset < length:
-                return                       # 帧还没到齐（重放的那一次会带上余量）
-            yield raw[offset:offset + length]
-            offset += length
+        """一整块 -> 逐帧：实现是模块级的 `split_rtu_frames`（RTU-over-TCP 共用同一份）。"""
+        return split_rtu_frames(raw)
 
     def describe(self) -> str:
         """主站该连哪：串口那一串参数（`COM3 19200 8E1`）——串口上没有别的能对得上的东西。

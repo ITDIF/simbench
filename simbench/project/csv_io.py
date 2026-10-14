@@ -16,6 +16,7 @@ from .model import (
     S7_DEFAULTS,
     S7_TYPES,
     SERIAL_DEFAULTS,
+    SERIAL_FRAMINGS,
     SERIAL_MARK,
     Device,
     Point,
@@ -26,6 +27,7 @@ from .model import (
     brief,
     channel_transport,
     format_frame,
+    is_socket,
     parse_bool,
     parse_frame,
     parse_s7_address,
@@ -239,7 +241,7 @@ def _csv_channel_name(channel) -> str:
         if (channel.rack, channel.slot) != (S7_DEFAULTS["rack"], S7_DEFAULTS["slot"]):
             spec = f"{spec} {channel.rack}/{channel.slot}"
         return f"{channel.name}{SERIAL_MARK}{spec}"
-    if channel_transport(channel) == "tcp":
+    if is_socket(channel_transport(channel)):
         # TCP 也把监听地址写进 `@` 段，但**带一个 `tcp:` 前缀**：`name@tcp:host:port`。
         # 不写成 `name@host:port` —— 那个形状是 S7 的（`s7-1@192.168.0.10:102`），两种传输
         # 撞成同一个写法，导入时只能靠猜，而猜错的后果是静默走错传输（见 `parse_tcp_name`）。
@@ -247,23 +249,34 @@ def _csv_channel_name(channel) -> str:
         # 为什么 TCP 也要写：不写的话，端口只能靠"通道名尾数"那条隐式约定带过去（host 则
         # 无处可放）——自定义名字（`网关-1`）导出再导入端口会变成 1、host 会变回 0.0.0.0，
         # 这是**静默改配置**。显式写出来，文件长一点，但往返逐字一致。
-        return f"{channel.name}{SERIAL_MARK}tcp:{channel.host}:{channel.port}"
+        # 三种 socket 传输（tcp / udp / rtutcp）都写全：`name@<transport>:host:port`
+        return (f"{channel.name}{SERIAL_MARK}{channel_transport(channel)}:"
+                f"{channel.host}:{channel.port}")
     default_frame = format_frame(SERIAL_DEFAULTS["bytesize"], SERIAL_DEFAULTS["parity"],
                                  SERIAL_DEFAULTS["stopbits"])
     frame = format_frame(channel.bytesize, channel.parity, channel.stopbits)
     fields = [str(channel.port)]
-    if channel.baudrate != SERIAL_DEFAULTS["baudrate"] or frame != default_frame:
+    if channel.baudrate != SERIAL_DEFAULTS["baudrate"] or frame != default_frame \
+            or getattr(channel, "framing", "rtu") != "rtu":
         fields.append(str(channel.baudrate))
         if frame != default_frame:
             fields.append(frame)
+    if getattr(channel, "framing", "rtu") == "ascii":
+        # 第四段：帧类型。只有 ASCII 才写（RTU 是默认，写了只是噪音）
+        if len(fields) == 1:
+            fields.append(str(channel.baudrate))       # 帧类型是第四段：波特率那一段不能省
+        fields.append("ascii")
     return f"{channel.name}{SERIAL_MARK}{' '.join(fields)}"
 
 
-TCP_SCHEME = "tcp:"
+SOCKET_SCHEMES = ("tcp:", "udp:", "rtutcp:")
 
 
 def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel] | None:
-    """`<通道名>@tcp:<host>:<port>` -> `(名字, TcpChannel)`；不是这个写法回 None。
+    """`<通道名>@<tcp|udp|rtutcp>:<host>:<port>` -> `(名字, TcpChannel)`；不是这个写法回 None。
+
+    **三种方案都走这一个函数**（2026-10-14 E7 加 udp / rtutcp）：它们除了 `type` 之外
+    全是同一个形状（`host:port`），分开写三份解析迟早漂成三种报错文案。
 
     为什么 TCP 要一个显式前缀：`name@host:port` 这个形状**已经是 S7 的**，两种传输共用同一个
     写法就分不出来了，而"分不出来"意味着导入时要靠区/类型去猜传输——猜错就是静默走错路。
@@ -278,33 +291,38 @@ def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel] | None:
     name, _, spec = raw.partition(SERIAL_MARK)
     name = name.strip()
     fields = spec.split()
-    if not fields or not fields[0].lower().startswith(TCP_SCHEME):
+    scheme = next((s for s in SOCKET_SCHEMES
+                   if fields and fields[0].lower().startswith(s)), None)
+    if scheme is None:
         return None
     if not name:
         raise ValueError(f"line {index}: channel {brief(raw)} has no name before "
-                         f"{SERIAL_MARK!r} (write it as name{SERIAL_MARK}tcp:host:port)")
+                         f"{SERIAL_MARK!r} (write it as "
+                         f"name{SERIAL_MARK}<tcp|udp|rtutcp>:host:port)")
     if len(fields) > 1:
         raise ValueError(f"line {index}: channel {brief(raw)} must be written as "
-                         f"name{SERIAL_MARK}tcp:host:port (one part after "
-                         f"{SERIAL_MARK!r})")
-    body = fields[0][len(TCP_SCHEME):]
+                         f"name{SERIAL_MARK}<tcp|udp|rtutcp>:host:port "
+                         f"(one part after {SERIAL_MARK!r})")
+    body = fields[0][len(scheme):]
     host, sep, port_text = body.rpartition(":")
     if not sep or not host:
-        raise ValueError(f"line {index}: channel {brief(raw)}: TCP channels are written "
-                         f"as name{SERIAL_MARK}tcp:host:port (no host:port found)")
+        raise ValueError(f"line {index}: channel {brief(raw)}: socket channels "
+                         f"(tcp/udp/rtutcp) are written as "
+                         f"name{SERIAL_MARK}<scheme>:host:port (no host:port found)")
     try:
         port = int(port_text)
     except ValueError:
         raise ValueError(f"line {index}: channel {brief(raw)}: port "
                          f"{brief(port_text)} is not an integer") from None
-    return name, TcpChannel(name=name, host=host, port=port)
+    return name, TcpChannel(name=name, type=scheme[:-1], host=host, port=port)
 
 
 def parse_serial_name(raw: str, index: int) -> tuple[str, SerialChannel] | None:
-    """CSV 的通道列 -> `(通道名, SerialChannel)`；没有 `@` 就回 None（那是 TCP 那一路）。
+    """CSV 的通道列 -> `(通道名, SerialChannel)`；没有 `@` 就回 None（那是 socket 那一路）。
 
-    语法：`<通道名>@<串口名>[ <波特率>[ <帧格式>]]`（段之间空格）——
-    `com-485-1@COM3`、`com-485-1@COM3 19200`、`com-485-1@COM3 19200 8E1`。
+    语法：`<通道名>@<串口名>[ <波特率>[ <帧格式>[ <帧类型>]]]`（段之间空格）——
+    `com-485-1@COM3`、`com-485-1@COM3 19200`、`com-485-1@COM3 19200 8E1`、
+    `com-485-1@COM3 19200 8E1 ascii`（第四段只有 `ascii` 一个值，见 `SERIAL_FRAMINGS`）。
     只做**转换**：`9N1` 这种"形状对、值不合法"的解析得出来，留给 validate 报；
     形状就不对的（空的名字/串口名、多于三段、波特率不是数、帧格式不是 `8N1` 的样子）
     在这里就带行号拒掉——那不是一个值，是 CSV 里写坏的一格。
@@ -317,10 +335,10 @@ def parse_serial_name(raw: str, index: int) -> tuple[str, SerialChannel] | None:
         raise ValueError(f"line {index}: channel {brief(raw)} has no name before "
                          f"{SERIAL_MARK!r} (write it as name{SERIAL_MARK}COM3)")
     fields = spec.split()
-    if not 1 <= len(fields) <= 3:
+    if not 1 <= len(fields) <= 4:
         raise ValueError(
             f"line {index}: channel {brief(raw)} must be written as "
-            f"name{SERIAL_MARK}PORT[ BAUD[ FRAME]] (at most three parts)")
+            f"name{SERIAL_MARK}PORT[ BAUD[ FRAME[ FRAMING]]] (at most four parts)")
     baudrate = SERIAL_DEFAULTS["baudrate"]
     if len(fields) >= 2:
         try:
@@ -331,14 +349,22 @@ def parse_serial_name(raw: str, index: int) -> tuple[str, SerialChannel] | None:
     frame = {"bytesize": SERIAL_DEFAULTS["bytesize"],
              "parity": SERIAL_DEFAULTS["parity"],
              "stopbits": SERIAL_DEFAULTS["stopbits"]}
-    if len(fields) == 3:
+    if len(fields) == 4:
+        framing = fields[3].lower()
+        if framing not in SERIAL_FRAMINGS:
+            raise ValueError(
+                f"line {index}: channel {brief(raw)}: framing "
+                f"{brief(fields[3])} must be one of {SERIAL_FRAMINGS}")
+    if len(fields) >= 3:
         parsed = parse_frame(fields[2])
         if parsed is None:
             raise ValueError(f"line {index}: channel {brief(raw)}: frame "
                              f"{brief(fields[2])} must look like 8N1 "
                              f"(data bits / parity / stop bits)")
         frame = parsed
-    return name, SerialChannel(name=name, port=fields[0], baudrate=baudrate, **frame)
+    framing = fields[3].lower() if len(fields) == 4 else "rtu"
+    return name, SerialChannel(name=name, port=fields[0], framing=framing,
+                               baudrate=baudrate, **frame)
 
 
 def parse_s7_name(raw: str, index: int) -> tuple[str, S7Channel] | None:

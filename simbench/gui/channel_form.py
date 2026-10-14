@@ -21,7 +21,7 @@ from __future__ import annotations
 from PySide6 import QtCore, QtWidgets
 
 from ..project import edit
-from ..project.model import format_frame, parse_frame
+from ..project.model import format_frame, is_serial, parse_frame
 
 _LABEL_WIDTH = 84
 _FIELD_WIDTH = 190
@@ -33,34 +33,54 @@ _HINT_HEIGHT = 22
 _HINT_WIDTH = 328
 
 # 类型的显示名与"标签订单"：`_LABELS[kind]` 是那三格的标签（空串 = 这一格对这个类型没意义）
-_KIND_LABELS = (("blank", "空白工程"), ("tcp", "TCP"), ("rtu", "串口 RTU"), ("s7", "S7"))
+#
+# 六种传输共用同三格（界面口径 4/5：不加控件、不动几何），只是含义不同：
+#   socket 三种（TCP/UDP/RTU over TCP）：监听地址 + 端口 + 空
+#   串口两种（RTU/ASCII）：串口名 + 波特率 + 帧格式
+#   S7：监听地址 + 端口 + 机架/槽位
+# 帧类型那件事**不占格子**：它由点的是哪个按钮决定（RTU 还是 ASCII），写进通道的 `framing`。
+_KIND_LABELS = (("blank", "空白工程"), ("tcp", "TCP"), ("udp", "UDP"),
+                ("rtutcp", "TCP 上的 RTU"), ("rtu", "串口 RTU"),
+                ("ascii", "串口 ASCII"), ("s7", "S7"))
 _LABELS = {
     "blank": ("", "", ""),
     "tcp": ("监听地址", "端口", ""),
+    "udp": ("监听地址", "端口", ""),
+    "rtutcp": ("监听地址", "端口", ""),
     "rtu": ("串口名", "波特率", "帧格式"),
+    "ascii": ("串口名", "波特率", "帧格式"),
     "s7": ("监听地址", "端口", "机架/槽位"),
 }
 _HINTS = {
     "blank": "空工程：落地后在设备树上右键添加通道",
     "tcp": "监听地址 0.0.0.0 = 所有网卡",
+    "udp": "UDP 无连接；现场的网关与老平台常用",
+    "rtutcp": "以太网转串口网关：网络上跑的是 RTU 帧",
     "rtu": "串口名要自己填：本工具不替现场猜 COM 口",
+    "ascii": "串口 ASCII：同样是串口，帧是可打印十六进制",
     "s7": "S7 惯例端口 102；机架 0 槽位 1",
 }
 _FIRST_TIPS = {
     "blank": "",
     "tcp": "监听地址（例：0.0.0.0）",
+    "udp": "监听地址（例：0.0.0.0）",
+    "rtutcp": "监听地址（例：0.0.0.0）",
     "rtu": "串口名（例：COM3）——必须填，且不许含空格",
+    "ascii": "串口名（例：COM3）——必须填，且不许含空格",
     "s7": "监听地址（例：0.0.0.0）；不许含 ':' 或 '/'",
 }
-_SECOND_TIPS = {"blank": "", "tcp": "监听端口（例：5020）", "rtu": "波特率（例：9600）",
-                "s7": "S7 惯例端口 102"}
-_THIRD_TIPS = {"blank": "", "tcp": "", "rtu": "帧格式：数据位/校验/停止位（例：8E1）",
+_SECOND_TIPS = {"blank": "", "tcp": "监听端口（例：5020）", "udp": "监听端口（例：5020）",
+                "rtutcp": "监听端口（例：5020）", "rtu": "波特率（例：9600）",
+                "ascii": "波特率（例：9600）", "s7": "S7 惯例端口 102"}
+_THIRD_TIPS = {"blank": "", "tcp": "", "udp": "", "rtutcp": "",
+               "rtu": "帧格式：数据位/校验/停止位（例：8E1）",
+               "ascii": "帧格式：数据位/校验/停止位（例：8E1）",
                "s7": "机架/槽位（例：0/1；客户端连上来时报的那两个数）"}
 
 
 def form_values(kind: str, channel) -> dict:
     """一个通道对象 -> 表单那四格。后三格的含义随类型变（与通道面板那一行同口径）。"""
-    if kind == "rtu":
+    if is_serial(kind):
         return {"name": channel.name, "first": channel.port,
                 "second": str(channel.baudrate),
                 "third": format_frame(channel.bytesize, channel.parity, channel.stopbits)}

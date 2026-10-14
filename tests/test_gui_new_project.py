@@ -705,7 +705,10 @@ def test_only_the_new_project_dialog_offers_a_blank_start(qapp):
     """
     from simbench.project.model import Project
     add = AddChannelDialog(None, Project())
-    assert sorted(add.form._buttons) == ["rtu", "s7", "tcp"]
+    from simbench.project import edit
+    # 六种传输都能建；但「空白工程」只在新工程对话框里（E7 之后从 3 种变 6 种）
+    assert sorted(add.form._buttons) == sorted(edit.TRANSPORTS)
+    assert "blank" not in add.form._buttons
     new = NewProjectDialog()
     assert sorted(new.form._buttons) == ["blank", "rtu", "s7", "tcp"]
 

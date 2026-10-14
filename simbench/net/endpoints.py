@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..project.model import channel_transport
+from ..project.model import channel_transport, is_socket
 from . import spec as netspec
 from .state import NetError
 
@@ -47,7 +47,7 @@ def for_channel(channel, point_table) -> list[tuple[str, int]]:
     """
     # 串口通道不额外挂监听：RTU 是串口上的一条总线，没有"设备 IP:端口"这回事。
     # 声明里同名的设备因此一直"没被监听"，但那是这一层该有的结论，不是错误。
-    if channel_transport(channel) != "tcp":
+    if not is_socket(channel_transport(channel)):
         return []
     declaration = _load(point_table)
     if declaration is None or not declaration.devices:

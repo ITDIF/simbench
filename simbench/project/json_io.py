@@ -19,6 +19,7 @@ from .model import (
     TcpChannel,
     brief,
     channel_transport,
+    is_serial,
     parse_value,
 )
 
@@ -174,22 +175,27 @@ def _channel_to_dict(channel) -> dict:
     插入序走，所以这里手写而不是 dict 推导。
     """
     devices = [_device_to_dict(d) for d in channel.devices]
-    if channel_transport(channel) == "s7":
+    transport = channel_transport(channel)
+    if transport == "s7":
         return {"name": channel.name, "type": "s7", "host": channel.host,
                 "port": channel.port, "rack": channel.rack, "slot": channel.slot,
                 "devices": devices}
-    if channel_transport(channel) == "rtu":
-        return {"name": channel.name, "type": "rtu", "port": channel.port,
+    if is_serial(transport):
+        # `type` 就是传输名（`rtu` / `ascii`），**不另写 `framing` 键**：一个事实一个位置。
+        # 好处是老工程与 spec §5 的示例逐字节不变（它们没有这个键）。
+        return {"name": channel.name, "type": transport, "port": channel.port,
                 "baudrate": channel.baudrate, "parity": channel.parity,
                 "bytesize": channel.bytesize, "stopbits": channel.stopbits,
                 "timeout": channel.timeout, "devices": devices}
-    return {"name": channel.name, "type": channel.type, "host": channel.host,
+    # socket 那三种（tcp / udp / rtutcp）：`type` 写的就是传输名
+    return {"name": channel.name, "type": transport, "host": channel.host,
             "port": channel.port, "devices": devices}
 
 
 def _channel_from_dict(raw: dict, index: int):
     _require_object(raw, "channel")
-    if raw.get("type") == "rtu":
+    # 没写 `type` 就是 TCP（老工程文件里 TCP 那一支本来就不写它）；写 `rtu`/`ascii` 才是串口
+    if is_serial(str(raw.get("type", "tcp"))):
         return _serial_channel_from_dict(raw, index)
     if raw.get("type") == "s7":
         return _s7_channel_from_dict(raw, index)
@@ -238,6 +244,10 @@ def _serial_channel_from_dict(raw: dict, index: int) -> SerialChannel:
     return SerialChannel(
         name=name,
         port=raw.get("port", SERIAL_DEFAULTS["port"]),
+        # `type` 就是传输名（`rtu` / `ascii`）。`framing` 那个键只在**手写的**工程文件里
+        # 出现（老版本没有它），照读，缺省 rtu。
+        framing=("ascii" if str(raw.get("type")) == "ascii"
+                 else str(raw.get("framing", "rtu"))),
         baudrate=_require_int(raw.get("baudrate", SERIAL_DEFAULTS["baudrate"]),
                               "baudrate", loc),
         parity=raw.get("parity", SERIAL_DEFAULTS["parity"]),

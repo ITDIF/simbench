@@ -62,8 +62,9 @@ def test_the_factory_builds_both_backends():
 
 
 def test_an_unknown_transport_is_still_refused():
+    # 2026-10-14（E7）之后 udp 有了自己的后端，所以这里用一个真不认识的 type
     with pytest.raises(UnsupportedTransportError) as excinfo:
-        make_backend(TcpChannel("x", type="udp"))
+        make_backend(TcpChannel("x", type="telnet"))
     assert "x" in str(excinfo.value)
 
 

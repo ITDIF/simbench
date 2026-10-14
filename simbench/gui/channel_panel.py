@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from PySide6 import QtGui, QtWidgets
 
 from ..backend.events import ChannelState
-from ..project.model import channel_transport, format_frame, parse_frame
+from ..project.model import channel_transport, format_frame, is_serial, parse_frame
 from . import theme
 
 # 四态的文案共用一个定宽槽（88px）：主题把正文字号提到 10pt 之后 offscreen 实测最长的
@@ -254,7 +254,7 @@ class ChannelPanel(QtWidgets.QWidget):
         # 只对串口行有意义，TCP 行留空并置灰——**置灰不隐藏**，隐藏会让后面的格子集体
         # 左移，那正是"状态一变布局就跳"里最难看的一种。
         transport = channel_transport(ch)
-        serial = transport == "rtu"
+        serial = is_serial(transport)
         s7 = transport == "s7"
         name = QtWidgets.QLabel(ch.name)
         name.setMinimumWidth(72)

@@ -32,6 +32,8 @@ from .model import (
     SerialChannel,
     TcpChannel,
     area_is_bit,
+    is_serial,
+    is_socket,
     register_span,
     s7_span_bytes,
 )
@@ -39,7 +41,9 @@ from .validate import error_lines, validate_project
 
 # 能从界面从零建的三种传输。名字与 `channel_transport()` 的返回值一字不差——
 # 两处各写一份字符串迟早对不上，界面上"选了 TCP 却去建串口"就这么来的。
-TRANSPORTS = ("tcp", "rtu", "s7")
+# 能"从零建一条"的传输（顺序就是界面上按钮的顺序）：socket 三种、串口两种、S7。
+# `MODBUS_TRANSPORTS` 那份清单在 `model.py`（它同时给 validate/后端工厂用）。
+TRANSPORTS = ("tcp", "udp", "rtutcp", "rtu", "ascii", "s7")
 BLANK = "blank"                     # "新建工程"里的空白起步（不是一种传输，别混进 TRANSPORTS）
 
 # TCP 默认端口从 5020 起：502 要管理员权限、首次监听还要放行防火墙（spec §13），
@@ -247,13 +251,16 @@ def default_channel(project, transport: str, name: str | None = None, probe=None
     由界面从 `engine.ports` 注进来（见 `next_port`）。
     """
     name = name if name else next_channel_name(project, transport, probe)
-    if transport == "tcp":
-        return TcpChannel(name=name,
+    if is_socket(transport):
+        # tcp / udp / rtutcp：只差 `type`（默认端口同一套，现场都是 5020 起）
+        return TcpChannel(name=name, type=transport,
                           host=overrides.get("host", "0.0.0.0"),
                           port=overrides.get("port",
                                              next_port(project, DEFAULT_TCP_PORT, probe)))
-    if transport == "rtu":
+    if is_serial(transport):
+        # rtu / ascii：同一组串口参数，只差帧类型
         return SerialChannel(name=name,
+                             framing="ascii" if transport == "ascii" else "rtu",
                              port=overrides.get("port", SERIAL_DEFAULTS["port"]),
                              baudrate=overrides.get("baudrate", SERIAL_DEFAULTS["baudrate"]),
                              parity=overrides.get("parity", SERIAL_DEFAULTS["parity"]),

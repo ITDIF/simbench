@@ -382,6 +382,9 @@ class SerialChannel:
     """
     name: str
     port: str = SERIAL_DEFAULTS["port"]
+    # 串口上跑哪种帧：`rtu`（默认，绝大多数现场设备）或 `ascii`（Modbus ASCII）。
+    # 它决定 `channel_transport()` 回 `rtu` 还是 `ascii`，进而决定后端用哪个 framer。
+    framing: str = "rtu"
     baudrate: int = SERIAL_DEFAULTS["baudrate"]
     parity: str = SERIAL_DEFAULTS["parity"]
     bytesize: int = SERIAL_DEFAULTS["bytesize"]
@@ -403,15 +406,52 @@ class S7Channel:
     devices: list[Device] = field(default_factory=list)
 
 
+# ---------- 传输（2026-10-14 E7：从两种扩到五种）----------
+#
+# 一份**事实表**：哪种传输跑在哪条载体上、帧是什么。做这一轮之前，"加一种协议要改哪 16 处"
+# 的清单是靠人读代码数出来的（见 `plans/2026-10-14-import-export-formats.md` §4）；这一轮真
+# 加三种传输，把"载体/帧"这两件事收在这里，其余各处问它，别再散成字符串比较。
+#
+# 命名口径：**transport 名就是事实**，两种载体共用一个名字空间：
+#   `tcp`（Modbus TCP，MBAP）、`udp`（Modbus UDP，MBAP）、`rtutcp`（TCP 上跑 RTU 帧——
+#   现场那些以太网转串口的网关就是这种）、`rtu`（串口 RTU）、`ascii`（串口 ASCII）、
+#   `s7`（ISO-on-TCP / S7comm）。
+SOCKET_TRANSPORTS = ("tcp", "udp", "rtutcp")
+SERIAL_TRANSPORTS = ("rtu", "ascii")
+MODBUS_TRANSPORTS = (*SOCKET_TRANSPORTS, *SERIAL_TRANSPORTS)
+SERIAL_FRAMINGS = ("rtu", "ascii")
+TRANSPORT_LABELS = {"tcp": "Modbus TCP", "udp": "Modbus UDP",
+                    "rtutcp": "Modbus RTU over TCP", "rtu": "串口 RTU",
+                    "ascii": "串口 ASCII", "s7": "S7"}
+
+
+def is_socket(transport: str) -> bool:
+    """这一路有没有 `host:port`（tcp/udp/rtutcp）。"""
+    return transport in SOCKET_TRANSPORTS
+
+
+def is_serial(transport: str) -> bool:
+    """这一路是不是串口（rtu/ascii）：参数是串口名 + 波特率那一串。"""
+    return transport in SERIAL_TRANSPORTS
+
+
+def is_s7(transport: str) -> bool:
+    """这一路是不是 S7：**读写与跨度都按 S7 的语义**（字节 + 位，不是寄存器格）。"""
+    return transport == "s7"
+
+
 def channel_transport(channel) -> str:
-    """这一路用哪种传输：`"rtu"` / `"tcp"`（未知的手写 type 原样回，由 validate 报）。
+    """这一路用哪种传输（`tcp` / `udp` / `rtutcp` / `rtu` / `ascii` / `s7`）。
+
+    未知的手写 `type` 原样回，由 validate 报（那种 `type` 我们不认识，也不许按 TCP 处理）。
 
     **全仓库唯一一处**这类判定：`session` 选后端、`validate` 选判定、`csv_io` 烘名字、
     `gui/channel_panel` 选那几格的含义，都走这里——散成若干 `isinstance` 的那种写法，
     加第三种通道时必然漏掉一处，而漏掉的表现是"某一处按 TCP 处理了一路串口"。
     """
     if isinstance(channel, SerialChannel):
-        return "rtu"
+        # 串口两种帧：RTU（默认）与 ASCII。`framing` 是串口通道自己的字段（见那个类）。
+        return "ascii" if getattr(channel, "framing", "rtu") == "ascii" else "rtu"
     if isinstance(channel, S7Channel):
         return "s7"
     return getattr(channel, "type", "tcp")

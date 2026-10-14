@@ -93,7 +93,8 @@ def test_a_channel_name_may_not_carry_the_csv_serial_mark():
 
 
 def test_an_unsupported_type_is_still_reported():
-    assert ("channel_type", "x") in codes(Project(channels=[TcpChannel("x", type="udp")]))
+    # 2026-10-14（E7）之后 tcp/udp/rtutcp 都是已知传输，所以这里用一个真不认识的
+    assert ("channel_type", "x") in codes(Project(channels=[TcpChannel("x", type="telnet")]))
     # 用 TCP 的字段却写着 rtu（只可能来自代码或手拼的测试）：报 type 不匹配，不拿它去判串口参数
     assert ("channel_type", "com1") in codes(
         Project(channels=[TcpChannel("com1", host="", port=502, type="rtu")]))

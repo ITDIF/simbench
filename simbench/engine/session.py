@@ -31,7 +31,7 @@ from ..backend.events import ChannelState, LogLine, PacketEvent
 from ..backend.modbus_base import ModbusBackendBase
 from ..codec import s7_codec
 from ..codec.point_codec import decode, encode
-from ..project.model import Point, Project, area_is_bit, channel_transport, s7_span_bytes
+from ..project.model import Point, Project, area_is_bit, channel_transport, is_s7, s7_span_bytes
 from ..project.validate import Issue, error_lines, validate_project
 from .packets import PacketStore
 from .runner import EngineRunner
@@ -546,7 +546,7 @@ class Session:
         backend = runtime.backend
         if backend is None:
             return {}
-        key = 0 if transport == "s7" else None
+        key = 0 if is_s7(transport) else None
         out: dict = {}
         for unit_id, _device, pt in meta:
             regs, failed = self._read_back(runtime, pt, unit_id, transport)
@@ -604,7 +604,7 @@ class Session:
             return False
         # 跨度与归属键都按传输取：S7 是 (0, 字节数)，Modbus 是 (unit_id, 寄存器格数)。
         transport = self._transport(channel)
-        key = 0 if transport == "s7" else unit_id
+        key = 0 if is_s7(transport) else unit_id
         span = _span_of(pt, transport)
         try:
             restored = self._runner.call(
@@ -659,7 +659,7 @@ class Session:
             # 放进 backend 就会变成 `unknown area 'xx'` 那种像模拟器 bug 的话。
             return WriteResult(False, f"{area} address {address} is not in the point table")
         transport = self._transport(channel)
-        if transport == "s7":
+        if is_s7(transport):
             return self._set_s7_point(runtime, pt, text, channel, unit_id, area, address)
         try:
             registers = encode(text, pt.datatype, pt.word_order)
@@ -878,7 +878,7 @@ class Session:
         if runtime is None or runtime.backend is None:
             return None, False
         try:
-            if transport == "s7":
+            if is_s7(transport):
                 # S7 回的是**字节**（bool 也回一个字节的 0/1）：`_render` 那一侧按 S7 类型解。
                 raw = runtime.backend.read_point_bytes(pt)
                 if raw is None or not raw:
@@ -920,7 +920,7 @@ def _detail(backend) -> str:
 
 def _span_of(pt: Point, transport: str) -> int:
     """这个点占多大：Modbus 是寄存器格数，S7 是字节数（归属与交还都用它）。"""
-    return s7_span_bytes(pt.datatype, pt.initial) if transport == "s7" else pt.span
+    return s7_span_bytes(pt.datatype, pt.initial) if is_s7(transport) else pt.span
 
 
 def _render(pt: Point, regs: list[int] | None,
@@ -938,7 +938,7 @@ def _render(pt: Point, regs: list[int] | None,
     if not regs:
         return pt.initial, ()
     try:
-        if transport == "s7":
+        if is_s7(transport):
             # `regs` 在 S7 这一路装的是**字节**（`_read_back` 的约定），按 S7 类型解
             value = s7_codec.decode(bytes(regs), pt.datatype,
                                     s7_span_bytes(pt.datatype, pt.initial))

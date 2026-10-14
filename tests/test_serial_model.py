@@ -158,8 +158,10 @@ def test_a_plain_channel_name_is_still_a_tcp_channel_with_a_guessed_port():
 
 @pytest.mark.parametrize("bad, hint", [
     ("@COM3", "no name"),
-    ("com3@", "at most three parts"),
-    ("com3@COM3 9600 8E1 9", "at most three parts"),
+    ("com3@", "at most four parts"),
+    # 第四段从 2026-10-14（E7）起是**帧类型**（只认 rtu/ascii），所以 "9" 报的是这一句
+    ("com3@COM3 9600 8E1 9", "must be one of"),
+    ("com3@COM3 9600 8E1 rtu ascii", "at most four parts"),
     ("com3@COM3 abc", "is not an integer"),
     ("com3@COM3 9600 8X1", "must look like 8N1"),
 ])
