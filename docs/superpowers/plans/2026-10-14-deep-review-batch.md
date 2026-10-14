@@ -170,8 +170,8 @@ S7 侧另加一种点位类型 `s7string`（真 S7 STRING：前两字节 最大/
 | 第 5 条里"mypy 全仓严格" | 首轮噪音不可控；先把三棵子树钉住，其余留给后续按文件收 |
 | 第 9 条里的 pip hash 校验 | 需要把 wheel 全部下载归档（现场没有 PyPI 镜像时用不了）；先做"钉死 + lock 文件" |
 | 扩展 7 的 S7 定时器/计数器区（`dt`/`ct`） | 用 `pys7` 主站读这两类区的行为要单独实测（值语义不是字节） |
-| 扩展 7 里的 `s7string`（真 S7 STRING：前两字节是最大/当前长度） | 本轮三种 Modbus 传输已经占满这一批；`s7string` 要动 `s7_codec` 与 S7 的跨度计算，单独一批 |
-| UDP 的「声明里额外监听地址」 | TCP 那一支靠 `loop.create_server` 再挂几个监听，UDP 要走 `create_datagram_endpoint`（每个地址一个协议对象）；本轮**不静默**：启动时日志里说一句「这一路只监听通道自己那个地址」 |
+| UDP 的「声明里额外监听地址」真正一挂（不只是「说一句」） | 已查清：pymodbus 的两个 UDP server 各建一份 `SimRuntime`，共享 datastore 得走它那套 legacy context（与本项目的 `SimDevice` 路是两套东西）。而通配绑定本来就覆盖声明里的地址（见 B8），所以真需要它的只剩「绑死网卡」那一种组合——要做就得自己写一层 DatagramProtocol，等现场真提这件事再说 |
+| S7 的 `string` 直接换成带长度头（真 STRING）作为默认 | 两种并存（`string` 裸的、`s7string` 带头的）：改默认会让**既有工程**导出再导入后每一格字符串的布局都变——那是静默改配置 |
 | 扩展 2/3/4/5/6/8/9 | 用户本轮明确只要扩展 1 与 7 |
 | 校验（`validate.py`）与编解码（`codec/`）的英文文案改中文 | 见 D2：同一句被几十条用例断言着，单独一批做（口径与做法已定） |
 | mypy 覆盖 `backend/` 与 `net/` | 那两层的注解要先补完（pymodbus 与 ctypes 的动态用法），否则 `# type: ignore` 一片 |

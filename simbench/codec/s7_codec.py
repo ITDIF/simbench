@@ -25,6 +25,7 @@ from ..project.model import (
     FLOAT32,
     INT16,
     INT32,
+    S7_STRING_MAX,
     UINT16,
     UINT32,
     brief,
@@ -57,7 +58,7 @@ def clamp_to_type(value, datatype: str):
     _check_datatype(datatype)
     if datatype == BOOL:
         return bool(value), False
-    if datatype in ("char", "string"):
+    if datatype in ("char", "string", "s7string"):
         return value, False
     if datatype == "byte":
         if value != value:                       # NaN：钳到下界并报告，别把 NaN 写进区域
@@ -81,6 +82,8 @@ def encode(value, datatype: str, length: int | None = None) -> bytes:
         return _char(value)
     if datatype == "string":
         return _string(value, length)
+    if datatype == "s7string":
+        return _s7_string(value, length)
     return struct.pack(_FORMAT[datatype], _coerce(value, datatype))
 
 
@@ -96,6 +99,8 @@ def decode(data, datatype: str, length: int | None = None):
         return _single_char(raw[0])
     if datatype == "string":
         return _ascii(raw)
+    if datatype == "s7string":
+        return _s7_string_read(raw)
     return struct.unpack(_FORMAT[datatype], raw)[0]
 
 
@@ -139,7 +144,7 @@ def write_bit(buffer, bit_index: int, value) -> None:
 # ---------- 内部 ----------
 
 def _check_datatype(datatype: str) -> None:
-    if datatype not in _FIXED and datatype != "string":
+    if datatype not in _FIXED and datatype not in ("string", "s7string"):
         raise ValueError(f"unknown S7 datatype {datatype!r}")
 
 
@@ -148,12 +153,14 @@ def _check_data(data, datatype: str, length: int | None) -> bytes:
     if not isinstance(data, (bytes, bytearray)):
         raise ValueError(f"{datatype} needs bytes, got {type(data).__name__}: {brief(data)}")
     raw = bytes(data)
-    expected = length if (datatype == "string" and length is not None) \
+    expected = length if (datatype in ("string", "s7string") and length is not None) \
         else _FIXED.get(datatype)
     if expected is not None and len(raw) != expected:
         raise ValueError(f"{datatype} needs {expected} bytes, got {len(raw)}")
     if datatype == "string" and not raw:
         raise ValueError("string needs at least 1 byte")
+    if datatype == "s7string" and len(raw) < 2:
+        raise ValueError("s7string needs at least 2 bytes (the length header)")
     return raw
 
 
@@ -241,6 +248,46 @@ def _string(value, length: int | None) -> bytes:
     if length is None:
         length = max(1, len(raw))
     return raw.ljust(length, b"\x00")
+
+
+def _s7_string(value, length: int | None) -> bytes:
+    """真 S7 STRING：`[最大长度, 当前长度] + 字符 + 补零`。
+
+    `length` 是**整个字段**的字节数（= 2 + 最大长度），与 `_string` 那条口径一致——
+    调用方（后端播种、写点）交下来的就是点位的跨度，不必各自再减 2。
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"s7string needs a str value, got {type(value).__name__}: "
+                         f"{brief(value)}")
+    max_len = (length - 2) if length is not None else len(value)
+    if max_len < 1:
+        raise ValueError(f"s7string needs room for at least 1 character, got {max_len}")
+    if max_len > S7_STRING_MAX:
+        raise ValueError(f"s7string max length {max_len} is over {S7_STRING_MAX}")
+    try:
+        raw = value.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError(f"s7string is not ascii: {brief(value)}") from None
+    if len(raw) > max_len:
+        raise ValueError(f"s7string holds at most {max_len} character(s), got "
+                         f"{len(raw)}: {brief(value)}")
+    return bytes([max_len, len(raw)]) + raw + b"\x00" * (max_len - len(raw))
+
+
+def _s7_string_read(raw: bytes) -> str:
+    """`[最大长度, 当前长度] + 字符` -> 字符串：按**当前长度**读，长度头撒谎就报错。
+
+    "当前长度"超过缓冲里真有的字节数时不许猜一个长度截断（那会把邻居的字节读成字符串的
+    一部分），直接报一条能查的错。
+    """
+    declared, current = raw[0], raw[1]
+    if current > len(raw) - 2:
+        raise ValueError(f"s7string header says {current} character(s) but only "
+                         f"{len(raw) - 2} byte(s) are there")
+    if declared < current:
+        raise ValueError(f"s7string max length {declared} is smaller than the current "
+                         f"length {current}")
+    return _ascii(raw[2:2 + current])
 
 
 def _ascii(raw: bytes) -> str:

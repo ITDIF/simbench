@@ -92,3 +92,45 @@ def test_stop_then_start_again_on_the_same_port(engine_runner):
         engine_runner.call(lambda b=backend: b.start(), _CALL_TIMEOUT, "udp start")
         engine_runner.call(lambda b=backend: b.stop(), _CALL_TIMEOUT, "udp stop")
         time.sleep(0.05)
+
+# ---------- 声明里的额外地址：UDP 的判据与 TCP 不同 ----------
+
+def test_a_wildcard_bind_already_covers_the_declared_addresses(engine_runner):
+    """host = 0.0.0.0 本来就在所有本机地址上听：声明里的设备 IP 也就都在里面了，
+    所以**不用**再挂额外监听，而且**不许**为此说一句警告（那是无话找话）。"""
+    warnings: list[str] = []
+    port = free_udp_port()
+    channel_with_wildcard = TcpChannel("udp-1", type="udp", host="0.0.0.0", port=port,
+                                       devices=channel(port).devices)
+    backend = make_backend(channel_with_wildcard,
+                           extra_endpoints=[("127.0.0.1", port)],
+                           log_sink=lambda level, text: warnings.append(text))
+    engine_runner.call(lambda: backend.start(), _CALL_TIMEOUT, "udp wildcard start")
+    try:
+        assert backend.endpoints == [("0.0.0.0", port)]
+        assert warnings == [], warnings
+        master = ModbusUdpClient("127.0.0.1", port=port, timeout=2.0)
+        try:
+            assert master.connect()
+            # 通配绑定：从环回地址连上去照样读得到（这就是"已经覆盖"的意思）
+            backend._tick_once(now=1.0)
+            assert master.read_holding_registers(0, count=1, device_id=11).registers == [7]
+        finally:
+            master.close()
+    finally:
+        engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "udp wildcard stop")
+
+
+def test_a_specific_bind_says_what_it_cannot_do(engine_runner):
+    """绑死某块网卡 + 声明里另有地址：那一种组合真覆盖不到，**要说出来**。"""
+    warnings: list[str] = []
+    port = free_udp_port()
+    backend = make_backend(channel(port),                 # 这个 channel 绑的是 127.0.0.1
+                           extra_endpoints=[("127.0.0.1", 5020)],
+                           log_sink=lambda level, text: warnings.append(text))
+    engine_runner.call(lambda: backend.start(), _CALL_TIMEOUT, "udp specific start")
+    try:
+        assert backend.endpoints == [("127.0.0.1", port)], "说不支持却挂上了？"
+        assert warnings and "没有挂上" in warnings[0], warnings
+    finally:
+        engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "udp specific stop")

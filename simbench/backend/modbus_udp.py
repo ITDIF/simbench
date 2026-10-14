@@ -57,20 +57,40 @@ class ModbusUdpBackend(ModbusTcpBackend):
     TRANSPORT = "udp"
     SERVER_CLASS = ModbusUdpServer
 
-    async def _probe(self) -> None:
-        import asyncio
-
-        await asyncio.to_thread(check_udp_port_is_free, self.channel.host, self.port,
-                                self.channel_name)
-
     async def _open_extra(self, server) -> list:
-        """UDP 暂不支持"声明里的额外地址"：**说一句**再返回空（静默丢等于悄悄少听一个地址）。"""
-        if self.extra_endpoints:
-            self._log_sink("warning",
-                           f"channel {self.channel_name}: UDP 这一路只监听 "
-                           f"{self.channel.host}:{self.port}；声明里的额外地址 "
-                           f"{self.extra_endpoints} 这次没有挂上（UDP 的额外监听还没做）")
+        """UDP 的"声明里额外要听的地址"：**通配绑定已经覆盖了**，不另起监听。
+
+        为什么与 TCP 那支不一样：TCP 那一支靠 `loop.create_server` 给每个地址再挂一个监听，
+        而 UDP 要"再起一个 server"——可 pymodbus 的两个 server **各建一份 `SimRuntime`**
+        （`SimCore(devices)` 里是 `SimRuntime(device)`），于是两个地址读到两份寄存器：主站
+        从 A 地址写、界面按主 server 读回旧值，两边都不报错（实测踩过）。真正共享得走它那套
+        legacy context，那与本项目的 `SimDevice` 路是两套东西，不值得为它分叉。
+
+        好在**大概率用不着**：点表里 UDP 通道的 host 默认就是 `0.0.0.0`，那本来就在所有本机
+        地址上听（声明里那几个设备 IP 也就都在里面了）。只有"绑死某一块网卡 + 声明里另有
+        地址"这一种组合真覆盖不到——那种情况**说一句**（静默少听一个地址是现场最难查的）。
+        """
+        if not self.extra_endpoints or self._binds_every_address():
+            return []
+        self._log_sink("warning",
+                       f"channel {self.channel_name}: UDP 这一路绑在 "
+                       f"{self.channel.host}:{self.port} 上，声明里的额外地址 "
+                       f"{self.extra_endpoints} 没有挂上（UDP 不支持再挂监听；把 host 改成 "
+                       f"0.0.0.0 就能一并听到）")
         return []
+
+    def _binds_every_address(self) -> bool:
+        """这一路是不是绑在所有本机地址上（`0.0.0.0` / `::` / 空 = 所有网卡）。"""
+        return self.channel.host.strip() in ("", "0.0.0.0", "::", "*")
+
+    @property
+    def endpoints(self) -> list[tuple[str, int]]:
+        """**只报真在听的那些**：UDP 不挂额外监听（见 `_open_extra`），而 `endpoints` 的
+        语义是"这个后端在听的地址"——把声明里那几个没挂上的地址报出去就是撒谎（界面那一栏
+        与 `--list` 都会照着念）。通配绑定时它们**确实**在听，但那是"这一个地址覆盖了它们"，
+        不是"多挂了几个监听"。
+        """
+        return [(self.channel.host, self.port)]
 
     def describe(self) -> str:
         return f"{self.channel.host}:{self.port} (UDP)"

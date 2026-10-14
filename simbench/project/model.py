@@ -22,7 +22,12 @@ WAVEFORMS = ("const", "ramp", "sine", "random", "step")
 # 同一条通道上的点位类型必须与传输匹配（validate 拦"Modbus 类型落在 S7 通道上"这类混填）。
 S7_AREAS = ("mk", "pe", "pa")
 S7_MAX_DB = 4095                      # 区域编号是 16 位的，留足现场余量即可
-S7_TYPES = ("bool", "byte", "char", "word", "int", "dword", "dint", "real", "string")
+# `string` = 裸 ASCII（长度按初值算，无长度头）；`s7string` = **真 S7 STRING**
+# （前两字节是"最大长度/当前长度"，组态软件按这个读）。两种并存：点表里写哪个就是哪个。
+S7_TYPES = ("bool", "byte", "char", "word", "int", "dword", "dint", "real",
+            "string", "s7string")
+# 真 S7 STRING 的长度头只有 1 字节：最大长度 254 是硬上界（255=0xFF 是保留/无效值）
+S7_STRING_MAX = 254
 # 类型 -> 字节数（string 按初值长度另算；bool 占 1 位、落在 1 个字节里，见 `Point.bit`）
 S7_TYPE_BYTES = {"byte": 1, "char": 1, "word": 2, "int": 2, "dword": 4,
                  "dint": 4, "real": 4}
@@ -350,6 +355,10 @@ def s7_span_bytes(datatype: str, initial: str) -> int:
     """
     if datatype == STRING:
         return max(1, len(initial or ""))
+    if datatype == "s7string":
+        # 真 STRING 占"2 字节长度头 + 最大长度"。**最大长度取点表初值的长度**——与裸 string
+        # 同一条口径（跨度归点表初值管），点表上一个 `s7string` 点就自带它的最大长度。
+        return 2 + max(1, len(initial or ""))
     return S7_TYPE_BYTES.get(datatype, 1)
 
 
