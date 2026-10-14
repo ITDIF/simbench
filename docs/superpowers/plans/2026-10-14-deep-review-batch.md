@@ -131,6 +131,23 @@ S7 侧另加一种点位类型 `s7string`（真 S7 STRING：前两字节 最大/
   打包（只在打 tag 时）。冻结冒烟留在人工清单里（要桌面会话）。
 * 新增用例：`tests/test_version.py` 4 条、`tests/test_swallow.py` 4 条、`test_gui_log.py` 补 1 条。
 
+### B6/B7　主站模式（E1）· 已完成
+
+- `simbench/master/`（新）：`modbus.py`（五种 Modbus 传输的连接与读写）、`scan.py`
+  （扫 unit + 逐点核对，四类结论：`ok` / `mismatch` / `no_unit` / `error`）、
+  `report.py`（文本 + CSV/Excel 导出，**不**走点表那张格式表——报告不该被当点表导回去）。
+- 命令行：`--scan [--units 1-20]` / `--verify [--result 报告.xlsx]`。两条都**只读**，
+  有对不上的回退出码 2（与 `net check` 同一条口径）。挑通道的规则：点名优先，否则
+  **第一条 Modbus 通道**（混装工程里第一条可能是 S7，静默挑错等于"扫出来什么都没有"）。
+- 界面：**"核对"页**（`gui/verify_panel.py`）：三个定宽按钮 + 定宽状态槽 + 结果表；
+  长活跑在**后台线程**（扫 247 个 unit 是几分钟的事，跑在界面线程上就是窗口卡死），
+  跑着的时候按钮**置灰不隐藏**（几何不变），结果经 Qt 信号投回主线程。
+- 分层守卫（`tests/test_architecture.py`）放行的是 `master` 这个包（它 import 的是
+  pymodbus 的**客户端**），不是"谁都能 import pymodbus"。
+- 验收：`tests/test_master.py` 18 条（含"真从站 + 真主站扫 unit / 逐点核对 / 点表写错一位
+  必须报对不上"三条端到端与一条命令行用例）、`tests/test_gui_verify.py` 7 条
+  （含真从站上的界面核对与导出）。全量串行 **1510 → 1535 passed**。
+
 ## 4. 验收口径
 
 * 每一批：全量串行 `.venv\\Scripts\\python.exe -m pytest`（`QT_QPA_PLATFORM=offscreen`、

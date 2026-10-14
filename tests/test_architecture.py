@@ -21,6 +21,9 @@ import simbench
 LIBRARY_ONLY = ("pymodbus", "serial", "snap7")
 GUI_ONLY = ("PySide6", "PyQt5")              # 只许出现在 gui/（M2 才落地）
 BACKEND = "backend"
+# 主站模式（2026-10-14 E1）也是"与协议库打交道的那一层"：它不是后端（不监听任何端口），
+# 但同样要 import pymodbus 的**客户端**。放行的是**这一个包**，不是"谁都能 import pymodbus"。
+MASTER = "master"
 GUI_PACKAGE = "gui"
 SYSTEM_NET = "net"                        # 唯一允许碰系统网络（netsh / PowerShell）的包
 
@@ -99,13 +102,13 @@ def _fake_root(tmp_path, files: dict[str, str]) -> pathlib.Path:
 
 # ---- 真仓库上的判定 ----
 
-def test_only_backend_touches_pymodbus():
+def test_only_backend_and_master_touch_pymodbus():
     """`import pymodbus` 与 `from pymodbus.simulator.simcore import SimCore` 都要认。
 
     豁免是显式传给 `skip_packages` 的，只放行 backend 这一个顶层包：project/codec/gui 和
     根下的裸文件照样在扫，所以"改松"会立刻在下面的植入样本用例里变红。
     """
-    offenders = _offenders(None, LIBRARY_ONLY, skip_packages=(BACKEND,))
+    offenders = _offenders(None, LIBRARY_ONLY, skip_packages=(BACKEND, MASTER))
     assert offenders == [], f"pymodbus/serial leaked outside backend/: {offenders}"
 
 

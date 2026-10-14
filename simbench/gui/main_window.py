@@ -60,6 +60,7 @@ from .new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
 from .packet_view import PacketPanel
 from .point_props import STRUCTURAL_FIELDS, PointPropertiesDialog
 from .point_table import COLUMNS, PointTableModel, PointTableView
+from .verify_panel import VerifyPanel
 
 _TICK_MS = 100
 _NOTICE_MS = 8000                       # 拒绝理由要在状态栏留够一读的时间，别一闪就没
@@ -115,6 +116,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.packet_panel = PacketPanel(store)
         self.log_view = self._build_log_view()
         self.log_tab = self._build_log_tab(self.log_view)
+        # 核对页（主站模式）：只读别人的设备，自己一个端口都不监听（E1）
+        self.verify_panel = VerifyPanel(session)
         self.channels = ChannelPanel(session)
         self.net_panel = NetPanel(session)
         self.tabs: QtWidgets.QTabWidget
@@ -138,6 +141,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tabs.addTab(self.packet_panel, "报文监视")
         self.tabs.addTab(self.log_tab, "日志")
+        self.tabs.addTab(self.verify_panel, "核对")
         self.tabs.addTab(self.net_panel, "网络")
         # 切到网络页才去读系统：读一次网卡现状是几次 PowerShell（秒级），不能让
         # "打开点表"这一步跟着等——点表一开就调，现场会以为软件卡住了。
@@ -151,6 +155,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda text: self.status.showMessage(text, _NOTICE_MS))
         self.bridge.channel_state.connect(self._on_state)
         self.bridge.logged.connect(self._on_log)
+        self.verify_panel.notice.connect(self._log)
         self.bridge.point_changed.connect(lambda _event: self.point_model.refresh())
         self.point_table.restore_requested.connect(self._restore_waveform)
         self.point_table.props_requested.connect(self._show_point_props)

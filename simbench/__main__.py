@@ -109,6 +109,108 @@ def _listen_endpoints(channel, point_table) -> list[tuple[str, int]]:
     return for_channel(channel, point_table)
 
 
+def _parse_units(text: str):
+    """`--units 1-20,42` -> `[1..20, 42]`；空串回默认的 1..247。
+
+    只认这两种写法（范围 / 逗号清单，可以混）：扫 247 台设备一次要几秒到几十秒，
+    现场常常只关心"我这一片"。
+    """
+    from .master.scan import UNIT_RANGE
+
+    body = (text or "").strip()
+    if not body:
+        return list(UNIT_RANGE)
+    out: list[int] = []
+    for piece in body.split(","):
+        chunk = piece.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            low, _, high = chunk.partition("-")
+            try:
+                out.extend(range(int(low), int(high) + 1))
+            except ValueError:
+                raise ValueError(f"cannot read unit range {chunk!r}") from None
+        else:
+            try:
+                out.append(int(chunk))
+            except ValueError:
+                raise ValueError(f"cannot read unit id {chunk!r}") from None
+    return out
+
+
+def _master_channel(project, name: str | None = None):
+    """挑一路当主站目标：点名优先，否则**第一条 Modbus 通道**。
+
+    为什么不用第一条通道就完事：混装工程里第一条可能是 S7（主站模式还没做），
+    而用户要扫的往往是 Modbus 那一路——静默挑错那一条的后果是"扫出来什么都没有"。
+    """
+    from .project.model import channel_transport, is_s7
+
+    for channel in project.channels:
+        if name and channel.name != name:
+            continue
+        if not is_s7(channel_transport(channel)):
+            return channel
+    return None
+
+
+def _run_master(args, project) -> int:
+    """`--scan` / `--verify` 的实现：只读，读完就退。
+
+    两条命令都打同一句"连到哪儿"（现场第一条要核对的就是"我连的是不是那一台"）。
+    """
+    from .master import report
+    from .master.modbus import MasterLink
+    from .master.scan import scan_units, verify_points
+
+    channel = _master_channel(project)
+    if channel is None:
+        print("[error] [master] 这份点表里没有可用的 Modbus 通道"
+              "（S7 的主站模式还没做）", file=sys.stderr)
+        return 2
+    try:
+        units = _parse_units(args.units)
+    except ValueError as exc:
+        print(f"[error] [master] {exc}", file=sys.stderr)
+        return 2
+    try:
+        link = MasterLink.for_channel(channel, host=args.host, port=args.port)
+    except ValueError as exc:
+        print(f"[error] [master] {exc}", file=sys.stderr)
+        return 2
+    print(f"[master] {channel.name}: {link.describe()}", file=sys.stderr)
+    try:
+        link.open()
+    except ConnectionError as exc:
+        print(f"[error] [master] {exc}", file=sys.stderr)
+        return 2
+    try:
+        if args.scan:
+            found = scan_units(link, units=units)
+            if not found:
+                print(f"[master] 扫了 {len(units)} 个 unit，一个都没应答")
+            else:
+                print(f"[master] 应答的 unit（{len(found)} 个）："
+                      + "、".join(str(unit) for unit in found))
+        if args.verify:
+            rows = verify_points(link, project)
+            print(report.to_text(rows))
+            if args.result:
+                try:
+                    target = report.write(args.result, rows)
+                except (OSError, ValueError) as exc:
+                    print(f"[error] [report] 写报告失败：{exc}", file=sys.stderr)
+                    return 2
+                print(f"[master] 报告已写到 {target}")
+            if any(row.status != "ok" for row in rows):
+                # 有对不上的就回 2：脚本里能当"需要处理"用（与 `net check` 同一条口径）
+                return 2
+    finally:
+        link.close()
+    return 0
+
+
 def _apply_overrides(project, host: str | None, port: int | None) -> bool:
     """`--host`/`--port` 覆盖**TCP 通道**；真盖上了一路就返回 True，调用方据此重跑校验。
 
@@ -212,6 +314,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="打印点表后退出")
     parser.add_argument("--gui", action="store_true",
                         help="打开桌面界面而不是命令行监听")
+    # 主站模式（2026-10-14 E1）：**只读**——扫一遍 unit、按点表逐点核对。
+    # 它不是"再起一个从站"，而是拿去读**别的**设备，所以与 --check/--list 同类：
+    # 走完就退，不监听任何端口。
+    parser.add_argument("--scan", action="store_true",
+                        help="主站模式：扫 unit（只读，读不到就换下一台）")
+    parser.add_argument("--verify", action="store_true",
+                        help="主站模式：按点表逐点读回来与初值核对（只读）")
+    parser.add_argument("--units", default="",
+                        help="--scan 扫哪些 unit，例如 1-20 或 1,2,11（默认 1-247）")
+    parser.add_argument("--result", default="",
+                        help="--verify 把报告写到这个文件（.csv / .xlsx）")
     parser.add_argument("--no-net", action="store_true",
                         help="这次启动不碰系统网络（跳过按声明自动配 IP）")
     args = parser.parse_args(argv)
@@ -268,6 +381,10 @@ def main(argv: list[str] | None = None) -> int:
         for channel in project.channels:
             _print_table(channel)
         return 0
+
+    if args.scan or args.verify:
+        # 主站模式：读别人的从站，**自己一个端口都不监听**
+        return _run_master(args, project)
     if args.check:
         print("[simbench] point table is valid")
         return 0
