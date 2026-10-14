@@ -77,8 +77,30 @@ def row_of(model, name):
 # ---------- 列与文案 ----------
 
 def test_columns_are_the_agreed_order():
+    # 第三列是"惯例"不是"4x"（2026-10-14 改名）：这一列打的值随区变（4x/3x/1x/0x），
+    # S7 上还算不出来（`—`）——"4x"这个词只在 Modbus 的 hr 区成立。
     assert [c.header for c in COLUMNS] == [
-        "名称", "区", "地址", "4x", "类型", "字序", "当前值", "原始寄存器", "波形", "只读"]
+        "名称", "区", "地址", "惯例", "类型", "字序", "当前值", "原始寄存器", "波形", "只读"]
+
+
+def test_the_columns_are_sized_for_their_widest_content():
+    """十列的宽度按**各自最宽的内容**给（本机 Microsoft YaHei UI 9pt 实测量出来的）。
+
+    两条曾经真被截的形状是这次重排的理由：点位名 12 个中文字要 194px（列只有 150，会被
+    Qt 截成 `…`），S7 的高 DB 号 `db4095` 要 51px（"区"只有 46，最后一位没了）。同时
+    `4x`/类型/波形/只读四列一共虚占 120px——让给名字与区。
+
+    与"当前值/原始寄存器"那两条同一个写法：只钉**前提与字面量**，不拿 `fontMetrics()`
+    现量——offscreen 那套兜底字体把每个字形按 1em 算（17 位数字量出来 221px），照它加宽会
+    得到一个部署环境里宽得离谱的表。
+    """
+    widths = {c.header: c.width for c in COLUMNS}
+    assert widths == {"名称": 250, "区": 56, "地址": 56, "惯例": 62, "类型": 58,
+                      "字序": 60, "当前值": 132, "原始寄存器": 134, "波形": 72, "只读": 40}
+    # 各列"最宽内容"的文字量级（前提，可读性比数字本身重要）：
+    assert len("db4095") == 6                     # S7 的 DB 号上限 4095，区那一列要装得下
+    assert len("72623859790382856") == 17         # 当前值最宽的那个 uint64
+    assert len("0000 0000 4148 4E28") == 19       # 原始寄存器最宽的那种（4 格）
 
 
 def test_conventional_addresses_match_the_field_convention():
@@ -159,7 +181,7 @@ def test_a_row_with_an_unknown_area_still_renders_every_column(dirty_table):
     assert len(shown) == len(COLUMNS)
     assert all(v is not None for v in shown.values()), \
         "兜成 None 也是空白行：Qt 画不出来的现场症状和抛异常一模一样"
-    assert shown["4x"] == "—", "未知区名算不出惯例地址：给标记，不许留空也不许猜一个前缀"
+    assert shown["惯例"] == "—", "未知区名算不出惯例地址：给标记，不许留空也不许猜一个前缀"
     assert shown["名称"] == "坏点", "整行的其他格子本来就是好的，别一起吞掉"
     assert shown["区"] == "holding", "脏区名原样显示：显示成 hr 就是把点表里的错洗白了"
     assert shown["当前值"] == "7" and shown["只读"] == ""
@@ -337,7 +359,10 @@ def test_the_takeover_shows_up_in_the_wave_column_without_moving_the_table(qapp)
     m.attach(TwoRowSource([_row("曲线在跑", "1", waveform="sine"),
                            _row("人工改过", "2", source="manual")]))
     wave = [c.header for c in COLUMNS].index("波形")
-    assert COLUMNS[wave].width == 96, "为两个字的文案加宽 = 动了既有布局"
+    # 72 而不是 96（2026-10-14 全量重排）：`random` 要 53px、`已停` 更短——原来的 96
+    # 虚占 43px，而点位名那一列正被截。宽度变了但**列序**没变，这条断言的意图（不许为了
+    # 两个字的文案动布局）由 `test_the_columns_are_sized_for_their_widest_content` 一起守。
+    assert COLUMNS[wave].width == 72, "为两个字的文案加宽 = 动了既有布局"
     assert m.index(0, wave).data() == "sine"
     assert m.index(1, wave).data() == "已停"
     assert m.index(1, wave + 1).data() == "", "波形列右边已经不是只读列了"

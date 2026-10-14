@@ -86,6 +86,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.point_table = self._build_table()
         self.packet_panel = PacketPanel(store)
         self.log_view = self._build_log_view()
+        self.log_tab = self._build_log_tab(self.log_view)
         self.channels = ChannelPanel(session)
         self.net_panel = NetPanel(session)
         self.tabs: QtWidgets.QTabWidget
@@ -107,7 +108,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_status_bar()
 
         self.tabs.addTab(self.packet_panel, "报文监视")
-        self.tabs.addTab(self.log_view, "日志")
+        self.tabs.addTab(self.log_tab, "日志")
         self.tabs.addTab(self.net_panel, "网络")
         # 切到网络页才去读系统：读一次网卡现状是几次 PowerShell（秒级），不能让
         # "打开点表"这一步跟着等——点表一开就调，现场会以为软件卡住了。
@@ -167,6 +168,27 @@ class MainWindow(QtWidgets.QMainWindow):
         # 等宽字体：异常里带出来的引擎栈与"[refused] name=..."这类行按列对着读才不费眼
         view.setFont(theme.mono_font())
         return view
+
+    def _build_log_tab(self, view: QtWidgets.QPlainTextEdit) -> QtWidgets.QWidget:
+        """日志页：只读框 + 一个"清空"。
+
+        为什么要有它：报文页有"清除"，日志页没有——而只读框里**没有任何办法自己清掉**
+        （光标选不中内容、`delete` 没用）。5 万行上限只保证它不会无限涨，不保证"现在这一屏
+        我不想要了"能擦掉。按钮靠右，与报文页那一排同侧。
+        """
+        host = QtWidgets.QWidget()
+        rows = QtWidgets.QVBoxLayout(host)
+        rows.setContentsMargins(4, 4, 4, 4)
+        bar = QtWidgets.QHBoxLayout()
+        bar.addStretch(1)
+        self.act_clear_log = QtWidgets.QPushButton("清空")
+        self.act_clear_log.setFixedWidth(64)
+        self.act_clear_log.setToolTip("清掉日志窗里的内容（只影响这一屏，不写盘）")
+        self.act_clear_log.clicked.connect(view.clear)
+        bar.addWidget(self.act_clear_log)
+        rows.addLayout(bar)
+        rows.addWidget(view, 1)
+        return host
 
     def _build_layout(self) -> QtWidgets.QWidget:
         host = QtWidgets.QWidget()

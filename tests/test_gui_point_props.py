@@ -656,3 +656,12 @@ def test_a_refused_apply_snaps_the_fields_back_to_what_is_really_in_effect(
     assert dialog.address_edit.text() == str(point.address)
     assert dialog.name_edit.text() == point.name
 
+
+def test_the_point_panel_refusal_box_explains_itself_when_empty(qapp, window):
+    """属性面板同一块常驻空框，同一句占位说明（与建工程那几个对话框一致）。"""
+    dialog = PointPropertiesDialog(window, window.session.project, KEY)
+    try:
+        assert dialog.error_view.toPlainText() == ""
+        assert dialog.error_view.placeholderText()
+    finally:
+        dialog.deleteLater()

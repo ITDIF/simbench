@@ -795,3 +795,17 @@ def test_a_free_default_port_is_left_alone(qapp):
         assert dialog.error_view.toPlainText() == ""
     finally:
         dialog.deleteLater()
+
+
+def test_the_always_visible_refusal_box_explains_itself_when_empty(qapp):
+    """对话框里那块常驻的空框给一句占位说明：它常驻是为了"被拒时理由原地出现、不撑大
+    对话框"，但什么都没有的时候看着像坏了。三个对话框共用同一个骨架。"""
+    for dialog in (NewProjectDialog(None), AddChannelDialog(None, edit.Project()),
+                   AddDeviceDialog(None, edit.new_project("tcp"), "tcp-5020")):
+        try:
+            assert dialog.error_view.toPlainText() == ""
+            assert dialog.error_view.placeholderText(), "空框没有说明"
+            dialog.error_view.setPlainText("x")
+            assert dialog.error_view.toPlainText() == "x"
+        finally:
+            dialog.deleteLater()

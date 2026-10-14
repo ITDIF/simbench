@@ -23,6 +23,9 @@ from ..engine.session import Row
 
 VALUE_HEADER = "当前值"
 RAW_HEADER = "原始寄存器"
+# 惯例地址那一列的列头：这一列的值本身就是带前缀的写法（`4x00001`），列头说"惯例"比说"4x"
+# 准确——区是 co/di/ir 时前缀是 0x/1x/3x，S7 上根本算不出来（显示 `—`）。
+CONVENTION_HEADER = "惯例"
 
 
 @dataclass(frozen=True)
@@ -32,26 +35,33 @@ class Column:
     numeric: bool = False
 
 
+# 十列的宽度**逐列量过**（2026-10-14 全量重排，本机 Microsoft YaHei UI 9pt；量法与
+# `measure_cols` 那一步同形：内容 advance + 单元格左右各 4px 的 margin）。两条曾经**真被截**
+# 的形状是这次重排的理由：点位名 12 个中文字要 194px（列只有 150，会被 Qt 截成 `…`），
+# S7 的高 DB 号 `db4095` 要 51px（"区"只有 46，最后一位没了）。同时 4x/类型/波形/只读四列
+# 一共虚占了 120px——把它们让给名字与区。
 COLUMNS: tuple[Column, ...] = (
-    Column("名称", 150),
-    Column("区", 46),
+    # 250：装得下约 15 个中文字（12 个要 194px）。名字是操作员在表里找那一行的唯一线索，
+    # 截断它比截断任何其它列都贵。
+    Column("名称", 250),
+    # 56：`db4095` 要 51px（S7 的 DB 号上限 4095，四位数字 + `db`）。
+    Column("区", 56),
     Column("地址", 56, numeric=True),
-    Column("4x", 82, numeric=True),
-    Column("类型", 74),
-    Column("字序", 60),
-    # 132 而不是 110：示例点表里那个 17 位的 uint64（累计电量）在 110px 里会被 Qt 截成
-    # `7262385979038…`——这一列是操作员拿去和点表核对的那个数，少一位就没法核。
-    # 132 是**量出来的**（本机 Microsoft YaHei UI 9pt）：`72623859790382856` 的 advance 是
-    # 120，加单元格左右各 4px 的 margin 是 128，132 留 4px 余量——再瘦就会截。
-    # 见 `tests/test_gui_theme.py` 那条（它钉的是"最宽内容是 17 位 + 列宽 132"这个前提，
-    # 不拿 `fontMetrics()` 现量：offscreen 的兜底字体把每个字形按 1em 算，量出来 221px）。
+    # 这一列打的是**现场惯例写法**（4x/3x/1x/0x 随区变），所以列头是"惯例"不是"4x"——后者
+    # 只在 Modbus 的 hr 区成立，混装工程里就是错的；值自己带前缀，不用列头替它说。
+    # 62：`4x65535` 要 56px。
+    Column(CONVENTION_HEADER, 62, numeric=True),
+    Column("类型", 58),          # `float32`/`string`/`dword` 要 48px
+    Column("字序", 60),          # `CDAB` 要 41px
+    # 132：17 位数字（累计电量那个 uint64）要 128px——这一列是操作员拿去和点表核对的数，
+    # 少一位就没法核。见 `tests/test_gui_theme.py` 那条（它钉"最宽内容是 17 位 + 列宽 132"
+    # 这个前提，不拿 `fontMetrics()` 现量：offscreen 的兜底字体把每个字形按 1em 算）。
     Column(VALUE_HEADER, 132),
-    # 原始寄存器：最宽的内容是**4 个寄存器**的 uint64（`0000 0000 4148 4E28`，19 个字符）
-    # 或 int64/float64，advance 123 + 8 = 131；原来的 150 是没人量过的，虚 19px。
-    # S7 那一列打的是字节（`41 48 00 00`，67px），比这更窄。
+    # 134：4 个寄存器（uint64/int64/float64）的 `0000 0000 4148 4E28` 要 131px；
+    # S7 那一列打的是字节（`41 48 00 00`）比这更窄。
     Column(RAW_HEADER, 134),
-    Column("波形", 96),
-    Column("只读", 46),
+    Column("波形", 72),          # `random` 要 53px；`已停` 更短
+    Column("只读", 40),          # 列头"只读"要 34px
 )
 
 VALUE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == VALUE_HEADER)
@@ -310,7 +320,7 @@ def _display(row: Row, header: str) -> str:
         # `bit` 恒为 None，这一格与以前逐字相同。
         "名称": row.name, "区": row.area,
         "地址": f"{row.address}.{row.bit}" if row.bit is not None else str(row.address),
-        "4x": convention, "类型": row.datatype,
+        CONVENTION_HEADER: convention, "类型": row.datatype,
         "字序": row.word_order, VALUE_HEADER: row.value_text,
         # S7 那一列装的其实是**字节**（`Row.registers` 在 S7 通道上是字节序列）：
         # 按两位十六进制打，别把 0x41 打成 0041——那看着像 16 位寄存器，会把现场带偏。

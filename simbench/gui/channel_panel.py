@@ -276,7 +276,9 @@ class ChannelPanel(QtWidgets.QWidget):
             third_tip = "机架/槽位（例：0/1；客户端连上来时报的那两个数）"
         else:
             third = ""
-            third_tip = ""
+            # 空着的那一格也留一句话：光看一个灰空框，操作员只会怀疑"这里是不是坏了"。
+            third_tip = ("这一格只对串口（帧格式）与 S7（机架/槽位）有意义；"
+                         "TCP 通道用不上它")
         frame = QtWidgets.QLineEdit(third)
         frame.setFixedWidth(_FRAME_WIDTH)
         frame.setToolTip(third_tip)

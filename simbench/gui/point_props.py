@@ -146,6 +146,9 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self.error_view = QtWidgets.QPlainTextEdit()
         self.error_view.setReadOnly(True)
         self.error_view.setFixedSize(_NOTICE_WIDTH, _ERROR_VIEW_HEIGHT)
+        # 与两个建工程的对话框同一条：常驻的空框给一句占位说明，几何不动
+        self.error_view.setPlaceholderText(
+            "被拒的理由会出现在这里（校验原话，不截断）")
 
         # 区/类型的选项按**点所属通道的传输**给：S7 点位上是 `db<n>`/mk/pe/pa 与 S7 的
         # 类型名。给成 Modbus 那一套的话，操作员选一下就把 `hr`/`uint16` 写进 S7 点位里

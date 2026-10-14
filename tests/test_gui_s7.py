@@ -91,6 +91,15 @@ def test_a_tcp_row_keeps_an_empty_disabled_third_slot(built):
     assert not row.frame_edit.isEnabled() and row.frame_edit.isVisible()
 
 
+def test_the_unused_third_slot_says_what_it_is_for(built):
+    """TCP 行那格空着，但鼠标停上去要有话说——光看一个灰空框，操作员只会怀疑坏了。"""
+    panel, _engine, _qapp = built
+    tcp = by_channel(panel)["tcp-5020"]
+    assert tcp.frame_edit.text() == ""
+    assert "串口" in tcp.frame_edit.toolTip() and "S7" in tcp.frame_edit.toolTip()
+    assert "TCP" in tcp.frame_edit.toolTip()
+
+
 def test_the_three_slots_are_fixed_width_and_geometry_is_stable(built):
     panel, _session, qapp = built
     baseline = panel.geometry_snapshot()

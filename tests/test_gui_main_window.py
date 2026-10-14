@@ -316,6 +316,19 @@ def test_the_file_menu_holds_the_six_actions_with_shortcuts(window):
     assert actions[4] is window.act_save_as and window.act_save_as.isEnabled()
 
 
+def test_the_log_tab_has_a_clear_button_that_actually_clears(window, qapp):
+    """日志页有个"清空"：只读框自己清不掉（选不中、delete 没用），而报文页早就有"清除"。"""
+    assert window.tabs.tabText(window.tabs.indexOf(window.log_tab)) == "日志"
+    window._log("第一条")
+    window._log("第二条")
+    assert "第一条" in window.log_view.toPlainText()
+    window.act_clear_log.click()
+    qapp.processEvents()
+    assert "第一条" not in window.log_view.toPlainText()
+    assert window.log_view.blockCount() == 1, "清空之后只剩一个空段落"
+    assert window.act_clear_log.width() == 64, "定宽按钮：文案长短不许动布局"
+
+
 def test_the_log_view_keeps_only_the_last_lines(window, monkeypatch):
     """日志窗只留最近 5000 行：跑一晚上的会话不该把内存一路吃上去。"""
     assert window.log_view.maximumBlockCount() == 5000

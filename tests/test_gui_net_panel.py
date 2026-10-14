@@ -83,7 +83,7 @@ def test_the_network_tab_reads_the_system_only_when_opened(qapp, engine_runner, 
         assert net["status"] == [], "开窗就把系统读了一遍"
         window.tabs.setCurrentWidget(window.net_panel)
         assert len(net["status"]) == 1
-        window.tabs.setCurrentWidget(window.log_view)
+        window.tabs.setCurrentWidget(window.log_tab)
         assert len(net["status"]) == 1, "切到别的页也去读了系统"
     finally:
         window.timer.stop()

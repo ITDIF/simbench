@@ -46,6 +46,10 @@ class _EditDialog(QtWidgets.QDialog):
         self.error_view = QtWidgets.QPlainTextEdit(self)
         self.error_view.setReadOnly(True)
         self.error_view.setFixedSize(_NOTICE_WIDTH, _ERROR_VIEW_HEIGHT)
+        # 空着的那块框给一句占位说明：它常驻（被拒时理由要原地出现、不许把对话框撑大），
+        # 什么都没有的时候看着像坏了。占位文字在 setPlainText 之后自然消失，几何不动。
+        self.error_view.setPlaceholderText(
+            "校验不通过时，理由会出现在这里（validate 的原话，不截断）")
         column.addWidget(self.error_view)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, self)

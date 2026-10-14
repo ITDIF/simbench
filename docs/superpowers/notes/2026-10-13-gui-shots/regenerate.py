@@ -91,6 +91,13 @@ def main() -> int:
     window._toggle_theme(True)
     shoot(window, "12-main-dark.png")
 
+    # 日志页（有"清空"按钮）：先塞几条像样的行，不然截出来是空的
+    window._log("[info] 已新建工程（1 条通道）")
+    window._log("[running] tcp-5020 0.0.0.0:5020")
+    window._log("[refused] 添加点位：tcp-5020 正在运行；改点表要先停止（只影响这一路）")
+    window.tabs.setCurrentWidget(window.log_tab)
+    shoot(window, "16-log-tab.png")
+
     window.tabs.setCurrentIndex(2)
     for _ in range(20):
         app.processEvents()
