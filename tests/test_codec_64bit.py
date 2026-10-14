@@ -1,5 +1,6 @@
 # tests/test_codec_64bit.py
 import pytest
+
 from simbench.codec.point_codec import decode, encode
 
 V64 = 0x0102030405060708

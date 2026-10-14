@@ -16,11 +16,16 @@ import pytest
 
 from simbench.project.csv_io import parse_serial_name, read_csv, write_csv
 from simbench.project.json_io import from_dict, to_dict, to_json
-from simbench.project.validate import validate_project
 from simbench.project.model import (
-    SERIAL_DEFAULTS, Project, SerialChannel, TcpChannel, channel_transport,
-    format_frame, parse_frame,
+    SERIAL_DEFAULTS,
+    Project,
+    SerialChannel,
+    TcpChannel,
+    channel_transport,
+    format_frame,
+    parse_frame,
 )
+from simbench.project.validate import validate_project
 
 HEADER = ("channel,device,unit_id,name,area,address,datatype,word_order,initial,"
           "waveform,wave_param,readonly")

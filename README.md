@@ -170,6 +170,19 @@ setuptools>=81 移除的 `pkg_resources`）。**没装也能用 Modbus**：只�
 是看不见的——要看那些就用 `simbench.exe`。冻结产物的十条冒烟记录（含 S7 通道走真
 `snap7.dll`、缺 DLL 时的报错形态、冷启动与体积）在 `packaging\SMOKE.md`。
 
+## 改代码的人要先装的（现场不需要）
+
+```powershell
+.\.venv\Scripts\pip install -r requirements-dev.txt   # pytest / pys7 / pyinstaller / ruff / mypy
+.\.venv\Scripts\ruff check                            # 静态检查（配置在 pyproject.toml）
+.\.venv\Scripts\mypy                                  # 类型检查（只覆盖 project / codec / engine）
+.\.venv\Scripts\python.exe -m pytest                   # 全量（**串行**跑，绑真端口）
+```
+
+依赖都钉到实测版本；想连传递依赖都一样就用 `requirements.lock.txt`（`packaging/lock.ps1` 重新生成）。
+版本号只有一处来源：`simbench/__about__.py`（`python -m simbench --version` 能问它），
+变更记录在 `CHANGELOG.md`。
+
 ## 两个环境变量
 
 | 变量 | 作用 | 默认 |

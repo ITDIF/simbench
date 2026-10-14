@@ -27,14 +27,27 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .device import (MANAGED_ADAPTER_NAME, find_managed_adapter,
-                     loopback_inf_path, prepare_report, read_root_net_devices)
-from .ledger import Ledger, default_path as default_ledger_path
-from . import spec as netspec
 from ..project.validate import error_lines
+from . import spec as netspec
+from .device import (
+    MANAGED_ADAPTER_NAME,
+    find_managed_adapter,
+    loopback_inf_path,
+    prepare_report,
+    read_root_net_devices,
+)
+from .ledger import Ledger
+from .ledger import default_path as default_ledger_path
 from .plan import foreign_owners, plan_addresses
-from .state import (NetError, is_elevated, read_addresses, read_adapters,
-                    read_all_addresses, resolve_adapter, run_powershell)
+from .state import (
+    NetError,
+    is_elevated,
+    read_adapters,
+    read_addresses,
+    read_all_addresses,
+    resolve_adapter,
+    run_powershell,
+)
 from .win32 import create_loopback_device, remove_device
 
 _RENAME_TIMEOUT_S = 30.0
@@ -143,7 +156,7 @@ def _device_state(ledger: Ledger):
 
 def _cmd_device_show(args) -> int:
     ledger = _load_ledger(args)
-    adapters, managed = _device_state(ledger)
+    adapters, _managed = _device_state(ledger)
     devices = read_root_net_devices()
     print(f"[net] ROOT\\NET 设备实例 {len(devices)} 个")
     for device in devices:
@@ -171,7 +184,7 @@ def _wait_for_adapter(instance_id: str, timeout: float = _RENAME_TIMEOUT_S):
 
 
 def _create_and_record(adapter_name: str, ledger: Ledger, ledger_path: Path | None) -> dict:
-    adapters, managed = _device_state(ledger)
+    _adapters, managed = _device_state(ledger)
     if managed is not None:
         return {"ok": True, "already": True, "name": managed.name,
                 "if_index": managed.if_index, "guid": managed.guid,
@@ -763,8 +776,10 @@ def main(argv: list[str]) -> int:
         args.result = job.get("result")
         args.log = job.get("log")
     if getattr(args, "log", None):
-        # 提权子进程没有可见控制台，起手先把输出接到文件，失败原因才不会丢
-        handle = open(args.log, "w", encoding="utf-8", buffering=1)
+        # 提权子进程没有可见控制台，起手先把输出接到文件，失败原因才不会丢；
+        # 这个句柄要活到进程结束（sys.stdout 就是它），所以不能用 with
+        handle = open(args.log, "w", encoding="utf-8",  # noqa: SIM115
+                      buffering=1)
         sys.stdout = sys.stderr = handle
     try:
         if args.cmd == "show":

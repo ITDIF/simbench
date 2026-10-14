@@ -23,7 +23,13 @@ from simbench.backend.events import PacketEvent
 from simbench.backend.modbus_tcp import parse_packet
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import (
-    ALL, EXCEPTIONS, FILTERS, REQUESTS, RESPONSES, PacketStore, filters_for,
+    ALL,
+    EXCEPTIONS,
+    FILTERS,
+    REQUESTS,
+    RESPONSES,
+    PacketStore,
+    filters_for,
 )
 from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Session
@@ -192,7 +198,7 @@ def test_rows_is_safe_while_the_pump_thread_keeps_appending():
         try:
             while not stop.is_set():
                 store.rows()
-        except BaseException as exc:            # noqa: BLE001
+        except BaseException as exc:
             failures.append(exc)
             stop.set()
 

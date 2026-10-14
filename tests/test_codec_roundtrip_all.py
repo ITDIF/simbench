@@ -12,8 +12,15 @@ import pytest
 
 from simbench.codec.point_codec import decode, encode
 from simbench.project.model import (
-    BOOL, DATATYPES, FLOAT32, FLOAT64, STRING, _FLOAT_LIMIT, _INT_BOUNDS,
-    register_span, word_orders_allowed,
+    _FLOAT_LIMIT,
+    _INT_BOUNDS,
+    BOOL,
+    DATATYPES,
+    FLOAT32,
+    FLOAT64,
+    STRING,
+    register_span,
+    word_orders_allowed,
 )
 
 # 每个 dtype 把自己允许的每一种字序都跑一遍，字序口径同样来自 model

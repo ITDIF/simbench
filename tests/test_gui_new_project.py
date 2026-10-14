@@ -24,8 +24,7 @@ from simbench.gui.channel_form import ChannelForm
 from simbench.gui.device_tree import DeviceTree
 from simbench.gui.main_window import MainWindow
 from simbench.gui.new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
-from simbench.project import edit
-from simbench.project import json_io
+from simbench.project import edit, json_io
 from simbench.project.model import Device, Point, TcpChannel
 from tests.conftest import free_port
 
@@ -511,7 +510,7 @@ def test_starting_an_empty_project_does_nothing_instead_of_crashing(
 # ---------- 11. 界面合同：没有 QComboBox、几何恒定 ----------
 
 def test_the_channel_form_has_no_combo_box_and_keeps_its_geometry(qapp):
-    form = ChannelForm(kinds=(edit.BLANK,) + edit.TRANSPORTS, start=edit.BLANK)
+    form = ChannelForm(kinds=(edit.BLANK, *edit.TRANSPORTS), start=edit.BLANK)
     form.show()
     qapp.processEvents()
     baseline = form.geometry_snapshot()
@@ -672,10 +671,10 @@ def test_every_fixed_slot_in_the_forms_fits_its_longest_caption(qapp):
     COM 口"要 240px——Qt 不接省略号，屏幕上就是硬切掉半句，而那句话正是要人看见的。
     """
     from simbench.gui.channel_form import _HINTS
-    form = ChannelForm(kinds=(edit.BLANK,) + edit.TRANSPORTS, start=edit.BLANK)
+    form = ChannelForm(kinds=(edit.BLANK, *edit.TRANSPORTS), start=edit.BLANK)
     form.show()
     try:
-        for kind in (edit.BLANK,) + edit.TRANSPORTS:
+        for kind in (edit.BLANK, *edit.TRANSPORTS):
             form.pick(kind)
             qapp.processEvents()
             assert form.hint.text() == _HINTS[kind]
@@ -767,7 +766,8 @@ def test_the_default_port_steps_aside_when_it_is_occupied_on_this_machine(qapp):
 
     探针是**注入**的（用例不该为了算一个默认值去真占端口）：这里给一个"只有 5020 忙"的替身。
     """
-    probe = lambda port: str(port) != "5020"
+    def probe(port):
+        return str(port) != "5020"
     dialog = NewProjectDialog(None, probe=probe)
     try:
         dialog.form.pick("tcp")

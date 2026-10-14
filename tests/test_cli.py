@@ -175,7 +175,7 @@ def master_still_answering(port: int) -> bool:
     try:
         if client.connect():
             read = client.read_holding_registers(0, count=1, device_id=11)
-    except Exception:                                       # noqa: BLE001
+    except Exception:
         read = None
     finally:
         with contextlib.suppress(Exception):
@@ -206,7 +206,7 @@ def wait_until_answering(proc, port: int,
                 last = f"connect ok, read -> {read}"
             else:
                 last = "connect() returned False"
-        except Exception as exc:                                    # noqa: BLE001
+        except Exception as exc:
             last = repr(exc)
         with contextlib.suppress(Exception):
             client.close()
@@ -612,7 +612,7 @@ def wait_until(readable, timeout: float = 20.0, what: str = "") -> None:
         try:
             if readable():
                 return
-        except Exception as exc:                                    # noqa: BLE001
+        except Exception as exc:
             last = exc
         time.sleep(0.1)
     raise AssertionError(f"{what} never became true within {timeout}s (last={last!r})")
@@ -624,10 +624,9 @@ def test_the_command_line_serves_every_channel_of_a_mixed_project(tmp_path):
     原来只起第一个通道（stderr 上那句 "M1 serves one channel at a time"）——而现场一张表里
     TCP + 串口 + S7 混装是常态，那条限制等于"离了界面就用不了混装工程"。
     """
-    import socket as _socket
-    from pyS7 import S7Client
     from pymodbus import FramerType
     from pymodbus.client import ModbusSerialClient
+    from pyS7 import S7Client
 
     tcp, rtu, s7 = free_port(), free_port(), free_port()
     proc = subprocess.Popen(
@@ -642,7 +641,7 @@ def test_the_command_line_serves_every_channel_of_a_mixed_project(tmp_path):
                 return False
             read = client.read_holding_registers(0, count=1, device_id=11)
             return read is not None and not read.isError() and read.registers == [11]
-        except Exception:                                           # noqa: BLE001
+        except Exception:
             return False
         finally:
             with contextlib.suppress(Exception):
@@ -665,7 +664,7 @@ def test_the_command_line_serves_every_channel_of_a_mixed_project(tmp_path):
         wait_until(s7_answers, what=f"S7 channel ({s7})")
     except AssertionError:
         _out, err = drain(proc)
-        raise AssertionError(f"混装工程没全部起到\n--- stderr ---\n{err}")
+        raise AssertionError(f"混装工程没全部起到\n--- stderr ---\n{err}") from None
     finally:
         rtu_master.close()
         with contextlib.suppress(Exception):
@@ -680,6 +679,7 @@ def test_one_channel_that_cannot_start_does_not_stop_the_others(tmp_path):
     （由 `test_second_backend_on_the_same_port_is_refused` 钉住）。
     """
     import socket as _socket
+
     from pymodbus import FramerType
     from pymodbus.client import ModbusSerialClient
 

@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from typing import Any
 
 from ..codec.point_codec import encode
 from ..codec.waveform import clamp_to_datatype, waveform_value
@@ -120,7 +121,10 @@ class ModbusBackendBase:
         self._log_sink = log_sink
         # 同点同类 60s 一条（spec §8）：本 backend 一份表，所以 key 里不用再带通道名。
         self._dedupe = LogDedupe()
-        self._server: ModbusTcpServer | None = None
+        # 真类型是 pymodbus 的 server（TCP）或 SerialServer（RTU）——这一层**刻意**
+        # 不 import pymodbus（tests/test_architecture.py 守着那条线），所以注解写成
+        # `Any`：写一个不存在的类名只会让静态检查报「未定义的名字」。
+        self._server: Any | None = None
         self._writer: RawRegisterWriter | None = None
         self._task: asyncio.Task | None = None
         self._tick_task: asyncio.Task | None = None
@@ -248,7 +252,7 @@ class ModbusBackendBase:
 
     async def _close_extra(self) -> None:
         """关掉额外监听；基类没有。"""
-        return None
+        return
 
     def describe(self) -> str:
         """状态栏/日志里"主站该连哪"那一句（TCP 是所有监听地址，串口是串口参数）。"""
@@ -546,6 +550,16 @@ class ModbusBackendBase:
         """
         return self._sources.is_waveform(self.channel_name, unit_id, area, address,
                                          bit=bit)
+
+    def read_point_bytes(self, pt):
+        """**按字节**读一个点（S7 那条路专用）：回 `bytes | None`。
+
+        Modbus 的两条传输没有"这一个点的字节"这个概念（寄存器是 16 位格），所以这里默认
+        抛：真走到这一支说明 `make_backend` 把传输认错了——那是编程错误，不该被当成
+        "读不到"静默降级成灰显。S7 后端覆盖它（`s7_server.S7Backend.read_point_bytes`）。
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no byte-wise read; only the S7 backend does")
 
     def _require_writer(self) -> RawRegisterWriter:
         """没起（或已经停了）就调读写接口：一句带通道名的话，不要 `AttributeError`。

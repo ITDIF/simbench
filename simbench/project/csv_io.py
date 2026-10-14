@@ -12,9 +12,24 @@ from pathlib import Path
 
 from . import fsio
 from .model import (
-    Device, Point, Project, S7_DEFAULTS, S7_TYPES, SERIAL_DEFAULTS, SERIAL_MARK,
-    S7Channel, SerialChannel, TcpChannel, BOOL_TOKENS, brief, channel_transport,
-    format_frame, parse_bool, parse_frame, parse_s7_address, parse_s7_area,
+    BOOL_TOKENS,
+    S7_DEFAULTS,
+    S7_TYPES,
+    SERIAL_DEFAULTS,
+    SERIAL_MARK,
+    Device,
+    Point,
+    Project,
+    S7Channel,
+    SerialChannel,
+    TcpChannel,
+    brief,
+    channel_transport,
+    format_frame,
+    parse_bool,
+    parse_frame,
+    parse_s7_address,
+    parse_s7_area,
 )
 
 HEADER = ["channel", "device", "unit_id", "name", "area", "address", "datatype",
@@ -425,6 +440,9 @@ def _channel_for(channels: dict, raw_name: str, ports: dict[str, int],
     wanted_s7 = None if wanted_tcp is not None else parse_s7_name(raw_name, index)
     parsed = (None if wanted_tcp is not None or wanted_s7 is not None
               else parse_serial_name(raw_name, index))
+    # `wanted` 三种通道对象都可能是（TCP / S7 / 串口）：标注成联合类型，别让静态检查
+    # 按第一个分支把它钉成 `TcpChannel`（后两个分支就会被判成类型错）。
+    wanted: TcpChannel | S7Channel | SerialChannel | None
     if wanted_tcp is not None:
         name, wanted = wanted_tcp
     elif wanted_s7 is not None:

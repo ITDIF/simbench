@@ -26,8 +26,8 @@ from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore
 from simbench.engine.session import Session
 from simbench.gui import main_window as main_window_module
-from simbench.gui.point_props import PointPropertiesDialog
 from simbench.gui.main_window import MainWindow
+from simbench.gui.point_props import PointPropertiesDialog
 from simbench.project.model import DATATYPES, Device, Point, TcpChannel
 from simbench.project.validate import error_lines, validate_project
 from tests.conftest import free_port

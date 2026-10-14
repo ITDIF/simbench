@@ -1,9 +1,11 @@
 # tests/test_codec_single.py
 import pytest
+
 from simbench.codec import point_codec
 from simbench.codec.point_codec import decode, encode
 from simbench.project import model
 from simbench.project.model import BOOL, DATATYPES, STRING
+
 
 @pytest.mark.parametrize("dt,value,regs", [
     ("int16", -2, [0xFFFE]),
@@ -60,7 +62,7 @@ def test_string_keeps_its_own_value_message():
 def test_numeric_list_is_derived_from_model_datatypes():
     """_NUMERIC 手抄一份就是第二份真相：model 加类型后 codec 会反过来报 “unknown datatype”。"""
     expected = tuple(d for d in DATATYPES if d not in (BOOL, STRING))
-    assert point_codec._NUMERIC == expected
+    assert expected == point_codec._NUMERIC
     assert set(point_codec._NUMERIC) == set(DATATYPES) - {BOOL, STRING}
 
 

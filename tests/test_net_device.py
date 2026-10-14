@@ -14,9 +14,14 @@ from __future__ import annotations
 
 import json
 
-from simbench.net.device import (MANAGED_ADAPTER_NAME, find_managed_adapter,
-                                 foreign_loopbacks, is_loopback_adapter,
-                                 parse_devices, prepare_report)
+from simbench.net.device import (
+    MANAGED_ADAPTER_NAME,
+    find_managed_adapter,
+    foreign_loopbacks,
+    is_loopback_adapter,
+    parse_devices,
+    prepare_report,
+)
 from simbench.net.state import Adapter
 
 OURS = Adapter(name=MANAGED_ADAPTER_NAME, description="Microsoft KM-TEST 环回适配器",

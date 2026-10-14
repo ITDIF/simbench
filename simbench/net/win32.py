@@ -137,7 +137,8 @@ def _why(prefix: str) -> NetError:
     code = ctypes.get_last_error()
     try:
         return NetError(f"{prefix}（错误 {code}：{ctypes.FormatError(code)}）")
-    except Exception:
+    except Exception:                      # noqa: BLE001
+        # FormatError 取不到就只说错误码：错误码本身才是现场要的那一条
         return NetError(f"{prefix}（错误 {code}）")
 
 

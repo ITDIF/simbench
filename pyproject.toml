@@ -1,0 +1,64 @@
+# 工程配置：静态检查（ruff / mypy）。`pytest` 那份仍在 `pytest.ini`（不进这里，免得
+# 动一下测试的默认参数就要改这个文件）。
+#
+# 口径（2026-10-14 深度审查 O5）：**只开有便宜收益的规则**——机器一眼能看出来的那几类
+# （未定义的名字、没用的 import、import 顺序、可疑的 except、`zip` 少了 strict、可疑的
+# 字符串拼接）放开；"风格偏好"（行宽、全角标点、三元表达式）一律关掉：在这种中文注释
+# 密集的仓库里，那些规则只会制造噪音，而噪音会让整套检查被人无视。
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = ["dist", "build", "docs"]
+
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9",      # pycodestyle 里真正会出错的那几类（缩进 / 语句 / 语法级）
+    "F",                   # pyflakes：未定义的名字、没用的 import / 变量
+    "I",                   # import 顺序（一条命令就能修，省掉人工排序）
+    "B",                   # bugbear：可疑写法（可变默认值、zip 不 strict、断言写错……）
+    "BLE",                 # 裸 except（本项目刻意用它，配 `# noqa: BLE001` + 一句理由）
+    "C4",                  # 推导式 / 字面量里多余的构造
+    "SIM",                 # 可以更简单的写法
+    "UP",                  # 过时写法（旧式类型注解、deprecated import）
+    "RUF",                 # ruff 自己的那套
+    "PLW", "RET", "ISC",   # pylint / return / 字符串拼接里真正会咬人的那几条
+]
+ignore = [
+    "E501",                        # 行宽：中文注释按显示宽度断行，机器量不准（人工按 100 列管）
+    "B008",                        # 默认参数里调用函数：Qt 的 widget 默认值到处都是
+    "RUF001", "RUF002", "RUF003",  # 全角标点 / 易混字符：中文注释里**故意**这么写
+    "SIM105",                      # try/except/pass：留着 try 是为了写清"吞的是哪一句"
+    "SIM108",                      # if-else 三元：可读性见仁见智
+    "SIM112",                      # 环境变量大小写：Windows 上 `SystemRoot` 就是它的真名
+    "RET504",                      # 先赋值再 return：留个名字更好读
+    "PLW0108",                     # 不必要的 lambda：`lambda: f()` 那种延迟调用是刻意的
+    "PLW0603",                     # 模块级 global：只有 theme 那个模式开关用，一眼看得清
+    "PLW1510",                     # subprocess.run 不带 check：那几处就是要看 returncode
+    "ISC004",                      # 隐式字符串拼接：本仓库的长消息就是这么断行的
+    "RUF015",                      # 取第一个元素：`[0]` 比 `next(iter())` 好读
+    "B905",                        # zip 不带 strict：既有代码按「等长」用，改了要逐处论证
+    "RUF043",                      # pytest 的 match= 里带括号：那串就是给人读的报错文案，
+                                   # 括号当正则组也照样匹配（为它到处 import re 不值得）
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 用例与打包脚本可以更随便：它们是用一次就扔的代码，宽异常与裸断言是刻意的
+"tests/*" = ["BLE001", "B017", "SIM115", "RUF059"]
+"packaging/*" = ["BLE001", "SIM115"]
+
+[tool.mypy]
+python_version = "3.13"
+# 只覆盖"数据与判定"那三棵子树（project / codec / engine）：界面与 net 那两层有大量
+# Qt / Windows API 的动态用法，全仓严格 = 几百条 `# type: ignore`，那是噪音不是保障。
+files = ["simbench/project", "simbench/codec", "simbench/engine"]
+ignore_missing_imports = true
+# 被 import 进来的那几棵（backend/ 用的是 pymodbus 的动态 API、net/ 全是 ctypes 与
+# Windows 结构体）先不报：它们在闸门外，等各自的注解补完再逐个拉进来。
+follow_imports = "silent"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+show_error_codes = true

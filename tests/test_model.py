@@ -2,11 +2,30 @@
 import struct
 
 import pytest
+
 from simbench.project.model import (
-    BOOL, DATATYPES, FLOAT32, FLOAT64, INT16, INT64, REG16, STRING, UINT16,
-    UINT64, Device, Point, Project, TcpChannel, area_is_bit, brief,
-    parse_value, register_span, struct_format, word_orders_allowed,
+    BOOL,
+    DATATYPES,
+    FLOAT32,
+    FLOAT64,
+    INT16,
+    INT64,
+    REG16,
+    STRING,
+    UINT16,
+    UINT64,
+    Device,
+    Point,
+    Project,
+    TcpChannel,
+    area_is_bit,
+    brief,
+    parse_value,
+    register_span,
+    struct_format,
+    word_orders_allowed,
 )
+
 
 def test_areas_and_bit_areas():
     assert area_is_bit("co") and area_is_bit("di")
@@ -165,8 +184,9 @@ def test_typed_initial_raises_instead_of_guessing():
     with pytest.raises(ValueError):
         Point("a", "hr", 0, INT16, "42.9").typed_initial()
     with pytest.raises(ValueError) as exc:
-        Point("a", "hr", 0, STRING, "风机").span
-    assert not isinstance(exc.value, UnicodeEncodeError)
+        span = Point("a", "hr", 0, STRING, "风机").span   # noqa: F841
+    assert not isinstance(exc.value, UnicodeEncodeError), \
+        "中文初值该报的是「不是 ASCII」这类原因，不是 UnicodeEncodeError"
 
 def test_project_helpers():
     pt = Point("a", "hr", 0, INT16)

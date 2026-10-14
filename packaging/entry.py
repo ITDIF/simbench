@@ -31,7 +31,8 @@ def _is_gui_exe() -> bool:
 
 
 def main() -> int:
-    from simbench.__main__ import gui_main, main as cli_main
+    from simbench.__main__ import gui_main
+    from simbench.__main__ import main as cli_main
 
     if _is_gui_exe():
         return gui_main()

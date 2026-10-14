@@ -75,7 +75,7 @@ class Ledger:
     corrupt: str = ""          # 非空表示账本不可信，此时 owned 一律为空
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Ledger":
+    def load(cls, path: Path | None = None) -> Ledger:
         target = path or default_path()
         if not target.exists():
             return cls()
@@ -89,7 +89,9 @@ class Ledger:
                                       device_instance=str(a.get("device_instance", "")),
                                       created_at=str(a.get("created_at", "")))
                         for a in payload.get("adapters", [])]
-        except Exception as exc:                      # 损坏方向要安全：当作没记
+        except Exception as exc:               # noqa: BLE001
+            # 损坏方向要安全：当作没记
+            return cls(corrupt=f"{target}: 账本读不出来（{exc}），本次不回收任何地址或网卡")
             return cls(corrupt=f"{target}: 账本读不出来（{exc}），本次不回收任何地址或网卡")
         return cls(entries=entries, adapters=adapters)
 

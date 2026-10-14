@@ -22,7 +22,7 @@ import pytest
 
 from simbench.net import startup
 from simbench.net.device import MANAGED_ADAPTER_NAME
-from simbench.net.state import MANUAL, Address, Adapter, NetError
+from simbench.net.state import MANUAL, Adapter, Address, NetError
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -184,8 +184,8 @@ def test_an_address_held_by_another_adapter_is_reported_not_fought_over(tmp_path
 def test_partly_blocked_still_applies_the_rest(tmp_path, monkeypatch):
     """.1 被别人占着，.2 还能加：不该因为一个冲突就整批放弃。"""
     seen = {}
-    called = _install(monkeypatch, elsewhere=[Address("10.0.0.1", 24, 4, MANUAL)],
-                      apply=lambda table: seen.update(table=table) or (0, ["已配 1 个"]))
+    _install(monkeypatch, elsewhere=[Address("10.0.0.1", 24, 4, MANUAL)],
+             apply=lambda table: seen.update(table=table) or (0, ["已配 1 个"]))
     table = _declare(tmp_path, devices=[{"name": "a", "ip": "10.0.0.1"},
                                         {"name": "b", "ip": "10.0.0.2"}])
     assert startup.prepare(table) == ["已配 1 个"]
@@ -199,8 +199,7 @@ def test_a_pure_serial_project_is_never_given_interface_addresses(tmp_path, monk
     声明文件，于是"一份纯串口的点表 + 旁边躺着一份旧 `.net.json`"会把地址配到网卡上——
     那些地址 ping 得通、上面却没有任何从站，正是本项目最防的"看着在、其实没有"。
     """
-    from simbench.project.model import (Device, Point, Project, SerialChannel,
-                                        TcpChannel)
+    from simbench.project.model import Device, Point, Project, SerialChannel, TcpChannel
 
     seen = {}
     _install(monkeypatch, adapters=[WLAN],

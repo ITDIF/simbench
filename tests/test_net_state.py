@@ -13,8 +13,14 @@ import pytest
 
 from simbench.net.cli import _parse_ip_spec
 from simbench.net.ledger import Ledger
-from simbench.net.state import (DHCP, MANUAL, NetError, parse_addresses,
-                                parse_adapters, resolve_adapter)
+from simbench.net.state import (
+    DHCP,
+    MANUAL,
+    NetError,
+    parse_adapters,
+    parse_addresses,
+    resolve_adapter,
+)
 
 _ADAPTERS = [
     {"Name": "以太网 5", "InterfaceDescription": "Microsoft KM-TEST 环回适配器",

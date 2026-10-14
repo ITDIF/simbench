@@ -19,10 +19,22 @@ from __future__ import annotations
 
 from collections import Counter
 
-from .model import (AREAS, BOOL, FLOAT32, S7_AREAS, S7_DEFAULTS, S7_MAX_DB,
-                    S7_TYPE_BYTES, SERIAL_DEFAULTS, TcpChannel, UINT16, WORD_ABCD,
-                    Device, Point, Project, S7Channel, SerialChannel, area_is_bit,
-                    channel_transport, parse_s7_area, register_span, s7_span_bytes)
+from .model import (
+    BOOL,
+    S7_DEFAULTS,
+    SERIAL_DEFAULTS,
+    UINT16,
+    WORD_ABCD,
+    Device,
+    Point,
+    Project,
+    S7Channel,
+    SerialChannel,
+    TcpChannel,
+    area_is_bit,
+    register_span,
+    s7_span_bytes,
+)
 from .validate import error_lines, validate_project
 
 # 能从界面从零建的三种传输。名字与 `channel_transport()` 的返回值一字不差——

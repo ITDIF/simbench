@@ -17,6 +17,8 @@ from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from typing import Any
 
+from .. import swallow
+
 _MAX_JOIN_SECONDS = 5.0
 
 
@@ -27,6 +29,8 @@ class EngineRunner:
         self._thread: threading.Thread | None = None
         self._sinks: list[Callable[[Any], None]] = []
         self._queue: queue.Queue = queue.Queue()
+        # 投递路径上吞掉的异常（见 `swallow.py`）：界面读 `runner.swallowed.summary()`。
+        self.swallowed = swallow.Swallower("engine event delivery")
         self._pump_stop = threading.Event()
         self._pump: threading.Thread | None = None
 
@@ -120,9 +124,10 @@ class EngineRunner:
 
     def _frames_hint(self) -> str:
         thread = self._thread
-        if thread is None:
+        ident = thread.ident if thread is not None else None
+        if ident is None:
             return ""
-        frame = sys._current_frames().get(thread.ident)
+        frame = sys._current_frames().get(ident)
         if frame is None:
             return "; engine frame not available"
         tail = "".join(f"  | {line.rstrip()}\n"
@@ -190,8 +195,10 @@ class EngineRunner:
         for sink in list(self._sinks):
             try:
                 sink(event)
-            except Exception:                        # noqa: BLE001
-                pass    # UI 回调炸了不许带停引擎；错误由 GUI 自己负责显示
+            except Exception as exc:                 # noqa: BLE001
+                # UI 回调炸了不许带停引擎（那是丢事件的原因），但**不许没有痕迹**：
+                # 记进 `swallowed`，界面按 summary() 报一次（见 `swallow.py`）。
+                swallow.note(self.swallowed, exc, f"sink {sink!r}")
 
 
 async def _noop() -> None:

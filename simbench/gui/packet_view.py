@@ -250,7 +250,7 @@ class PacketPanel(QtWidgets.QWidget):
             "table": self.table.geometry().getRect(),
         }
 
-    def closeEvent(self, event) -> None:              # noqa: N802
+    def closeEvent(self, event) -> None:
         if self._subscribed:
             self._store.unsubscribe(self._mark_dirty)
             self._subscribed = False

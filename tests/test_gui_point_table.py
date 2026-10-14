@@ -27,8 +27,7 @@ from simbench.csv_io_entry import load_point_table
 from simbench.engine.point_source import FakeEngine, session_source
 from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Row, Session
-from simbench.gui.point_table import (COLUMNS, PointTableModel, PointTableView,
-                                      conventional)
+from simbench.gui.point_table import COLUMNS, PointTableModel, PointTableView, conventional
 from simbench.project.model import Project, TcpChannel
 from simbench.project.validate import validate_project
 from tests.conftest import free_port

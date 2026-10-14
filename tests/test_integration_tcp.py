@@ -21,8 +21,13 @@ from pymodbus.client import ModbusTcpClient
 
 from simbench.backend.events import LogLine
 from simbench.backend.modbus_tcp import (
-    _DropDatastoreNoise, ModbusTcpBackend, PortInUseError, _bind_probe,
-    _connect_probe, _is_being_served, check_port_is_free, configure_library_logging,
+    ModbusTcpBackend,
+    PortInUseError,
+    _bind_probe,
+    _DropDatastoreNoise,
+    _is_being_served,
+    check_port_is_free,
+    configure_library_logging,
     parse_packet,
 )
 from simbench.codec.point_codec import encode
@@ -95,7 +100,7 @@ def connect(port: int) -> ModbusTcpClient:
         try:
             if client.connect():
                 return client
-        except Exception as exc:            # noqa: BLE001
+        except Exception as exc:
             last = exc
         time.sleep(0.05)
     raise AssertionError(f"could not connect to :{port} ({last})")

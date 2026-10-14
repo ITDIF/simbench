@@ -29,7 +29,7 @@ import pathlib
 import shutil
 import tempfile
 from collections.abc import Callable
-from typing import Any, IO
+from typing import IO, Any
 
 
 def backup_path(path) -> pathlib.Path:

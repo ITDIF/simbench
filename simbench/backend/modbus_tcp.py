@@ -13,15 +13,17 @@ pymodbus 的 import 只允许出现在 backend/（tests/test_architecture.py 守
 from __future__ import annotations
 
 import asyncio
-import socket
 import select
+import socket
 import time
 
 from pymodbus import FramerType
 from pymodbus.server import ModbusTcpServer
 
 from .modbus_base import (  # noqa: F401  （再导出：老路径 import 它的人不少）
-    _DropDatastoreNoise, BackendStartError, ModbusBackendBase,
+    BackendStartError,
+    ModbusBackendBase,
+    _DropDatastoreNoise,
     configure_library_logging,
 )
 

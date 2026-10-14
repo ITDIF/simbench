@@ -148,3 +148,20 @@ def test_build_app_installs_the_crash_handlers(qapp, engine_runner, tmp_path, mo
         assert window.log_file is not None
     finally:
         teardown_window(window, qapp)
+
+def test_a_swallowed_callback_failure_says_so_once_in_the_log(qapp, engine_runner):
+    """一个正在抛的订阅者回调要在日志页留一句（`simbench/swallow.py`）。
+
+    旧写法下它**一点痕迹都没有**：表现是"界面有时候不跟着变了"而日志干干净净。
+    只报一次——10Hz 的心跳里每次报一遍会把日志窗刷满。
+    """
+    window = make_window(qapp, engine_runner)
+    try:
+        window.session.swallowed.note(ValueError("boom in a sink"), "sink <bad>")
+        window._tick()
+        text = window.log_view.toPlainText()
+        assert "有回调失败" in text and "boom in a sink" in text
+        window._tick()
+        assert window.log_view.toPlainText().count("有回调失败") == 1, "同一笔故障报了不止一次"
+    finally:
+        teardown_window(window, qapp)

@@ -21,7 +21,15 @@ import ctypes
 import struct
 
 from ..project.model import (
-    BOOL, FLOAT32, INT16, INT32, UINT16, UINT32, brief, parse_value, s7_span_bytes,
+    BOOL,
+    FLOAT32,
+    INT16,
+    INT32,
+    UINT16,
+    UINT32,
+    brief,
+    parse_value,
+    s7_span_bytes,
 )
 from .waveform import clamp_to_datatype
 

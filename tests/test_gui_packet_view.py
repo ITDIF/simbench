@@ -22,7 +22,12 @@ from PySide6 import QtCore, QtWidgets
 from simbench.backend.events import PacketEvent
 from simbench.backend.modbus_tcp import parse_packet
 from simbench.engine.packets import (
-    ALL, EXCEPTIONS, FILTERS, REQUESTS, RESPONSES, PacketStore,
+    ALL,
+    EXCEPTIONS,
+    FILTERS,
+    REQUESTS,
+    RESPONSES,
+    PacketStore,
 )
 from simbench.gui.packet_view import PacketPanel
 

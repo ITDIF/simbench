@@ -39,11 +39,10 @@ def _imported_modules(path: pathlib.Path) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.extend(_top_module(alias.name) for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
+        elif isinstance(node, ast.ImportFrom) and not node.level:
             # 相对 import（`from . import x` / `from ..model import y`）import 的是本项目
             # 自己的模块，level > 0 直接跳过，否则 `from ..codec import ...` 会被当成外部包
-            if not node.level:
-                found.append(_top_module(node.module))
+            found.append(_top_module(node.module))
     return found
 
 

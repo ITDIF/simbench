@@ -12,7 +12,6 @@
    （写死 7 的那一版会把"写哪个点"认到错的偏移上，静默停掉一段曲线）。
 """
 
-import pathlib
 import socket
 import time
 
@@ -21,8 +20,7 @@ from pymodbus import FramerType
 from pymodbus.client import ModbusSerialClient
 
 from simbench.backend import UnsupportedTransportError, make_backend
-from simbench.backend.modbus_rtu import (ModbusRtuBackend, SerialOpenError,
-                                         check_serial_is_free)
+from simbench.backend.modbus_rtu import ModbusRtuBackend, SerialOpenError, check_serial_is_free
 from simbench.backend.modbus_tcp import ModbusTcpBackend
 from simbench.project.model import Device, Point, SerialChannel, TcpChannel
 

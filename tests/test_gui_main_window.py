@@ -23,8 +23,8 @@ import socket
 import threading
 
 import pytest
-from PySide6 import QtCore, QtWidgets
 from pymodbus.client import ModbusTcpClient
+from PySide6 import QtCore, QtWidgets
 
 from simbench.backend.events import ChannelState
 from simbench.backend.modbus_tcp import check_port_is_free
@@ -315,7 +315,7 @@ def test_the_file_menu_holds_the_six_actions_with_shortcuts(window):
                                            "另存为…", "导出点表"]
     assert [a.shortcut().toString() for a in actions] == \
         ["Ctrl+N", "Ctrl+O", "Ctrl+I", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+E"]
-    assert [a for a in actions][:1] == [window.act_new]
+    assert list(actions)[:1] == [window.act_new]
     assert actions[3] is window.act_save and actions[5] is window.act_export
     assert actions[4] is window.act_save_as and window.act_save_as.isEnabled()
 

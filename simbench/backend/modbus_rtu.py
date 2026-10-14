@@ -30,6 +30,7 @@ from pymodbus.server import ModbusSerialServer
 
 from ..project.model import serial_summary
 from .modbus_base import BackendStartError, ModbusBackendBase
+
 # `socket://` 那一路的"归属"就是那个 TCP 端口，判定与 TCP 一模一样（见
 # `check_serial_is_free`），所以直接用它那一份两级探针——两份探针一定会漂。
 from .modbus_tcp import check_port_is_free

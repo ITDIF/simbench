@@ -7,9 +7,20 @@ from dataclasses import MISSING, fields
 from pathlib import Path
 
 from . import fsio
-from .model import (BOOL, S7_DEFAULTS, SERIAL_DEFAULTS, Device, Point, Project,
-                    S7Channel, SerialChannel, TcpChannel, brief, channel_transport,
-                    parse_value)
+from .model import (
+    BOOL,
+    S7_DEFAULTS,
+    SERIAL_DEFAULTS,
+    Device,
+    Point,
+    Project,
+    S7Channel,
+    SerialChannel,
+    TcpChannel,
+    brief,
+    channel_transport,
+    parse_value,
+)
 
 VERSION = 1
 _POINT_FIELDS = ("name", "area", "address", "datatype", "initial", "word_order",
@@ -260,7 +271,7 @@ def from_dict(data: dict) -> Project:
                    tick_ms=_require_int(data.get("tick_ms", 100), "tick_ms", "project"))
 
 
-def save(project: Project, path: Path) -> None:
+def save(project: Project, path: str | Path) -> None:
     """工程落盘：走 `fsio` 的原子替换（写一半断电不许把工程废掉）。"""
     fsio.write_text_atomic(path, to_json(project) + "\n")
 

@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..engine.point_source import PointSource
-from ..project.model import S7_TYPES
 from ..engine.session import Row
+from ..project.model import S7_TYPES
 
 VALUE_HEADER = "当前值"
 RAW_HEADER = "原始寄存器"
@@ -258,7 +258,7 @@ class PointTableView(QtWidgets.QTableView):
         menu = self._menu_for(row)
         return [] if menu is None else menu.actions()
 
-    def contextMenuEvent(self, event) -> None:                # noqa: N802
+    def contextMenuEvent(self, event) -> None:
         # `event.pos()` 是控件坐标而 `indexAt` 吃的是视口坐标，中间必须过 `mapFrom`；
         # 两侧都按"没偏移"写的话，带边框的真实视图会整行错位。
         menu = self._menu_for(

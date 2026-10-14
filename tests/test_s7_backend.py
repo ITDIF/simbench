@@ -17,7 +17,7 @@ from pyS7 import S7Client
 from simbench.backend import make_backend
 from simbench.backend.modbus_base import BackendStartError
 from simbench.backend.s7_server import S7Backend
-from simbench.project.model import Device, Point, Project, S7Channel, TcpChannel
+from simbench.project.model import Device, Point, S7Channel
 
 _CALL_TIMEOUT = 10.0
 
@@ -244,7 +244,7 @@ def test_a_missing_native_library_reports_one_line_too(monkeypatch):
     from simbench.backend import s7_server
 
     class _NoLibrary:
-        def Server(self):                                  # noqa: N802 —— 照 snap7 的名字
+        def Server(self):
             raise RuntimeError("can't find snap7 library. If installed, try running ldconfig")
 
     monkeypatch.setattr(s7_server, "_snap7_server", _NoLibrary())

@@ -31,8 +31,9 @@ import warnings
 from typing import Any
 
 from ..codec.s7_codec import clamp_to_type, encode, read_bit, span_bytes, write_bit
-from ..project.model import S7_AREAS, channel_transport, parse_s7_area, s7_summary
+from ..project.model import parse_s7_area, s7_summary
 from .modbus_base import BackendStartError, ModbusBackendBase
+
 # S7 也是 TCP 端口：归属判定与 TCP 同一套两级探针（bind + connect），不另写一份。
 from .modbus_tcp import check_port_is_free
 
@@ -91,11 +92,11 @@ class S7Backend(ModbusBackendBase):
 
     def _devices(self):
         """S7 没有 pymodbus 那一套数据面：区域缓冲就是数据面（`_build_areas` 建）。"""
-        return None
+        return
 
     def _make_writer(self, server):
         """S7 没有"寄存器写入器"这一层：读写在区域缓冲上直接做。"""
-        return None
+        return
 
     def _create_server(self, devices) -> Any:
         """建 snap7 服务端 + 按点表挂区域缓冲（`devices` 恒为 None：S7 不看 Modbus 那套）。"""
@@ -131,11 +132,11 @@ class S7Backend(ModbusBackendBase):
         """snap7 的 `start_to()` 是**同步**绑端口：没有长活任务可等，回 None。"""
         try:
             server.start_to(self.host, self.port)
-        except Exception as exc:                    # noqa: BLE001
+        except Exception as exc:
             raise BackendStartError(
                 f"channel {self.channel_name}: cannot listen on {self.host}:{self.port} "
                 f"for S7 ({exc}); the port may already be in use") from exc
-        return None
+        return
 
     async def _await_ready(self, server, task) -> None:
         """`start_to` 是同步的：走到这里端口已经绑上了，确认一句 status 就够。"""

@@ -73,7 +73,8 @@ def is_elevated() -> bool:
         return False
     try:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
+    except Exception:                      # noqa: BLE001
+        # 取不到就按「不是管理员」算：这里只影响要不要提权这一件事
         return False
 
 

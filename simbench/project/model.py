@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 BOOL, INT16, UINT16, REG16 = "bool", "int16", "uint16", "reg16"
 INT32, UINT32, INT64, UINT64 = "int32", "uint32", "int64", "uint64"
@@ -25,7 +26,7 @@ S7_TYPES = ("bool", "byte", "char", "word", "int", "dword", "dint", "real", "str
 # 类型 -> 字节数（string 按初值长度另算；bool 占 1 位、落在 1 个字节里，见 `Point.bit`）
 S7_TYPE_BYTES = {"byte": 1, "char": 1, "word": 2, "int": 2, "dword": 4,
                  "dint": 4, "real": 4}
-S7_DEFAULTS = {"host": "0.0.0.0", "port": 102, "rack": 0, "slot": 1}
+S7_DEFAULTS: dict[str, Any] = {"host": "0.0.0.0", "port": 102, "rack": 0, "slot": 1}
 
 WORD_ABCD, WORD_CDAB, WORD_BADC, WORD_DCBA = "ABCD", "CDAB", "BADC", "DCBA"
 WORD_ORDERS = (WORD_ABCD, WORD_CDAB, WORD_BADC, WORD_DCBA)
@@ -38,8 +39,11 @@ WORD_ORDERS = (WORD_ABCD, WORD_CDAB, WORD_BADC, WORD_DCBA)
 # 少写一个键就静默去开它，等于替操作员猜了一个会动硬件的值。空串会被 validate 的
 # `serial_port` 拦下（"must be a non-empty string"），于是"没写串口名"当场变成一条看得懂的
 # 错，而不是一次神秘的端口占用。
-SERIAL_DEFAULTS = {"port": "", "baudrate": 9600, "parity": "N", "bytesize": 8,
-                   "stopbits": 1, "timeout": 0.3}
+# 值的类型本来就不同（串口名是 str、波特率是 int、超时是 float），所以这张表按
+# `dict[str, Any]` 标注：不标的话每个取值点都会被静态检查当成 object——那些取值点
+# 里写的类型（`port: str` / `baudrate: int`）才是真正的合同。
+SERIAL_DEFAULTS: dict[str, Any] = {"port": "", "baudrate": 9600, "parity": "N",
+                                   "bytesize": 8, "stopbits": 1, "timeout": 0.3}
 # 帧格式的**书写**语法：`8N1`（数据位 5..8 / 校验 N/E/O / 停止位 1 或 1.5 不行，见 validate）。
 # 这一份解析/渲染给两处用：CSV 的通道名（`com-485-1@COM3,9600,8E1`）与界面那一格。
 # 只做转换，不判合法——`9N1` 解析得出 (9,'N',1)，由 validate 报"数据位只能是 7 或 8"。

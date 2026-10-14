@@ -15,8 +15,18 @@ import pytest
 from simbench.project.csv_io import parse_s7_name, read_csv, write_csv
 from simbench.project.json_io import from_dict, to_dict, to_json
 from simbench.project.model import (
-    S7_DEFAULTS, Device, Point, Project, S7Channel, SerialChannel, TcpChannel,
-    channel_transport, parse_s7_address, parse_s7_area, s7_area_name, s7_span_bytes,
+    S7_DEFAULTS,
+    Device,
+    Point,
+    Project,
+    S7Channel,
+    SerialChannel,
+    TcpChannel,
+    channel_transport,
+    parse_s7_address,
+    parse_s7_area,
+    s7_area_name,
+    s7_span_bytes,
     s7_summary,
 )
 
@@ -24,7 +34,7 @@ HEADER = ("channel,device,unit_id,name,area,address,datatype,word_order,initial,
           "waveform,wave_param,readonly")
 
 
-def csv_with(channel: str, points: str = None) -> str:
+def csv_with(channel: str, points: str | None = None) -> str:
     points = points or "温度,db1,0,real,ABCD,12.5,const,,false\n"
     return HEADER + "\n" + "".join(
         f"{channel},D1,11,{row}\n" for row in points.splitlines() if row)

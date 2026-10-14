@@ -41,3 +41,34 @@ def test_the_dev_file_pulls_the_runtime_ones_in_and_adds_the_toolchain():
     names = _requirements(DEV)
     for tool in TEST_ONLY:
         assert tool in names, (tool, names)
+    for tool in ("ruff", "mypy"):                    # 静态检查那一对也在里面（CI 与本地同一版）
+        assert tool in names, (tool, names)
+
+
+def test_every_direct_dependency_is_pinned_to_one_version():
+    """直接依赖一律 `==`：`>=` 会让"半年后在另一台机器上装到另一套东西"。
+
+    传递依赖不在这里管——它们由 `requirements.lock.txt` 兜（想一模一样复现就用那一份）。
+    """
+    for line in (RUNTIME + DEV).splitlines():
+        body = line.split("#", 1)[0].strip()
+        if not body or body.startswith("-"):
+            continue
+        assert "==" in body, f"这一条没钉版本：{body}"
+
+
+def test_the_lock_file_agrees_with_the_pinned_lines():
+    """锁文件是 `pip freeze` 的原文：直接依赖那几行的版本必须与 requirements 一致。"""
+    lock = {name.lower(): version
+            for name, version in (line.strip().split("==", 1)
+                                  for line in (ROOT / "requirements.lock.txt")
+                                  .read_text(encoding="utf-8").splitlines()
+                                  if "==" in line and not line.startswith("#"))}
+    for line in (RUNTIME + DEV).splitlines():
+        body = line.split("#", 1)[0].strip()
+        if "==" not in body:
+            continue
+        name, version = body.split("==", 1)
+        # 包名大小写不同：pip 自己会归一化，这里是同一件事
+        assert lock.get(name.strip().lower()) == version.strip(), \
+            f"{name} 在锁文件里是 {lock.get(name.strip().lower())}，requirements 里是 {version}"

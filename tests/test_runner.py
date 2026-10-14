@@ -38,8 +38,10 @@ def test_submit_returns_result_and_runs_on_engine_thread():
 
 def test_start_and_stop_are_idempotent():
     runner = EngineRunner()
-    runner.start(); runner.start()
-    runner.stop(); runner.stop()
+    runner.start()
+    runner.start()          # 幂等：第二次什么都不做
+    runner.stop()
+    runner.stop()           # 幂等：第二次什么都不做
     assert not runner.alive
     with pytest.raises(RuntimeError, match="not running"):
         runner.submit(noop)
@@ -89,12 +91,14 @@ def test_events_reach_the_subscriber_with_ordering():
 
 def test_two_runners_do_not_share_state():
     a, b = EngineRunner(), EngineRunner()
-    a.start(); b.start()
+    a.start()
+    b.start()
     try:
         assert a.thread_ident != b.thread_ident
         assert a.submit(noop).result(5) == b.submit(noop).result(5) == 42
     finally:
-        a.stop(); b.stop()
+        a.stop()
+        b.stop()
 
 
 def test_a_raising_subscriber_does_not_take_the_engine_down():

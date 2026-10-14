@@ -25,13 +25,13 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .. import swallow
 from ..backend import BackendStartError, make_backend
 from ..backend.events import ChannelState, LogLine, PacketEvent
 from ..backend.modbus_base import ModbusBackendBase
 from ..codec import s7_codec
 from ..codec.point_codec import decode, encode
-from ..project.model import (Point, Project, area_is_bit, channel_transport,
-                             s7_span_bytes)
+from ..project.model import Point, Project, area_is_bit, channel_transport, s7_span_bytes
 from ..project.validate import Issue, error_lines, validate_project
 from .packets import PacketStore
 from .runner import EngineRunner
@@ -130,7 +130,8 @@ class Session:
         self._project = Project(channels=[])
         self._source: str | None = None
         self._channels: dict[str, ChannelRuntime] = {}
-        self._points: dict[tuple[str, int], dict[tuple[str, int], Point]] = {}
+        # 内层键是**(区, 地址, 位)**：S7 同字节上的两个 bool 是两个点，不带位会互相覆盖
+        self._points: dict[tuple[str, int], dict[tuple[str, int, int | None], Point]] = {}
         self._rows_meta: dict[str, list[tuple[int, str, Point]]] = {}
         self._dirty = False
         # `_render` 的记忆化（见 `_render_cached`）：键里带渲染相关的全部输入，值里带
@@ -140,6 +141,8 @@ class Session:
         # 就是看得见的信号）。见 `_snapshot_for`。
         self._read_failed = False
         self._closed = False
+        # 通知路径上吞掉的异常（见 `swallow.py`）
+        self.swallowed = swallow.Swallower("session events")
         # 结构版本号：`_rebuild_index_locked` 每跑一次就 +1（装载 / 改结构 / 增删通道）。
         # 给"按节拍取数"的那一层（`rows_pump`）一个**便宜且可靠**的失效判据——光比工程
         # 对象身份认不出"同一份对象被原地改了结构"（界面增删点位走的正是那条路）。
@@ -272,6 +275,11 @@ class Session:
         return self._dirty
 
     @property
+    def runner(self) -> EngineRunner:
+        """引擎线程那一层（只读用途：投递路径的记账、诊断、用例断言）。"""
+        return self._runner
+
+    @property
     def revision(self) -> int:
         """结构版本号：装载、改点位结构、增删通道都会 +1（只增不减）。"""
         with self._lock:
@@ -356,7 +364,7 @@ class Session:
                                    extra_endpoints=_listen_endpoints(channel, self._source))
             self._runner.call(lambda: backend.start(), _START_TIMEOUT,
                               f"start channel {name}")
-        except Exception as exc:                    # noqa: BLE001
+        except Exception as exc:
             # 运行期失败（真端口被占 10048、保留端口 10013、监听起不来）由 backend 抛出，
             # 原样再抛给调用方，同时落 last_error + 发 error 状态：界面上那一格变红，
             # 而不是"日志说 listening 但外面连不上"。通道保持 stopped。
@@ -547,7 +555,7 @@ class Session:
             out[(unit_id, pt.area, pt.address, pt.bit)] = (regs, failed, waveform)
         return out
 
-    def manual_count(self, channel: str) -> int:
+    def manual_count(self, channel: str) -> int | None:
         """当前被人工接管的**点位**数（状态栏那句"有 N 处被接管"用）。
 
         按点位数而不是按地址数：`SourceStore.cleared()` 数的是地址，一个 uint64 点被接管
@@ -675,7 +683,8 @@ class Session:
             # 只补到 `pt.span` 为止——补到别处就是 A2 那个"一次编辑接管三个点"的事故。
             # 主站写（FC16）不走这条路，也不该走：主站写的是**寄存器**（写到哪就只动哪），
             # 而界面编辑的是**点位**（跨度语义归点表初值管），两种语义不能混。
-            registers = tuple(registers) + (0,) * (pt.span - len(registers))
+            padded = tuple(registers) + (0,) * (pt.span - len(registers))
+            registers = list(padded)
         try:
             # 走 `call` 而不是裸 `submit(...).result()`：超时时 `call` 会把引擎线程当时的
             # 栈帧带进消息。界面上"点了没反应"和"引擎卡在写 4x5 这一帧"是两种完全不同的
@@ -787,8 +796,10 @@ class Session:
         for sink in sinks:
             try:
                 sink(event)
-            except Exception:                        # noqa: BLE001
-                pass    # 一个 widget 回调炸了不许带停别的订阅者，也不许带停通道
+            except Exception as exc:                 # noqa: BLE001
+                # 一个 widget 回调炸了不许带停别的订阅者，也不许带停通道——但**不许没有
+                # 痕迹**（见 `swallow.py`）：留一本账，界面/用例都能问"吞过什么"。
+                swallow.note(self.swallowed, exc, f"sink {sink!r}")
 
     def _on_engine_event(self, event: object) -> None:
         self._publish(event)

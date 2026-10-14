@@ -15,7 +15,11 @@ import pytest
 
 from simbench.csv_io_entry import load_point_table
 from simbench.project.model import (
-    Device, Point, Project, SerialChannel, TcpChannel,
+    Device,
+    Point,
+    Project,
+    SerialChannel,
+    TcpChannel,
 )
 from simbench.project.validate import error_lines, validate_project
 

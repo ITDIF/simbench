@@ -11,7 +11,10 @@
 from __future__ import annotations
 
 from ..project.model import channel_transport
-from .modbus_base import BackendStartError
+
+# 再导出给调用方（`engine/session`、`__main__` 都从这里 import）：`as` 成同一个名字是
+# 显式声明「我是给外面用的」，不是漏删的 import（ruff 的 F401 也认这个写法）。
+from .modbus_base import BackendStartError as BackendStartError
 from .modbus_rtu import ModbusRtuBackend
 from .modbus_tcp import ModbusTcpBackend
 from .s7_server import S7Backend

@@ -1,0 +1,61 @@
+# CI：把"本地能跑"变成"别人也能验"。
+#
+# 口径（2026-10-14 深度审查 O5）：
+# * **静态检查先跑**（几秒钟）：它挡掉的那类错（未定义的名字、没用的 import、可疑的 except）
+#   比一条用例失败便宜得多，所以放在最前面；
+# * **全量用例跑在 windows runner 上**：这个工具重度依赖 Windows（`net/` 那层是 ctypes +
+#   ROOT\NET），Ubuntu 上只能跑一半——跑一半的门禁比没有更糟（会给人"绿的"错觉）；
+# * **打包只在打 tag 时跑**：两分钟以上，日常分支不值得等；
+# * **冻结包的冒烟（`packaging/smoke.py`）不在这里跑**：它要真端口 + 真主站，GUI 那两条还要
+#   桌面会话；留在 `docs/superpowers/notes/2026-10-13-manual-checklist.md` 的人工清单里。
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check
+      - run: mypy
+
+  test:
+    runs-on: windows-latest
+    env:
+      # 无头跑 Qt：几何断言在 offscreen 下是可信的（见 tests/conftest.py 的说明）
+      QT_QPA_PLATFORM: offscreen
+      # 绝不自动去改机器上的网卡（口径见 simbench/net/startup.py）
+      SIMBENCH_NET_AUTO: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      # **串行**跑：这套用例绑真实临时端口，两份并行结果不可信（spec §13）
+      - run: python -m pytest -q
+
+  package:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: .\packaging\build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simbench-windows
+          path: dist/

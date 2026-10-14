@@ -1,5 +1,6 @@
 # tests/test_codec_32bit.py
 import pytest
+
 from simbench.codec.point_codec import decode, encode
 
 V = 0x12345678          # A=0x12 B=0x34 C=0x56 D=0x78
@@ -39,7 +40,6 @@ def test_int32_out_of_range():
         encode(2**31, "int32", "ABCD")
 
 def test_float32_rejects_nan_and_inf():
-    import math
     for bad in (float("nan"), float("inf")):
         with pytest.raises(ValueError, match="float32"):
             encode(bad, "float32", "ABCD")

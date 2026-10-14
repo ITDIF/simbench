@@ -6,6 +6,7 @@ import pytest
 from pymodbus.constants import ExcCodes
 from pymodbus.simulator import DataType, SimDevice
 from pymodbus.simulator.simcore import SimCore
+
 from simbench.backend import simdev
 from simbench.backend.events import ChannelState, LogLine, PacketEvent, PointChanged
 from simbench.backend.simdev import area_to_index, build_sim_devices, simdata_for_point

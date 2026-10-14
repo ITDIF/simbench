@@ -7,13 +7,20 @@ import pytest
 
 from simbench.project import validate
 from simbench.project.model import (
-    DATATYPES, Device, Point, Project, TcpChannel, WAVEFORMS, word_orders_allowed,
+    DATATYPES,
+    WAVEFORMS,
+    Device,
+    Point,
+    Project,
+    TcpChannel,
+    word_orders_allowed,
 )
 from simbench.project.validate import Issue, error_lines, validate_project
 
 
 def _p(**kw):
-    base = dict(name="p", area="hr", address=0, datatype="uint16", initial="0")
+    base = {"name": "p", "area": "hr", "address": 0, "datatype": "uint16",
+            "initial": "0"}
     base.update(kw)
     return Point(**base)
 
@@ -294,9 +301,9 @@ def test_word_order_errors_follow_the_model_allow_list():
 
 def test_single_register_group_is_derived_from_the_model():
     """_SINGLE 手抄一份类型名就是第二份真相（同裁决 M 对 codec._NUMERIC 的要求）。"""
-    assert validate._SINGLE == {d for d in DATATYPES
-                                if d != "string" and word_orders_allowed(d) == ("ABCD",)}
-    assert validate._SINGLE == {"bool", "int16", "uint16", "reg16"}
+    assert {d for d in DATATYPES
+                                if d != "string" and word_orders_allowed(d) == ("ABCD",)} == validate._SINGLE
+    assert {"bool", "int16", "uint16", "reg16"} == validate._SINGLE
     assert "string" not in validate._SINGLE       # string 填错字序是 error，不是 warning
 
 

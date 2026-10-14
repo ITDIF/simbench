@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from pymodbus.simulator import DataType, SimData, SimDevice
 from pymodbus.simulator.simcore import SimCore
+
 from simbench.backend.raw_writer import RawRegisterWriter
 
 

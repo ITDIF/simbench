@@ -10,8 +10,17 @@ import json
 
 import pytest
 
-from simbench.net.spec import (DEFAULT_PORT, DeviceNet, NetworkSpec, companion_path,
-                               load, load_companion, loads, save, unique_addresses)
+from simbench.net.spec import (
+    DEFAULT_PORT,
+    DeviceNet,
+    NetworkSpec,
+    companion_path,
+    load,
+    load_companion,
+    loads,
+    save,
+    unique_addresses,
+)
 from simbench.net.state import NetError
 
 

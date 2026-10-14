@@ -101,7 +101,7 @@ class DeviceTree(QtWidgets.QTreeWidget):
         menu = self._menu_for(item)
         return [] if menu is None else menu.actions()
 
-    def contextMenuEvent(self, event) -> None:                # noqa: N802
+    def contextMenuEvent(self, event) -> None:
         # `event.pos()` 是**控件**坐标，而 `itemAt` 吃的是**视口**坐标，中间必须过
         # `mapFrom`：少了这一步，表头那 20 来像素的偏移会把命中位置整体下移——点通道行
         # 的上半截什么都不会弹（实测：第 0 行的中心点落回去是 None）。`point_table` 里

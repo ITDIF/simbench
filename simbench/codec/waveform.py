@@ -12,8 +12,15 @@ import os
 import random as _random
 
 from ..project.model import (
-    BOOL, DATATYPES, FLOAT32, FLOAT64, STRING, WAVEFORMS,
-    _FLOAT_LIMIT, _INT_BOUNDS, brief,
+    _FLOAT_LIMIT,
+    _INT_BOUNDS,
+    BOOL,
+    DATATYPES,
+    FLOAT32,
+    FLOAT64,
+    STRING,
+    WAVEFORMS,
+    brief,
 )
 
 

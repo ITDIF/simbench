@@ -13,14 +13,14 @@
 import pytest
 from PySide6 import QtWidgets
 
+from simbench.backend.events import PacketEvent
+from simbench.engine.packets import PacketStore
 from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Row, Session
 from simbench.gui.channel_panel import STATUS_LABELS, ChannelPanel
+from simbench.gui.packet_view import PacketModel
 from simbench.gui.point_props import PointPropertiesDialog
 from simbench.gui.point_table import COLUMNS, _display
-from simbench.engine.packets import PacketStore
-from simbench.gui.packet_view import PacketModel
-from simbench.backend.events import PacketEvent
 from simbench.project.model import Device, Point, Project, S7Channel, TcpChannel
 
 
@@ -224,10 +224,9 @@ def test_the_table_shows_the_bit_so_two_bools_in_one_byte_look_different(qapp):
     不带位显示的话两行一模一样——写对了也看不出右键的是哪一个（数字不撒谎，但少一位
     就等于没写）。
     """
-    from PySide6 import QtWidgets as _W
+    from simbench.engine.point_source import session_source
     from simbench.engine.session import Session
     from simbench.gui.point_table import ADDRESS_COLUMN, PointTableModel
-    from simbench.engine.point_source import session_source
     project = Project(channels=[S7Channel("s7-1", devices=[
         Device("D1", 11, [point("起", "db1", 6, "bool", "false", bit=2),
                           point("停", "db1", 6, "bool", "false", bit=3),

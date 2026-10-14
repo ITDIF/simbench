@@ -49,9 +49,20 @@ from dataclasses import dataclass
 from PySide6 import QtWidgets
 
 from ..project.csv_io import format_wave_param, parse_wave_param
-from ..project.model import (AREAS, BOOL, DATATYPES, S7_AREAS, S7_TYPES, WAVEFORMS,
-                             WORD_ORDERS, Point, brief_name, channel_transport,
-                             parse_s7_area, word_orders_allowed)
+from ..project.model import (
+    AREAS,
+    BOOL,
+    DATATYPES,
+    S7_AREAS,
+    S7_TYPES,
+    WAVEFORMS,
+    WORD_ORDERS,
+    Point,
+    brief_name,
+    channel_transport,
+    parse_s7_area,
+    word_orders_allowed,
+)
 from ..project.validate import error_lines, validate_project
 from .point_table import NO_CONVENTION, conventional
 

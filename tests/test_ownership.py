@@ -54,24 +54,24 @@ def evt(fc: int, raw: bytes, unit: int = 11) -> PacketEvent:
 
 def test_fc06_write_one_register_is_read_as_that_address():
     # tid=0001 unit=0B fc=06 addr=0004 value=0058
-    assert write_targets(evt(6, bytes.fromhex("000100000006" "0b" "06" "0004" "0058"))) \
+    assert write_targets(evt(6, bytes.fromhex("0001000000060b0600040058"))) \
         == [(11, "hr", 4, 1)]
 
 
 def test_fc16_write_multiple_expands_over_the_count():
-    raw = bytes.fromhex("00010000000b" "0b" "10" "0005" "0004" "08")
+    raw = bytes.fromhex("00010000000b0b100005000408")
     assert write_targets(evt(16, raw)) == [(11, "hr", 5, 4)]
 
 
 def test_fc05_and_fc15_land_on_the_coil_area():
-    assert write_targets(evt(5, bytes.fromhex("000100000006" "0b" "05" "0000" "ff00"))) \
+    assert write_targets(evt(5, bytes.fromhex("0001000000060b050000ff00"))) \
         == [(11, "co", 0, 1)]
-    assert write_targets(evt(15, bytes.fromhex("000100000009" "0b" "0f" "0003" "0005" "01"))) \
+    assert write_targets(evt(15, bytes.fromhex("0001000000090b0f0003000501"))) \
         == [(11, "co", 3, 5)]
 
 
 def test_reads_and_unknown_frames_are_not_writes():
-    assert write_targets(evt(3, bytes.fromhex("000100000005" "0b" "03" "0000" "0002"))) is None
+    assert write_targets(evt(3, bytes.fromhex("0001000000050b0300000002"))) is None
     assert write_targets(evt(0, b"\x00")) is None
     assert write_targets(PacketEvent("tcp-5020", "tx", b"", 11, 6, "", 0.0)) is None  # 只认 rx
 
@@ -236,17 +236,17 @@ def test_offsets_match_the_frames_a_real_pymodbus_master_puts_on_the_wire():
     都在 `body[5]`，而 count 取的是 `body[3:5]`。
     """
     assert write_targets(through_the_sink(
-        bytes.fromhex("000100000006" "0B050000" "FF00"))) == [(11, "co", 0, 1)]
+        bytes.fromhex("0001000000060B050000FF00"))) == [(11, "co", 0, 1)]
     assert write_targets(through_the_sink(
-        bytes.fromhex("000200000006" "0B060004" "0058"))) == [(11, "hr", 4, 1)]
+        bytes.fromhex("0002000000060B0600040058"))) == [(11, "hr", 4, 1)]
     assert write_targets(through_the_sink(
-        bytes.fromhex("000300000008" "0B0F00030005" "011F"))) == [(11, "co", 3, 5)]
-    fc16_four = bytes.fromhex("00040000000F" "0B1000050004" "080001000200030004")
+        bytes.fromhex("0003000000080B0F00030005011F"))) == [(11, "co", 3, 5)]
+    fc16_four = bytes.fromhex("00040000000F0B1000050004080001000200030004")
     assert write_targets(through_the_sink(fc16_four)) == [(11, "hr", 5, 4)]
-    fc16_two = bytes.fromhex("00050000000B" "0B1000000002" "0400010002")
+    fc16_two = bytes.fromhex("00050000000B0B10000000020400010002")
     assert write_targets(through_the_sink(fc16_two)) == [(11, "hr", 0, 2)]
     assert write_targets(through_the_sink(
-        bytes.fromhex("000600000006" "0B030000" "0002"))) is None       # 读报文不是写
+        bytes.fromhex("0006000000060B0300000002"))) is None       # 读报文不是写
 
 
 def test_the_slaves_own_write_response_is_not_a_write():
@@ -258,9 +258,9 @@ def test_the_slaves_own_write_response_is_not_a_write():
     `own()`，从站每答一次写就把刚被写的点标成"主站写过"——响应里没有任何字段能分辨，
     所以 `direction == "rx"` 不是防御性检查，是唯一的判据。
     """
-    coil_response = bytes.fromhex("000100000006" "0B050000" "FF00")
-    register_response = bytes.fromhex("000200000006" "0B060004" "0058")
-    fc16_response = bytes.fromhex("00AA00000006" "0B100005" "0004")
+    coil_response = bytes.fromhex("0001000000060B050000FF00")
+    register_response = bytes.fromhex("0002000000060B0600040058")
+    fc16_response = bytes.fromhex("00AA000000060B1000050004")
     for raw in (coil_response, register_response, fc16_response):
         assert write_targets(through_the_sink(raw, direction="tx")) is None
     assert write_targets(through_the_sink(fc16_response)) == [(11, "hr", 5, 4)]
@@ -273,7 +273,7 @@ def test_an_exception_response_is_never_a_write_target():
     那就等于把"功能码看起来像写"这件事交给了调用方；这里是调用方，所以两个方向都断言：
     tx 走方向守卫，而假装的 rx 走长度守卫（异常响应的 PDU 只有 fc+码 2 字节）。
     """
-    exception = bytes.fromhex("000400000003" "0B" "90" "02")
+    exception = bytes.fromhex("0004000000030B9002")
     assert write_targets(through_the_sink(exception, direction="tx")) is None
     assert write_targets(through_the_sink(exception)) is None
 
@@ -286,12 +286,12 @@ def test_a_quantity_of_zero_is_not_a_write():
     必须在报文识别这层就挡掉，不许留给状态去猜。
     """
     assert write_targets(through_the_sink(
-        bytes.fromhex("000100000007" "0B100005" "0000" "00"))) is None
+        bytes.fromhex("0001000000070B100005000000"))) is None
     assert write_targets(through_the_sink(
-        bytes.fromhex("000200000007" "0B0F0003" "0000" "00"))) is None
+        bytes.fromhex("0002000000070B0F0003000000"))) is None
     # 对照：06 的那个 0 是**值**不是数量，寄存器照样被写
     assert write_targets(through_the_sink(
-        bytes.fromhex("000300000006" "0B060004" "0000"))) == [(11, "hr", 4, 1)]
+        bytes.fromhex("0003000000060B0600040000"))) == [(11, "hr", 4, 1)]
 
 
 def test_a_quantity_beyond_the_protocol_maximum_is_not_a_write():
@@ -304,15 +304,15 @@ def test_a_quantity_beyond_the_protocol_maximum_is_not_a_write():
     `test_a_split_rx_chunk_is_read_never_later_than_the_full_frame`）。
     """
     assert write_targets(through_the_sink(
-        bytes.fromhex("000100000006" "0B" "10" "0005" "007C"))) is None      # qty=124
+        bytes.fromhex("0001000000060B100005007C"))) is None      # qty=124
     assert write_targets(through_the_sink(
-        bytes.fromhex("000100000006" "0B" "10" "0005" "FFFF"))) is None      # qty=65535
+        bytes.fromhex("0001000000060B100005FFFF"))) is None      # qty=65535
     assert write_targets(through_the_sink(
-        bytes.fromhex("000100000006" "0B" "0F" "0003" "07B1"))) is None      # qty=1969
+        bytes.fromhex("0001000000060B0F000307B1"))) is None      # qty=1969
     assert write_targets(through_the_sink(
-        bytes.fromhex("000100000006" "0B" "10" "0005" "007B"))) == [(11, "hr", 5, 123)]
+        bytes.fromhex("0001000000060B100005007B"))) == [(11, "hr", 5, 123)]
     assert write_targets(through_the_sink(
-        bytes.fromhex("000100000006" "0B" "0F" "0003" "07B0"))) == [(11, "co", 3, 1968)]
+        bytes.fromhex("0001000000060B0F000307B0"))) == [(11, "co", 3, 1968)]
 
 
 def test_a_split_rx_chunk_is_read_never_later_than_the_full_frame():
@@ -323,8 +323,8 @@ def test_a_split_rx_chunk_is_read_never_later_than_the_full_frame():
     在同一帧的下一片再到时重复标一次，`_manual` 是 set，同一个 key 加两次无害；反过来
     若为了等完整帧而漏标，就是"平台下发被波形顶回去"那次事故。
     """
-    without_quantity = bytes.fromhex("00AA0000000F" "0B100005")
-    with_quantity = bytes.fromhex("00AA0000000F" "0B1000050004")
+    without_quantity = bytes.fromhex("00AA0000000F0B100005")
+    with_quantity = bytes.fromhex("00AA0000000F0B1000050004")
     assert write_targets(through_the_sink(without_quantity)) is None
     assert write_targets(through_the_sink(with_quantity)) == [(11, "hr", 5, 4)]
 
@@ -339,8 +339,8 @@ def test_a_chunk_that_stops_inside_the_fixed_pdu_is_not_a_write():
     残包）。FC16 只到数量**高字节**的那片同理，剩下那半个字节会被读成一个像模像样的小数量。
     最后一条对照是给"别把这道闸改严"用的：补上值字段那 2 字节就是合法帧，照旧得认。
     """
-    half_fc06 = bytes.fromhex("00AA00000006" "0B060004")          # 10B：值字段还没到
-    partial_fc16 = bytes.fromhex("00AA0000000F" "0B10000502")     # 11B：qty 只到了高字节
+    half_fc06 = bytes.fromhex("00AA000000060B060004")          # 10B：值字段还没到
+    partial_fc16 = bytes.fromhex("00AA0000000F0B10000502")     # 11B：qty 只到了高字节
     assert write_targets(through_the_sink(half_fc06)) is None
     assert write_targets(through_the_sink(partial_fc16)) is None
     assert write_targets(through_the_sink(half_fc06 + b"\x00\x58")) == [(11, "hr", 4, 1)]
@@ -353,8 +353,8 @@ def test_a_chunk_that_carries_two_frames_reads_as_the_first_one_only():
     而 sink 只收到一条记录。要条条被接管，切帧是调用方（Task 3 的 sink）按 MBAP 的 length
     做的事；在这里扫整个 buffer 等于把"这是几条报文"的判断从后端抢过来，两头都测不动。
     """
-    two_frames = bytes.fromhex("00B100000006" "0B060004" "0099"
-                               "00B200000006" "0B060005" "0088")
+    two_frames = bytes.fromhex("00B1000000060B0600040099"
+                               "00B2000000060B0600050088")
     assert write_targets(through_the_sink(two_frames)) == [(11, "hr", 4, 1)]
 
 

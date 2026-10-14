@@ -4,8 +4,13 @@ import pytest
 
 from simbench.project import csv_io, model
 from simbench.project.csv_io import (
-    HEADER, format_wave_param, parse_wave_param, read_csv, read_csv_file,
-    write_csv, write_csv_file,
+    HEADER,
+    format_wave_param,
+    parse_wave_param,
+    read_csv,
+    read_csv_file,
+    write_csv,
+    write_csv_file,
 )
 from simbench.project.model import Device, Point, Project, TcpChannel
 from simbench.project.validate import error_lines, validate_project

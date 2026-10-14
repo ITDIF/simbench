@@ -1,6 +1,10 @@
 """S7 探针 v5：register_area 的 index 到底是 DB 号还是 WordLen？能不能挂两个 DB？"""
-import ctypes, time
-from snap7 import client as s7client, server as s7server, types
+import ctypes
+import time
+
+from snap7 import client as s7client
+from snap7 import server as s7server
+from snap7 import types
 
 PORT = 1106
 buf = (ctypes.c_ubyte * 64)()

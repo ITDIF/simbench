@@ -405,7 +405,6 @@ def apply_theme(app: QtWidgets.QApplication | None = None,
 
     用户主动切模式走 `set_mode()`，那条路是允许重新落一遍的。
     """
-    global _mode
     target = app if app is not None else QtWidgets.QApplication.instance()
     if target is None:                      # 无头 CLI 不建 QApplication，这里什么都不做
         return _mode or mode or resolve_mode()

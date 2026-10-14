@@ -12,8 +12,7 @@ import copy
 import pytest
 
 from simbench.project import edit
-from simbench.project.model import (Device, Point, Project, S7Channel, SerialChannel,
-                                    TcpChannel)
+from simbench.project.model import Device, Point, Project, S7Channel, SerialChannel, TcpChannel
 from simbench.project.validate import error_lines, validate_project
 
 

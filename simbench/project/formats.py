@@ -20,8 +20,8 @@
 from __future__ import annotations
 
 import pathlib
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from . import csv_io, json_io, xlsx_io
 from .model import Project

@@ -70,11 +70,13 @@ class LogFile:
         self.broken: str = ""
         self._handle: IO[str] | None = None
 
-    def open(self) -> "LogFile":
+    def open(self) -> LogFile:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._rotate_if_too_big()
-            self._handle = open(self.path, "a", encoding="utf-8", buffering=1)
+            # 句柄要活到进程结束（faulthandler 写的就是它），所以不能用 with
+            self._handle = open(self.path, "a", encoding="utf-8",  # noqa: SIM115
+                                buffering=1)
         except OSError as exc:
             self.broken = f"{self.path}: cannot open the log file ({exc})"
         return self

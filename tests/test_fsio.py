@@ -13,12 +13,11 @@
 
 from __future__ import annotations
 
-import os
 import pathlib
 
 import pytest
 
-from simbench.project import csv_io, formats, fsio, json_io, xlsx_io
+from simbench.project import csv_io, formats, fsio
 from simbench.project.model import Device, Point, Project, TcpChannel
 
 

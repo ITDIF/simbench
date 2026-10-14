@@ -13,8 +13,8 @@ import pytest
 
 from simbench.csv_io_entry import load_point_table
 from simbench.gui import dialogs
-from simbench.project import csv_io, formats, json_io, xlsx_io
-from simbench.project.model import Project, TcpChannel, Device, Point
+from simbench.project import csv_io, formats, xlsx_io
+from simbench.project.model import Device, Point, Project, TcpChannel
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")

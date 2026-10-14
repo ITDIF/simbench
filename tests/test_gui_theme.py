@@ -20,7 +20,7 @@ import pathlib
 import re
 
 import pytest
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui
 
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore

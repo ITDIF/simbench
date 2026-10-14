@@ -5,8 +5,18 @@ from __future__ import annotations
 import struct
 
 from ..project.model import (
-    BOOL, DATATYPES, FLOAT32, FLOAT64, STRING, WORD_ABCD, WORD_ORDERS,
-    brief, parse_value, register_span, struct_format, word_orders_allowed,
+    BOOL,
+    DATATYPES,
+    FLOAT32,
+    FLOAT64,
+    STRING,
+    WORD_ABCD,
+    WORD_ORDERS,
+    brief,
+    parse_value,
+    register_span,
+    struct_format,
+    word_orders_allowed,
 )
 
 # 类型清单的唯一真相在 model.DATATYPES：手抄一份漂移过一次就会变成 codec 反过来报

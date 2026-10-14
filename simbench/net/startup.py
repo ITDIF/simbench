@@ -30,11 +30,10 @@ from pathlib import Path
 from ..project.model import channel_transport
 from . import endpoints as netendpoints
 from . import spec as netspec
-from .device import (MANAGED_ADAPTER_NAME, find_managed_adapter, inf_available,
-                     loopback_inf_path)
+from .device import MANAGED_ADAPTER_NAME, find_managed_adapter, inf_available, loopback_inf_path
 from .ledger import Ledger
 from .plan import foreign_owners, plan_addresses
-from .state import NetError, read_addresses, read_adapters, read_all_addresses
+from .state import NetError, read_adapters, read_addresses, read_all_addresses
 
 # 启动挂钩的总闸。空值=开；`0/no/off/false/none` 都算关（写哪种都认，免得为个字面量吵架）。
 AUTO_ENV = "SIMBENCH_NET_AUTO"
@@ -95,7 +94,7 @@ def prepare(point_table, *, apply: bool = True, project=None) -> list[str]:
             + _unmatched_line(declaration, project)
     except NetError as exc:
         return [f"网络准备失败：{exc}；模拟照常启动"]
-    except Exception as exc:
+    except Exception as exc:               # noqa: BLE001
         # 这里**故意**兜到 Exception，是全局唯一一处：网络这一步永远不许把模拟器拦在门外。
         # 没预料到的异常（缺 DLL、PowerShell 被策略挡掉、账本文件权限）也只该损失这条提示，
         # 不该让整个工具起不来；真出问题时上面那句原话会把异常点名，不吞成静默。
@@ -130,9 +129,9 @@ def status(point_table, project=None) -> list[str]:
     try:
         # 第一行报"这份声明在哪"：现场最常见的问题是"我改的那份"和"它在看的那份"不是
         # 同一个文件（点表被复制过、声明放在别处），而这在差异清单里看不出来。
-        return ([f"声明：{netspec.companion_path(point_table)}"]
-                + _prepare(Path(point_table), desired, apply=False)
-                + _unmatched_line(declaration, project))
+        return [f"声明：{netspec.companion_path(point_table)}",
+                *_prepare(Path(point_table), desired, apply=False),
+                *_unmatched_line(declaration, project)]
     except NetError as exc:
         return [f"网络读不出来：{exc}"]
 
@@ -212,11 +211,11 @@ def _prepare(point_table: Path, desired: list[tuple[str, int]], apply: bool) -> 
     # 一个都加不上时不做提权：`net up` 也加不上（同一个 IP 不能同时挂两块网卡），
     # 弹一次 UAC 只换来一句失败，不如直接说是谁占着。
     if not [ip for ip in plan.to_add if ip not in blocked]:
-        return [f"网络对不上：{adapter.label}"] + plan.summary() + occupied
+        return [f"网络对不上：{adapter.label}", *plan.summary(), *occupied]
 
     if not apply:
-        return [f"网络待处理：{adapter.label}"] + plan.summary() + occupied + [
-            _command(point_table)]
+        return [f"网络待处理：{adapter.label}", *plan.summary(), *occupied,
+                _command(point_table)]
 
     return _report(apply_up(point_table), f"网络已就绪：{adapter.label}")
 
@@ -235,7 +234,7 @@ def _report(result: tuple[int, list[str]], ready: str) -> list[str]:
     if code == 0:
         return lines or [ready]
     # `net up` 的部分成功（有几个地址加不上）也是回 2：把它的原话留下，再补一句"接下来去哪看"。
-    return lines + ["网络没完全配好；模拟照常启动，可用 `python -m simbench net show` 看现状"]
+    return [*lines, "网络没完全配好；模拟照常启动，可用 `python -m simbench net show` 看现状"]
 
 
 def _command(point_table: Path) -> str:

@@ -14,6 +14,7 @@ import signal
 import sys
 
 from .backend import BackendStartError, UnsupportedTransportError, make_backend
+from .__about__ import __version__
 from .csv_io_entry import load_point_table
 from .project.model import channel_transport, s7_summary, serial_summary
 from .project.validate import error_lines, validate_project
@@ -59,7 +60,7 @@ def _print_table(channel) -> None:
         print(f"  device {dev.name} (unit {dev.unit_id})")
         for pt in dev.points:
             print(f"    {pt.area:<3} {pt.address:<5} {pt.datatype:<8} "
-                  f"{pt.word_order:<5} {str(pt.initial):<12} "
+                  f"{pt.word_order:<5} {pt.initial!s:<12} "
                   f"{'RO' if pt.readonly else '  '} {pt.name}")
 
 
@@ -90,7 +91,7 @@ def _prepare_network(point_table: str | None, project=None) -> None:
     """
     if not point_table:
         return
-    from .net.startup import prepare     # 延迟 import：`net` 那条子命令自己不碰点表解析
+    from .net.startup import prepare  # 延迟 import：`net` 那条子命令自己不碰点表解析
 
     # `project` 一起交下去：自动配网按通道类型过滤（纯串口工程不配设备 IP，
     # 见 `net/startup._tcp_endpoints`）。
@@ -198,6 +199,10 @@ def main(argv: list[str] | None = None) -> int:
         from .net.cli import main as net_main
         return net_main(argv[1:])
     parser = argparse.ArgumentParser(prog="python -m simbench")
+    # 版本号的**唯一**来源是 `simbench/__about__.py`；`packaging/version_info.txt`
+    # （exe 属性页那一份）由 `tests/test_version.py` 钉着与它一致。
+    parser.add_argument("--version", action="version",
+                        version=f"simbench {__version__}")
     parser.add_argument("point_table", nargs="?",
                         help="CSV 或 project.json（只给 --gui 时可以省略，装载留给界面）")
     parser.add_argument("--host", default=None)

@@ -134,7 +134,7 @@ class ChannelForm(QtWidgets.QWidget):
         self.second_edit = QtWidgets.QLineEdit()
         self.third_edit = QtWidgets.QLineEdit()
         self.labels = []
-        for offset, (label, edit_widget, width) in enumerate((
+        for offset, (_label, edit_widget, width) in enumerate((
                 ("通道名", self.name_edit, _FIELD_WIDTH),
                 ("", self.first_edit, _FIELD_WIDTH),
                 ("", self.second_edit, _SHORT_WIDTH),

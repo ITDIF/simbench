@@ -106,6 +106,31 @@ S7 侧另加一种点位类型 `s7string`（真 S7 STRING：前两字节 最大/
 * 新增用例：`tests/test_rows_pump.py` 9 条、`tests/test_performance.py` 4 条、
   `test_gui_packet_view.py` 补 5 条（差集通知 / 选中跟序号 / 换过滤器仍 reset）。
 
+### B3　工程化（O5 / O8 / O9 / O12）· 已完成
+
+* `pyproject.toml`（新）：ruff 只开"有便宜收益"的规则（E4/E7/E9、F、I、B、BLE、C4、SIM、UP、
+  RUF、PLW、RET、ISC），行宽/全角标点/三元这些"风格偏好"一律关（中文注释密集的仓库里那些
+  只会制造噪音）；mypy 只覆盖 `project/`、`codec/`、`engine/` 三棵子树，`follow_imports=silent`
+  把 backend/net 留在闸门外（理由写在配置里）。
+* 125 条 ruff 发现全部处理完（`ruff check` 现在是 **All checks passed**）：193 条是机械修复
+  （import 顺序、没用的 import、`noqa` 用错），剩下的是真东西——**`ModbusTcpServer` 这个
+  未定义的名字**（`modbus_base` 的注解）、`net/cli` 里两个解包错位的变量、`validate._points`
+  少一个显式 return、`session.manual_count` 的返回类型漏了 `| None`、`row cache` 的键、
+  以及 S7 专用的 `read_point_bytes` 在基类上补成显式钩子（原来只有 S7 后端有，静态检查看得见）。
+* mypy 从 42 条降到 **0 条**（三棵子树）：默认值表标 `dict[str, Any]`、`_points` 的内层键改
+  `(区, 地址, 位)`、`runner` 的 `thread.ident` 可能为 `None`、`csv_io` 里 `wanted` 标成三种
+  通道的联合类型。
+* `simbench/swallow.py`（新）+ 两处投递/通知路径改用它记账（`runner.swallowed` /
+  `session.swallowed`），窗口心跳把第一笔报一次（`_report_swallowed`）。
+* 版本：`simbench/__about__.py` 是唯一来源，`--version` 报它，`packaging/version_info.txt`
+  由 `tests/test_version.py` 钉着与它一致，新增 `CHANGELOG.md`（含 1.0.0 这一版的内容）。
+* 依赖：运行时与开发依赖**全部钉到实测版本**（含 `ruff==0.17.0` / `mypy==2.4.0`），新增
+  `requirements.lock.txt`（`pip freeze` 原文，连传递依赖）+ `packaging/lock.ps1` 重新生成，
+  `tests/test_requirements.py` 补两条（`==` 到底 / 锁文件与它不打架）。
+* `.github/workflows/ci.yml`（新）：lint（ruff + mypy）→ test（windows + offscreen 全量）→
+  打包（只在打 tag 时）。冻结冒烟留在人工清单里（要桌面会话）。
+* 新增用例：`tests/test_version.py` 4 条、`tests/test_swallow.py` 4 条、`test_gui_log.py` 补 1 条。
+
 ## 4. 验收口径
 
 * 每一批：全量串行 `.venv\\Scripts\\python.exe -m pytest`（`QT_QPA_PLATFORM=offscreen`、

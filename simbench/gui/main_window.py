@@ -29,9 +29,8 @@ import gc
 import pathlib
 import time
 
-from PySide6 import QtGui, QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
-from .. import diagnostics
 from ..engine import ports
 from ..engine.point_source import pumped_source
 from ..engine.rows_pump import RowsPump
@@ -45,11 +44,19 @@ from .bridge import EngineBridge
 from .channel_panel import ChannelPanel
 from .device_tree import DeviceTree
 from .dialogs import (
-    IssueDialog, ProjectFileError, choose_offset, export_table_path, format_issues,
-    import_table, open_project, read_point_table, save_project_as, save_project_to,
+    IssueDialog,
+    ProjectFileError,
+    choose_offset,
+    export_table_path,
+    format_issues,
+    import_table,
+    open_project,
+    read_point_table,
+    save_project_as,
+    save_project_to,
 )
-from .new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
 from .net_panel import NetPanel
+from .new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
 from .packet_view import PacketPanel
 from .point_props import STRUCTURAL_FIELDS, PointPropertiesDialog
 from .point_table import COLUMNS, PointTableModel, PointTableView
@@ -375,7 +382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channels.rebuild(project)
         self.store.clear()
         self._path = pathlib.Path(path) if path else None
-        self._states = {name: "stopped" for name in names}
+        self._states = dict.fromkeys(names, "stopped")
         self._dirty_shown = self.session.dirty
         self._shown_error = ""
         for note in notes:
@@ -884,6 +891,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- 心跳与事件 ----------
 
     def _tick(self) -> None:
+        self._report_swallowed()
         self.point_model.refresh()
         self.packet_panel.refresh_view()
         self._surface_edit_error()
@@ -904,6 +912,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._next_collect = now + _GC_EVERY_S
         gc.collect()
+
+    def _report_swallowed(self) -> None:
+        """把"通知路径上吞掉的异常"报一次（见 `simbench/swallow.py`）。
+
+        为什么要报：一个正在抛的订阅者回调（比如某次重绘炸了）在旧写法下**一点痕迹都没有**
+        ——表现是"界面有时候不跟着变了"，而日志里干干净净。这里只在第一次报，10Hz 的路径上
+        不许刷屏；之后再吞仍然记账（`count` 会涨，状态栏那一句里带着次数）。
+        """
+        for book in (self.session.swallowed, self.session.runner.swallowed):
+            if book.count and not getattr(book, "reported", False):
+                book.reported = True                     # 挂在账本上：换工程也不重复报
+                self._log(f"[warning] {book.summary()}")
 
     def _surface_edit_error(self) -> None:
         """把表格模型的拒绝理由搬到屏幕上：只有那一格变色等于没告诉操作员为什么。"""
@@ -1020,7 +1040,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 另存为里按了取消：改动一片都没落盘，这时候放动作继续就是静默丢数据
         return path is not None
 
-    def closeEvent(self, event) -> None:                # noqa: N802
+    def closeEvent(self, event) -> None:
         if not self._confirm_discard():
             event.ignore()
             return

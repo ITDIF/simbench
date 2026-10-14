@@ -5,9 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .model import (
-    AREAS, BOOL, DATATYPES, S7_MAX_DB, S7_TYPES, SERIAL_MARK, STRING, WAVEFORMS,
-    WORD_ABCD, WORD_ORDERS, S7Channel, SerialChannel, area_is_bit, brief, brief_name,
-    channel_transport, parse_s7_area, register_span, s7_area_name, s7_span_bytes,
+    AREAS,
+    BOOL,
+    DATATYPES,
+    S7_MAX_DB,
+    S7_TYPES,
+    SERIAL_MARK,
+    STRING,
+    WAVEFORMS,
+    WORD_ABCD,
+    WORD_ORDERS,
+    S7Channel,
+    SerialChannel,
+    area_is_bit,
+    brief,
+    brief_name,
+    channel_transport,
+    parse_s7_area,
+    register_span,
+    s7_area_name,
+    s7_span_bytes,
     word_orders_allowed,
 )
 
@@ -243,7 +260,8 @@ def _points(channel, dev, issues: list[Issue]) -> None:
     但同一个模型里保持一套规则，免得"哪条通道要填 unit"变成看传输猜的事）。
     """
     if channel_transport(channel) == "s7":
-        return _points_s7(channel, dev, issues)
+        _points_s7(channel, dev, issues)
+        return
     channel_name = channel.name
     used: dict[tuple[str, int], str] = {}
     for pt in dev.points:

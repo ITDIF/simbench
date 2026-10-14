@@ -24,8 +24,7 @@ from dataclasses import dataclass
 from PySide6 import QtGui, QtWidgets
 
 from ..backend.events import ChannelState
-from ..project.model import (S7_DEFAULTS, channel_transport, format_frame,
-                             parse_frame)
+from ..project.model import channel_transport, format_frame, parse_frame
 from . import theme
 
 # 四态的文案共用一个定宽槽（88px）：主题把正文字号提到 10pt 之后 offscreen 实测最长的
@@ -344,4 +343,4 @@ class ChannelPanel(QtWidgets.QWidget):
 
     def _refuse(self, message: str) -> None:
         self.last_error = message
-        return None
+        return

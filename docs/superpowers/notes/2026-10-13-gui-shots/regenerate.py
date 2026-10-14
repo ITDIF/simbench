@@ -18,12 +18,11 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 sys.path.insert(0, str(ROOT))
 
-from PySide6 import QtCore                                       # noqa: E402
+from PySide6 import QtCore  # noqa: E402
 
-from simbench.gui import app as app_module                       # noqa: E402
-from simbench.gui.new_project import (AddChannelDialog,          # noqa: E402
-                                      AddDeviceDialog, NewProjectDialog)
-from simbench.project import edit                                 # noqa: E402
+from simbench.gui import app as app_module  # noqa: E402
+from simbench.gui.new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog  # noqa: E402
+from simbench.project import edit  # noqa: E402
 
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
 

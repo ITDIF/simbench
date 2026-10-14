@@ -1046,7 +1046,8 @@ def test_restoring_puts_the_point_back_under_the_waveform(session):
     async def _step() -> int:            # `runner.call` 只收协程工厂，与 `_arestore` 同形
         return backend._tick_once(0.0)
 
-    tick = lambda: session._runner.call(_step, 10, "test tick")
+    def tick():
+        return session._runner.call(_step, 10, "test tick")
     try:
         assert session.set_point("tcp-5020", 11, "hr", 4, "5").ok
         tick()
@@ -1069,7 +1070,8 @@ def test_restore_on_a_stopped_channel_is_a_named_refusal_not_an_attribute_error(
     lines: list[LogLine] = []
     session.subscribe(lambda e: isinstance(e, LogLine) and lines.append(e))
     assert session.restore_waveform("tcp-5020", 11, "hr", 4, None) is False
-    assert any("not running" in l.text and "风机状态" in l.text for l in lines), lines
+    assert any("not running" in line.text and "风机状态" in line.text
+               for line in lines), lines
 
 
 def test_rows_reads_the_whole_table_in_one_cross_thread_call(session, monkeypatch):
