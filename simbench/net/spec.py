@@ -26,6 +26,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..project import fsio
 from .state import NetError
 
 DEFAULT_PREFIX = 24
@@ -119,7 +120,8 @@ def save(spec: NetworkSpec, path: str | Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     body = {"adapter_name": spec.adapter_name or None,
             "devices": [d.to_json() for d in spec.devices]}
-    target.write_text(json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8")
+    # 与点表/工程同一条路：临时文件 + 原子替换 + 一份 `.bak`
+    fsio.write_text_atomic(target, json.dumps(body, ensure_ascii=False, indent=1))
     return target
 
 

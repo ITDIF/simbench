@@ -22,16 +22,19 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import gc
 import pathlib
 import time
 
 from PySide6 import QtGui, QtCore, QtWidgets
 
+from .. import diagnostics
 from ..engine import ports
 from ..engine.point_source import session_source
 from ..project import edit, formats
 from ..project.csv_io import port_from_name
+from ..project.fsio import write_text_atomic
 from ..project.model import channel_transport
 from ..project.validate import Issue, error_lines, validate_project
 from . import theme
@@ -72,7 +75,13 @@ _STATUS_ORDER = ("running", "stopped", "error", "starting")
 class MainWindow(QtWidgets.QMainWindow):
     """组装层：只做接线与呈现，判定全部留在 engine/project 那一份里。"""
 
-    def __init__(self, session, store, project=None) -> None:
+    def __init__(self, session, store, project=None, log_file=None) -> None:
+        """`log_file` 是这次的**证据落点**（`simbench/diagnostics.py` 那份会话日志）。
+
+        默认 `None` = 不落盘：用例构造窗口时不该往用户的 `%LOCALAPPDATA%` 里写文件；
+        真实入口（`gui/app.py::build_app`）会装好崩溃钩子并把同一份 `LogFile` 递进来。
+        界面上"另存日志"那个按钮两条路都能用（它导出的是**窗里**的文本）。
+        """
         super().__init__()
         # 主题只落这一次（构造期）：运行期再动 setStyleSheet 会让 Qt 重新 polish，
         # sizeHint 有机会跟着变——那正是"状态一变布局就跳"的另一种写法（见 theme 模块）。
@@ -80,6 +89,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowIcon(theme.app_icon())
         self.session = session
         self.store = store
+        self.log_file = log_file
         self.bridge = EngineBridge()
         self.point_model = PointTableModel()
         self.tree = DeviceTree()
@@ -170,20 +180,33 @@ class MainWindow(QtWidgets.QMainWindow):
         return view
 
     def _build_log_tab(self, view: QtWidgets.QPlainTextEdit) -> QtWidgets.QWidget:
-        """日志页：只读框 + 一个"清空"。
+        """日志页：只读框 + "另存日志" + "清空"。
 
-        为什么要有它：报文页有"清除"，日志页没有——而只读框里**没有任何办法自己清掉**
+        "清空"为什么要有：报文页有"清除"，日志页没有——而只读框里**没有任何办法自己清掉**
         （光标选不中内容、`delete` 没用）。5 万行上限只保证它不会无限涨，不保证"现在这一屏
-        我不想要了"能擦掉。按钮靠右，与报文页那一排同侧。
+        我不想要了"能擦掉。
+
+        "另存日志"为什么要有（2026-10-14 深度审查）：日志只在窗里，关窗即失；而现场报问题
+        时最需要的就是"把刚才那段发我"。它导出的是**窗里**的文本（含 `_log` 收到的一切），
+        与 `%LOCALAPPDATA%\\simbench\\logs` 里那份会话日志互为备份（后者连崩溃都在）。
+        两个按钮都是定宽槽：切状态只改文字，宽度不动（界面口径 4）。
         """
         host = QtWidgets.QWidget()
         rows = QtWidgets.QVBoxLayout(host)
         rows.setContentsMargins(4, 4, 4, 4)
         bar = QtWidgets.QHBoxLayout()
         bar.addStretch(1)
+        self.act_save_log = QtWidgets.QPushButton("另存日志")
+        self.act_save_log.setFixedWidth(76)          # "另存日志" 四个中文字（实测 60px）+ 余量
+        tip = "把日志窗里的内容另存成一份文本文件"
+        if self.log_file is not None:
+            tip += f"；本次会话的日志也在 {self.log_file.path}"
+        self.act_save_log.setToolTip(tip)
+        self.act_save_log.clicked.connect(self._save_log)
+        bar.addWidget(self.act_save_log)
         self.act_clear_log = QtWidgets.QPushButton("清空")
         self.act_clear_log.setFixedWidth(64)
-        self.act_clear_log.setToolTip("清掉日志窗里的内容（只影响这一屏，不写盘）")
+        self.act_clear_log.setToolTip("清掉日志窗里的内容（只影响这一屏；会话日志文件不受影响）")
         self.act_clear_log.clicked.connect(view.clear)
         bar.addWidget(self.act_clear_log)
         rows.addLayout(bar)
@@ -904,7 +927,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shown_error = ""
 
     def _log(self, text: str) -> None:
+        """写一行到日志页，**同时**落进会话日志文件（装了才有）。
+
+        两处一起写是刻意的：窗里那份给人看（还能"清空"、能另存），文件那份给"事后查"
+        （崩溃钩子写的也是它）。只写窗里的话，关窗之后什么都没了。
+        """
         self.log_view.appendPlainText(text)
+        if self.log_file is not None:
+            self.log_file.append(text)
+
+    def _save_log(self) -> None:
+        """把日志窗里的文本另存成一份文件（回执给现场"把这段发我"用）。"""
+        suggested = f"simbench-log-{dt.date.today().isoformat()}.txt"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "另存日志", suggested, "文本文件 (*.txt);;所有文件 (*)")
+        if not path:
+            return
+        try:
+            # 不备份：这是**导出**一份给别人的文件，旁边再躺一个 .bak 只是噪音
+            write_text_atomic(path, self.log_view.toPlainText(), backup=False)
+        except OSError as exc:
+            self._log(f"[error] 另存日志失败：{exc}")
+            self.status.showMessage("另存日志失败，原因见日志页", _NOTICE_MS)
+            return
+        self._log(f"[info] 已导出日志 -> {path}")
+        self.status.showMessage("日志已导出", _NOTICE_MS)
 
     def _summary(self) -> str:
         if not self._states:
@@ -960,6 +1007,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.timer.stop()
         self.session.shutdown()
+        if self.log_file is not None:
+            # 收工前把缓冲刷下去：崩溃钩子写的是同一个文件，句柄留着也无妨，但关窗之后
+            # 不该再有人往它里面写（这个进程的日志到此为止）。
+            self.log_file.append(f"==== simbench closed "
+                                 f"{dt.datetime.now().isoformat(timespec='seconds')} ====")
+            self.log_file.close()
         event.accept()
 
 

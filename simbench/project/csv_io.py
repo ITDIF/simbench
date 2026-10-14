@@ -10,6 +10,7 @@ import csv
 import io
 from pathlib import Path
 
+from . import fsio
 from .model import (
     Device, Point, Project, S7_DEFAULTS, S7_TYPES, SERIAL_DEFAULTS, SERIAL_MARK,
     S7Channel, SerialChannel, TcpChannel, BOOL_TOKENS, brief, channel_transport,
@@ -120,7 +121,12 @@ def write_csv(project: Project) -> str:
 
 
 def write_csv_file(project: Project, path: Path) -> None:
-    Path(path).write_text(write_csv(project), encoding="utf-8", newline="")
+    """CSV 落盘：走 `fsio`（临时文件 + 原子替换 + 一份 `.bak`）。
+
+    `newline=""` 是**必须**的：`write_csv` 的行尾已经钉死 `\n`，再让平台翻译一次就成了
+    `\r\n`，"同一份工程在两台机器上产出不同字节"（见 `write_csv` 的说明）。
+    """
+    fsio.write_text_atomic(path, write_csv(project), newline="")
 
 
 def parse_wave_param(text: str) -> dict[str, str]:

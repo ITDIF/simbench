@@ -152,6 +152,38 @@ def test_our_own_xlsx_export_writes_such_values_as_text(tmp_path):
 
 
 
+
+def test_xlsx_says_when_it_ignored_the_other_worksheets(tmp_path):
+    """多于一张工作表：只读第一张，但**要说出来**——现场的表常带"参数页""历史页"。
+
+    选哪张表是现场的约定问题（计划里"不做"那一段写了），但"我忽略了另外两张"不该是秘密：
+    与"端口按名字尾数猜了要说""表头不在第一行要说"是同一条口径。
+    """
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    first = workbook.active
+    first.title = "点表"
+    for row in rows(example()):
+        first.append(list(row))
+    other = workbook.create_sheet("参数")
+    other.append(["这一页不是点表"])
+    target = tmp_path / "sheets.xlsx"
+    workbook.save(target)
+
+    project, notes = formats.read_project(target)
+    assert rows(project) == rows(example()), "第一张表的内容读错了"
+    assert any("只读了第一张「点表」" in note and "参数" in note for note in notes), notes
+    assert xlsx_io.sheet_names(target) == ["点表", "参数"]
+
+
+def test_xlsx_says_nothing_about_sheets_when_there_is_only_one(tmp_path):
+    """只有一张表时不许无话找话：note 是给"与预期不同"用的，正常形状一句都不说。"""
+    target = tmp_path / "one.xlsx"
+    formats.write_project(example(), target)
+    _project, notes = formats.read_project(target)
+    assert not any("工作表" in note for note in notes), notes
+
 # ---------- 命令行那一路 ----------
 
 def test_the_command_line_entry_loads_an_xlsx_too(tmp_path):

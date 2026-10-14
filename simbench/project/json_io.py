@@ -6,6 +6,7 @@ import json
 from dataclasses import MISSING, fields
 from pathlib import Path
 
+from . import fsio
 from .model import (BOOL, S7_DEFAULTS, SERIAL_DEFAULTS, Device, Point, Project,
                     S7Channel, SerialChannel, TcpChannel, brief, channel_transport,
                     parse_value)
@@ -260,7 +261,8 @@ def from_dict(data: dict) -> Project:
 
 
 def save(project: Project, path: Path) -> None:
-    Path(path).write_text(to_json(project) + "\n", encoding="utf-8")
+    """工程落盘：走 `fsio` 的原子替换（写一半断电不许把工程废掉）。"""
+    fsio.write_text_atomic(path, to_json(project) + "\n")
 
 
 def load(path: Path) -> Project:

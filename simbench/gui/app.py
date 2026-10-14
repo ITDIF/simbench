@@ -10,6 +10,12 @@
 网络那一层（`net/startup.py`）反过来是"该自动就自动"：装载点表之后按旁边那份声明把
 网卡对一遍，结论一行进状态栏、几行进 stdout。它只报话，不改退出码，也不会拦着开窗。
 
+**证据落点**在开窗之前装好（`simbench/diagnostics.py`，2026-10-14 深度审查）：界面版 exe
+是无控制台构建，`sys.stdout/stderr` 是 `None`，任何未捕获异常本来**没有落点**——现场只能
+看到"窗口一闪就没了"。装完后崩溃日志、Qt 警告、日志页的每一行都进
+`%LOCALAPPDATA%\\simbench\\logs\\simbench-<日期>.log`（可用 `SIMBENCH_LOG_DIR` 改）。
+装不上不拦开窗（日志是证据，不是功能），只是窗口里会说一句为什么。
+
 GC 归 GUI 线程（这里关掉自动回收，破环交给 `MainWindow._maybe_collect`）：见 spec §13
 那条跨线程 `~QWidget` 死锁。无头 CLI 不碰 Qt，不受影响。
 """
@@ -21,6 +27,8 @@ import sys
 
 from PySide6 import QtWidgets
 
+from .. import diagnostics
+from ..__about__ import __version__
 from ..csv_io_entry import load_point_table
 from ..engine.packets import PacketStore
 from ..engine.session import Session
@@ -61,7 +69,13 @@ def build_app(argv: list[str] | None = None):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(argv or [])
     store = PacketStore()
     session = Session(packet_store=store)
-    window = MainWindow(session, store)
+    # 先装证据落点，再建窗：窗口构造期炸的那一类也要能落盘
+    log_file = diagnostics.install_crash_handlers(version=__version__)
+    window = MainWindow(session, store, log_file=log_file)
+    if log_file is None:
+        window._log("[warning] 这次的日志没有落盘（见启动时的提示）：崩溃与日志只在窗口里")
+    else:
+        window._log(f"[info] 本次会话的日志写在 {log_file.path}")
     args = list(argv if argv is not None else sys.argv[1:])
     if args:
         project, notes, issues = load_point_table(args[0])

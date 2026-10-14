@@ -16,6 +16,11 @@
 一条**已知代价**（写在这里免得现场当成 bug）：Excel 的数值只有 15 位有效数字，17 位的
 uint64（`72623859790382856`）**存不精确**。我们这边读写是逐字的（XML 里就是那串数字），
 但用户一旦在 Excel 里改过那一格再存，精度就没了——要传这种值用 CSV 或 `project.json`。
+
+**只读第一张工作表**（2026-10-14 起不再默默这么做）：现场的表常带"参数页""历史页"，
+`sheet_rows` 只认第一张，所以多于一张时 `read_xlsx_file` 会**给一条 note** 把被忽略的
+工作表名报出来——"选哪张表"是现场的约定问题（见计划里"不做"那一段），但"我忽略了另外两张"
+不该是个秘密。这条与点表这边"猜了要说"（端口按名字尾数猜、表头不在第一行）是同一条口径。
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import io
 import math
 import pathlib
 
-from . import csv_io
+from . import csv_io, fsio
 
 # Excel 里数值只有 15 位有效数字；超过这个位数的整数不当数字写（免得 Excel 一存就变），
 # 与"只在 str(值) 与原文逐字相同才按数字写"是同一条口径的两半。
@@ -127,6 +132,16 @@ def _header_index(rows: list[list[str]]) -> int | None:
     return None
 
 
+def sheet_names(path) -> list[str]:
+    """这份工作簿里所有工作表的**名字**（按 Excel 里的顺序）。只读元信息，不碰单元格。"""
+    openpyxl = _openpyxl()
+    workbook = openpyxl.load_workbook(pathlib.Path(path), read_only=True)
+    try:
+        return [sheet.title for sheet in workbook.worksheets]
+    finally:
+        workbook.close()
+
+
 def read_xlsx_file(path, *, ports: dict[str, int] | None = None, address_offset: int = 0,
                    with_notes: bool = False):
     """`.xlsx` -> 与 `csv_io.read_csv` **完全同形**的返回值（默认 Project，`with_notes` 才带 notes）。"""
@@ -142,6 +157,10 @@ def read_xlsx_file(path, *, ports: dict[str, int] | None = None, address_offset:
                                      with_notes=True)
     if index:
         notes.insert(0, f"表头在第 {index + 1} 行，前面 {index} 行按标题跳过")
+    names = sheet_names(path)
+    if len(names) > 1:
+        notes.append(f"这张工作簿有 {len(names)} 张工作表，只读了第一张「{names[0]}」，"
+                     f"其余按忽略处理：{', '.join(names[1:])}")
     notes.extend(precision)
     return (project, notes) if with_notes else project
 
@@ -158,7 +177,12 @@ def _as_text(rows: list[list[str]], leading_blank_lines: int = 0) -> str:
 
 
 def write_xlsx_file(project, path) -> None:
-    """工程 -> `.xlsx`：行形状与 CSV 完全一致（`csv_io.rows_of`），表头冻结、列给个够用的宽度。"""
+    """工程 -> `.xlsx`：行形状与 CSV 完全一致（`csv_io.rows_of`），表头冻结、列给个够用的宽度。
+
+    落盘走 `fsio.write_atomic`（临时文件 + 原子替换 + 一份 `.bak`）：openpyxl 的
+    `save()` 也吃文件对象（它内部是 `zipfile.ZipFile(fileobj)`），所以这一路和 CSV/JSON
+    同一份保险——覆盖到一半崩掉，现场那份 Excel 还是旧的那一份。
+    """
     openpyxl = _openpyxl()
     rows = csv_io.rows_of(project)
     workbook = openpyxl.Workbook()
@@ -169,7 +193,7 @@ def write_xlsx_file(project, path) -> None:
     sheet.freeze_panes = "A2"                        # 表头冻住：几十行往下翻还看得见列名
     for column, width in zip(sheet.columns, _COLUMN_WIDTHS):
         sheet.column_dimensions[column[0].column_letter].width = width
-    workbook.save(pathlib.Path(path))
+    fsio.write_atomic(path, workbook.save, binary=True)
 
 
 # 列宽只求"打开就能看"：够装下列名与常见内容，不追求与界面表格一致
