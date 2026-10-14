@@ -169,7 +169,7 @@ def dirty_table(qapp, tmp_path):
 def test_a_row_with_an_unknown_area_still_renders_every_column(dirty_table):
     """`4x` 是一行里唯一**算出来**的格子，它抛就等于整行抛。
 
-    `_display` 一次构造整行，而 `data()` 不管被问哪一列都会把那一行整个算一遍——实测
+    `4x` 那一格是按区现算的（`conventional` 会抛），而 `data()` 一格一格地问——实测
     修法之前 10 列全报 `ValueError: unknown area 'holding'`，Qt 只能把那一行画成空白：
     "改完再启动"这条路断在表格里，而不是断在属性面板里（面板那一侧上一轮已经给了 `—`）。
     算不出就给 `—`（与 `_update_convention` 同一个标记），一个字都不猜。

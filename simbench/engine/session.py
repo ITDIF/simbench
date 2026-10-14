@@ -133,9 +133,17 @@ class Session:
         self._points: dict[tuple[str, int], dict[tuple[str, int], Point]] = {}
         self._rows_meta: dict[str, list[tuple[int, str, Point]]] = {}
         self._dirty = False
+        # `_render` 的记忆化（见 `_render_cached`）：键里带渲染相关的全部输入，值里带
+        # "这份文案是按哪一串寄存器算出来的"。`_rebuild_index_locked` 会清空它。
+        self._render_cache: dict[tuple, tuple] = {}
         # "整批回读超时"那条错只报一次（每 100ms 一条能把日志窗刷干净，而"表全是灰的"本身
         # 就是看得见的信号）。见 `_snapshot_for`。
         self._read_failed = False
+        self._closed = False
+        # 结构版本号：`_rebuild_index_locked` 每跑一次就 +1（装载 / 改结构 / 增删通道）。
+        # 给"按节拍取数"的那一层（`rows_pump`）一个**便宜且可靠**的失效判据——光比工程
+        # 对象身份认不出"同一份对象被原地改了结构"（界面增删点位走的正是那条路）。
+        self._revision = 0
         self._runner.subscribe(self._on_engine_event)
         if packet_store is not None:
             # 必须包这一层 isinstance：Session 的事件流里除 PacketEvent 还有 ChannelState，
@@ -262,6 +270,21 @@ class Session:
     @property
     def dirty(self) -> bool:
         return self._dirty
+
+    @property
+    def revision(self) -> int:
+        """结构版本号：装载、改点位结构、增删通道都会 +1（只增不减）。"""
+        with self._lock:
+            return self._revision
+
+    @property
+    def closed(self) -> bool:
+        """这个 Session 已经收工（`shutdown()` 过了）。
+
+        给后台泵那类"自己按节拍取数"的东西看的：对着一个已经停掉的 runner 继续取值，
+        每跳都会留一条错误——那是"日志把工具拖死"的另一种写法。
+        """
+        return self._closed
 
     def mark_dirty(self) -> None:
         self._dirty = True
@@ -405,6 +428,7 @@ class Session:
         实测加上界面用例之后全量套件从 20 秒涨到 8 分钟，就是这个 O(历史窗口数) 的扇出。
         """
         self.stop_all()                       # 先把 stopped 状态发完，界面还听得见
+        self._closed = True
         self._runner.unsubscribe(self._on_engine_event)
         with self._lock:
             self._sinks.clear()
@@ -436,12 +460,44 @@ class Session:
         for unit_id, device, pt in meta:
             entry = snapshot.get((unit_id, pt.area, pt.address, pt.bit))
             regs, failed, waveform = entry if entry is not None else (None, True, True)
-            value_text, registers = _render(pt, regs, transport)
-            out.append(Row(channel, device, unit_id, pt.name, pt.area, pt.address,
-                           pt.datatype, pt.word_order, value_text, registers,
-                           pt.readonly, pt.waveform, stale=failed and running,
-                           source="waveform" if waveform else "manual", bit=pt.bit))
+            out.append(self._row_cached(channel, device, unit_id, pt, regs, failed,
+                                        waveform, running, transport))
         return out
+
+    def _row_cached(self, channel: str, device: str, unit_id: int, pt: Point, regs,
+                    failed: bool, waveform: bool, running: bool, transport: str) -> Row:
+        """造一行，**输入没变就把上一跳那一行原样还回去**。
+
+        为什么连 `Row` 一起缓存（实测）：光缓存"解码后的文案"只省掉三分之一的成本——
+        4000 行的表上，剩下那一大截是"每跳新建 4000 个 frozen dataclass"。这些字段全是
+        `(点位元信息, 寄存器, 归属, 在不在跑)` 的纯函数，所以这四样没变时复用上一跳那个对象
+        是安全的；模型那边靠 `==` 比行（frozen dataclass 逐字段比），同一批对象回来等于
+        一次都不重画。
+
+        代价是"复用同一个对象"这件事必须成立：`Row` 是 frozen 的（没人能就地改它），
+        `_rebuild_index_locked` 换工程/改结构时清空整张缓存（不会把上一份工程的行带给新的）。
+
+        **键必须带上一行的全部输入**——不只是身份与寄存器。第一版只带了
+        (身份, 类型, 字序, 初值)，于是"在属性面板里改个名字"这类 **live 改动**（不改结构、
+        不重建索引）会读到上一跳那个旧名字的 `Row`：表里一行都没变，看着像没生效
+        （由 `test_a_live_only_apply_from_the_menu_says_next_tick_not_restart` 逮住）。
+        名字 / 只读 / 波形都是 `Point` 上可以原地改的字段，所以它们都进键。
+        """
+        key = (channel, device, unit_id, transport, pt.area, pt.address, pt.bit, pt.name,
+               pt.datatype, pt.word_order, pt.initial, pt.readonly, pt.waveform)
+        cached = self._render_cache.get(key)
+        if cached is not None:
+            was_regs, was_failed, was_waveform, was_running, row = cached
+            if (was_regs == regs and was_failed == failed and was_waveform == waveform
+                    and was_running == running):
+                return row
+        value_text, registers = _render(pt, regs, transport)
+        row = Row(channel, device, unit_id, pt.name, pt.area, pt.address,
+                  pt.datatype, pt.word_order, value_text, registers,
+                  pt.readonly, pt.waveform, stale=failed and running,
+                  source="waveform" if waveform else "manual", bit=pt.bit)
+        self._render_cache[key] = (regs, failed, waveform, running, row)
+        return row
 
     def _snapshot_for(self, runtime, meta, transport: str, channel: str) -> dict:
         """整批快照（寄存器 + 归属）在引擎线程上取一次；超时/失败就交回空表。
@@ -776,6 +832,8 @@ class Session:
         `load()` 与 `reindex()` 共用这一份摊平逻辑——两份键的构造迟早漂移，漂了的
         表现是"按新地址写值被挡在不在点表里"。调用方持锁。
         """
+        self._render_cache = {}          # 换工程/改结构：旧文案一律不许留
+        self._revision += 1              # 结构变了：按节拍取数的那一层据此重新取
         self._points = {}
         self._rows_meta = {ch.name: [] for ch in self._project.channels}
         for ch in self._project.channels:

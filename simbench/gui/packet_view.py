@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+import bisect
+
 from PySide6 import QtCore, QtWidgets
 
 from ..engine.packets import ALL, FILTERS, PacketStore
@@ -36,12 +38,27 @@ _QWIDGETSIZE_MAX = 16777215
 
 
 class PacketModel(QtCore.QAbstractTableModel):
-    """只读的一列表格模型。行数变了才 reset，否则逐行 dataChanged。"""
+    """只读的一列表格模型。**按顺序号做差集**：只通知真变了的那一段。
+
+    原来两种形状都贵（2026-10-14 实测）：行数变了就 `beginResetModel`（选中行与键盘位置
+    每 100ms 被清一次），行数不变而环形缓冲整体前移就逐行 `dataChanged`（缓冲满时 5000 行/
+    跳，实测 65.6ms 一跳，占掉主线程三分之二的预算）。两条都源于旧写法"只能按位置比内容"。
+
+    现在按 `PacketEvent.seq` 算差集——顺序号由 `PacketStore` 严格递增地发，而缓冲只在一头
+    淘汰、另一头追加，所以"我这边少了哪一段、多了哪一段"用 `bisect` 就能算出来，分别发
+    `rowsRemoved` / `rowsInserted`。选中行跟着**序号**走：内容前移不会再把选中项带跑
+    （旧写法下那件事表现成"选中第 3000 行看的是另一帧"）。
+    """
 
     def __init__(self, store: PacketStore) -> None:
         super().__init__()
         self._store = store
         self._rows: list = []
+        self._seqs: list[int] = []
+        self._view_filter = store.active_filter
+        # 差集对不上的次数（有人绕过 store 直接改缓冲之类）：退回整表 reset，并留个计数，
+        # 免得"悄悄变成每次都全表重画"没人发现。
+        self.mismatched_syncs = 0
 
     def rowCount(self, parent=QtCore.QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -75,23 +92,45 @@ class PacketModel(QtCore.QAbstractTableModel):
         return base | QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
 
     def sync(self) -> int:
-        """把 store 的当前视图搬进模型。返回重画了多少行。"""
+        """把 store 的当前视图搬进模型。返回这一跳动了多少行。
+
+        差集算不出来的两种情况直接整表 reset：**过滤器变了**（视图不再是同一份缓冲的子集）
+        与**缓冲被清过**（我这边整批都是旧的）。其余情况都只发增量通知。
+        """
         fresh = self._store.rows()
-        if len(fresh) != len(self._rows):
-            # 行数只能 reset：追加/环形淘汰/清除都会让"同一行换成了另一帧"
-            self.beginResetModel()
-            self._rows = list(fresh)
-            self.endResetModel()
-            return len(fresh)
-        changed = 0
-        for i, new in enumerate(fresh):
-            if new is self._rows[i]:
-                continue
-            self._rows[i] = new
-            self.dataChanged.emit(self.index(i, 0),
-                                  self.index(i, self.columnCount() - 1))
-            changed += 1
-        return changed
+        if self._view_filter != self._store.active_filter:
+            self._view_filter = self._store.active_filter
+            return self._reset(fresh)
+        if not fresh or not self._rows or self._seqs[-1] < fresh[0].seq:
+            # 空视图 / 还没有过内容 / 缓冲被清过：整批换掉
+            return self._reset(fresh)
+        fresh_seqs = [event.seq for event in fresh]
+        dropped = bisect.bisect_left(self._seqs, fresh_seqs[0])
+        added = len(fresh_seqs) - bisect.bisect_right(fresh_seqs, self._seqs[-1])
+        if dropped + (len(fresh_seqs) - added) != len(self._rows):
+            # 对不上就不许硬套（那会把整表错位一行）：退回 reset，并记一笔
+            self.mismatched_syncs += 1
+            return self._reset(fresh)
+        if dropped:
+            self.beginRemoveRows(QtCore.QModelIndex(), 0, dropped - 1)
+            del self._rows[:dropped]
+            del self._seqs[:dropped]
+            self.endRemoveRows()
+        if added:
+            first = len(self._rows)
+            self.beginInsertRows(QtCore.QModelIndex(), first, first + added - 1)
+            self._rows.extend(fresh[len(fresh) - added:])
+            self._seqs.extend(fresh_seqs[len(fresh_seqs) - added:])
+            self.endInsertRows()
+        return dropped + added
+
+    def _reset(self, fresh) -> int:
+        """整表换掉（条目集合本身变了，按位置的差集没有意义）。"""
+        self.beginResetModel()
+        self._rows = list(fresh)
+        self._seqs = [event.seq for event in fresh]
+        self.endResetModel()
+        return len(self._rows)
 
 
 class PacketPanel(QtWidgets.QWidget):

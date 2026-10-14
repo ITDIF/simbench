@@ -2,6 +2,8 @@
 """主窗：工具栏 + 上栏（通道面板 / 左树右表） + 下标签页（报文监视、日志、网络） + 状态栏。
 
 刷新是**拉的**：10Hz 心跳调 `point_model.refresh()` 与 `packet_panel.refresh_view()`。
+点位表的**取数**交给后台泵（`engine/rows_pump.py`）：心跳那一跳只把最近一份快照搬进模型，
+不再等引擎回话；需要"此刻的真值"的地方（改完属性、用例）调 `refresh_rows_now()`。
 引擎侧不推 UI（M2 定的口径），实测 200 行一次 `dataChanged` 只要 0.34ms，所以不做得
 增量 diff，也不做虚拟滚动。
 
@@ -31,7 +33,8 @@ from PySide6 import QtGui, QtCore, QtWidgets
 
 from .. import diagnostics
 from ..engine import ports
-from ..engine.point_source import session_source
+from ..engine.point_source import pumped_source
+from ..engine.rows_pump import RowsPump
 from ..project import edit, formats
 from ..project.csv_io import port_from_name
 from ..project.fsio import write_text_atomic
@@ -90,6 +93,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session = session
         self.store = store
         self.log_file = log_file
+        # 点位表的取数挪到后台（见 `engine/rows_pump.py`）：主线程那一跳只做模型 diff，
+        # 不再等引擎回话——4000 点的表上一次 16ms，卡在心跳里就是 37% 的主线程预算。
+        self.rows_pump = RowsPump(session)
+        self.rows_pump.start()
         self.bridge = EngineBridge()
         self.point_model = PointTableModel()
         self.tree = DeviceTree()
@@ -360,7 +367,7 @@ class MainWindow(QtWidgets.QMainWindow):
         names = self.session.channel_names()
         self.tree.rebuild(project)
         if names:
-            self.point_model.attach(session_source(self.session))
+            self.point_model.attach(pumped_source(self.rows_pump))
         else:
             # 一条通道都没有：表必须是**空的**，不许留着上一份的行（那是在演一份不存在的点表）
             self.point_model.detach()
@@ -625,7 +632,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current = keep or self.point_model.channel()
         self.tree.rebuild(project)
         if names:
-            self.point_model.attach(session_source(self.session), current)
+            self.point_model.attach(pumped_source(self.rows_pump), current)
         else:
             self.point_model.detach()
         self.channels.rebuild(project)
@@ -842,7 +849,9 @@ class MainWindow(QtWidgets.QMainWindow):
         changes = dialog.applied
         if changes is None:
             return                                   # 取消或整体被拒：什么都没发生
-        self.point_model.refresh()
+        # 改了属性就**同步取一次**：改名这类"只动 live 字段"的改动不改结构，泵的缓存不会
+        # 自动作废——只 `refresh()` 的话表里还是旧名字（一行都没变，看着像没生效）。
+        self.refresh_rows_now()
         count = len(changes)
         structural = set(changes) & set(STRUCTURAL_FIELDS)
         if structural and len(structural) == count:
@@ -923,7 +932,7 @@ class MainWindow(QtWidgets.QMainWindow):
         channel = self.tree.channel_of(current)
         if not channel or channel == self.point_model.channel():
             return
-        self.point_model.attach(session_source(self.session), channel)
+        self.point_model.attach(pumped_source(self.rows_pump), channel)
         self._shown_error = ""
 
     def _log(self, text: str) -> None:
@@ -935,6 +944,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_view.appendPlainText(text)
         if self.log_file is not None:
             self.log_file.append(text)
+
+    def refresh_rows_now(self) -> int:
+        """同步取一次快照再刷表，回改了行数。
+
+        为什么要有它：界面平时读的是泵的缓存（最多晚一个节拍，100ms），但"我刚改完一个值"
+        或"用例要断言引擎此刻的真值"时不能等下一个节拍。**只有明确知道要等的人**才调它——
+        心跳那条路不许调（那正是把界面拖回"跟引擎同节拍"的老样子）。
+        """
+        self.rows_pump.fetch_now()
+        return self.point_model.refresh()
 
     def _save_log(self) -> None:
         """把日志窗里的文本另存成一份文件（回执给现场"把这段发我"用）。"""
@@ -1006,6 +1025,7 @@ class MainWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         self.timer.stop()
+        self.rows_pump.stop()
         self.session.shutdown()
         if self.log_file is not None:
             # 收工前把缓冲刷下去：崩溃钩子写的是同一个文件，句柄留着也无妨，但关窗之后

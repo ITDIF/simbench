@@ -256,6 +256,96 @@ def test_the_table_is_the_elastic_block_not_a_hardcoded_height(panel):
 
 # ---------- 重绘与滚动 ----------
 
+
+# ---------- 差集通知（O4：只通知真变了的那一段）----------
+
+def test_new_packets_arrive_as_an_insert_not_a_reset(panel, store, qapp):
+    """纯追加只发 `rowsInserted`：`beginResetModel` 每 100ms 清一次选中行与键盘位置，
+    操作员在跑流量时根本选不中一条报文（这是用户会当成"卡住"的那类毛病）。"""
+    resets: list[int] = []
+    inserts: list[tuple] = []
+    panel.model.modelReset.connect(lambda: resets.append(1))
+    panel.model.rowsInserted.connect(lambda _p, first, last: inserts.append((first, last)))
+
+    store.add(evt(mono=0.0))
+    panel.refresh_view()
+    assert resets == [1], "第一屏没有内容时本来就该 reset"
+    resets.clear()
+
+    for i in range(1, 6):
+        store.add(evt(mono=float(i)))
+    panel.refresh_view()
+    assert resets == [], "只是追加了几帧，整表被 reset 了"
+    assert inserts == [(1, 5)], inserts
+
+
+def test_a_full_buffer_reports_the_dropped_head_and_the_new_tail(panel, store, qapp):
+    """缓冲写满之后：只报"头上掉了 1 条、尾巴来了 1 条"，**不许**整表重画。
+
+    旧写法在这里逐行发 `dataChanged`（5000 行/跳、实测 65.6ms 一跳），而且内容整体前移，
+    选中行看着"自己变了"。
+    """
+    removed: list[tuple] = []
+    inserts: list[tuple] = []
+    resets: list[int] = []
+    panel.model.rowsRemoved.connect(lambda _p, first, last: removed.append((first, last)))
+    panel.model.rowsInserted.connect(lambda _p, first, last: inserts.append((first, last)))
+    panel.model.modelReset.connect(lambda: resets.append(1))
+
+    for i in range(store.capacity):
+        store.add(evt(mono=float(i)))
+    panel.refresh_view()
+    resets.clear()
+
+    store.add(evt(mono=99.0))
+    panel.refresh_view()
+    assert resets == [], "缓冲写满之后每跳都在整表重画"
+    assert removed == [(0, 0)] and inserts == [(store.capacity - 1, store.capacity - 1)]
+    assert panel.model.rowCount() == store.capacity
+
+
+def test_the_selection_follows_the_event_not_the_row_number(panel, store, qapp):
+    """选中行跟着**那条报文**走：内容前移之后选中的还是同一帧（不是"第 N 行"）。"""
+    for i in range(store.capacity):
+        store.add(evt(mono=float(i)))
+    panel.refresh_view()
+    panel.table.selectRow(2)
+    qapp.processEvents()
+    chosen = panel.model._rows[2]
+
+    store.add(evt(mono=99.0))
+    panel.refresh_view()
+    qapp.processEvents()
+
+    selected = panel.table.selectionModel().selectedRows()
+    assert selected, "选中行被清掉了（每跳 reset 的老毛病）"
+    assert panel.model._rows[selected[0].row()] is chosen, "选中的变成了另一帧"
+
+
+def test_switching_the_filter_still_resets_the_model(panel, store, qapp):
+    """过滤器一换，视图不再是同一份缓冲的子集——那种情况必须整表换（差集算不出来）。"""
+    for i in range(5):
+        store.add(evt(direction="rx" if i % 2 else "tx", mono=float(i)))
+    panel.refresh_view()
+    resets: list[int] = []
+    panel.model.modelReset.connect(lambda: resets.append(1))
+    panel.set_filter(REQUESTS)
+    qapp.processEvents()
+    panel.refresh_view()
+    assert resets == [1], "换过滤器没有整表换：行会串"
+
+
+def test_clearing_the_store_empties_the_model(panel, store, qapp):
+    for i in range(5):
+        store.add(evt(mono=float(i)))
+    panel.refresh_view()
+    assert panel.model.rowCount() == 5
+    panel._on_clear()
+    panel.refresh_view()
+    assert panel.model.rowCount() == 0
+
+
+
 def test_view_refresh_is_throttled_to_one_repaint_per_batch(panel, store, qapp):
     """来一条刷一次太贵；panel 只在 store 通知时打脏标记，由主窗的 10Hz 心跳统一刷。"""
     before = panel.repaint_count

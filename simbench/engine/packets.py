@@ -70,9 +70,14 @@ class PacketStore:
         self._lock = threading.Lock()
         self.capacity = capacity
         self.dropped = 0
+        # 顺序号由**这里**发（唯一一个把事件放进缓冲的地方）：报文窗靠它算差集。
+        self._next_seq = 1
         self.paused = False
         self.active_filter = ALL
         self._listeners: list[Callable[[], None]] = []
+        # 订阅者（重绘那条路）炸了几次 + 最后一次的原话：见 `_notify`（吞掉必须留痕）
+        self.listener_failures = 0
+        self.last_listener_error = ""
 
     def add(self, event: PacketEvent) -> bool:
         """暂停时不落缓冲。返回是否收下——GUI 用它决定要不要重绘。"""
@@ -80,6 +85,8 @@ class PacketStore:
             return False
         with self._lock:
             overflow = len(self._items) == self._items.maxlen
+            event.seq = self._next_seq              # 由缓冲发号：唯一能保证"严格递增"
+            self._next_seq += 1
             self._items.append(event)
             if overflow:
                 self.dropped += 1
@@ -117,5 +124,10 @@ class PacketStore:
         for listener in list(self._listeners):
             try:
                 listener()
-            except Exception:                        # noqa: BLE001
-                pass    # 界面回调炸了不许带停采集；窗口销毁前会自己退订
+            except Exception as exc:                 # noqa: BLE001
+                # 界面回调炸了不许带停采集（那是丢报文的原因），但**不许没有痕迹**：
+                # 原来这里是裸 `pass`，一条正在崩的重绘路径在日志里一个字都没有——
+                # 正是本项目最防的"把出错演成没出错"。只报第一次，免得 10Hz 刷屏。
+                self.listener_failures += 1
+                if self.listener_failures == 1:
+                    self.last_listener_error = f"{type(exc).__name__}: {exc}"

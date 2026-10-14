@@ -32,6 +32,15 @@ def session_source(session: Session) -> PointSource:
     return session
 
 
+def pumped_source(pump) -> PointSource:
+    """`engine/rows_pump.RowsPump` 也是合法数据源：它同样有 `project` / `rows` / `write`。
+
+    界面走的是它（而不是裸 `Session`）：`rows()` 只把**最近一份快照**交出来，取数在后台线程
+    按 100ms 跑，主线程那一跳永远不等引擎。测试与命令行继续用裸 Session（要"取完就是当下"）。
+    """
+    return pump
+
+
 class FakeEngine:
     """内存点位源：写进字典、读回字典；编码校验走真 codec，所以错误路径也是真的。
 

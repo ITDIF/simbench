@@ -109,6 +109,10 @@ def make_window(qapp, engine_runner):
 
     runner 是会话级共享的，`session.shutdown()` 因此只停通道不收线程（归属口径）；
     端口一律换成 `free_port()`，用例不许去抢点表里写死的 5020。
+
+    窗口现在带一条后台取数线程（`RowsPump`）：`_tick()` 只把缓存搬进模型，所以
+    "引擎此刻的真值"要调 `refresh_rows_now()`（见 `test_a_master_write_lands_in_the_table_
+    on_the_next_tick` 那条的说明）。teardown 里 `session.shutdown()` 会让泵自己退场。
     """
     built: list[MainWindow] = []
 
@@ -406,7 +410,12 @@ def test_a_value_written_in_the_table_reaches_a_real_master(window, qapp):
 
 
 def test_a_master_write_lands_in_the_table_on_the_next_tick(window, qapp):
-    """拉模型的正证：主站写完（ACK 已回、datastore 已更新），下一次心跳就该看见。"""
+    """拉模型的正证：主站写完（ACK 已回、datastore 已更新），下一跳就该看见。
+
+    界面平时读的是**后台泵的缓存**（`engine/rows_pump.py`，最多晚一个节拍 100ms）——
+    那是"界面永远不等引擎"的代价。要断言"引擎此刻的真值已经回到表里"，就调
+    `refresh_rows_now()`（它同步取一次再刷表）；心跳那条路只负责把缓存搬进模型。
+    """
     runtime = relaunch(window, window.session.project, qapp)
     port = int(runtime.detail.rpartition(":")[2])
     client = connect(port)
@@ -414,7 +423,7 @@ def test_a_master_write_lands_in_the_table_on_the_next_tick(window, qapp):
         client.write_register(4, 77, device_id=11)
     finally:
         client.close()
-    window._tick()
+    window.refresh_rows_now()
     assert value_of(window, "风机状态") == "77", "主站写入没能在一个心跳内回到表里"
 
 
@@ -516,14 +525,14 @@ def test_triggering_the_restore_command_puts_the_rows_back_under_the_waveform(
     row = row_of(window, "风机状态")
     assert window.point_model.index(row, WAVE_COLUMN).data() == "已停"
     window.point_table.row_menu_actions(row)[0].trigger()
-    window._tick()
+    window.refresh_rows_now()          # 要的是"引擎此刻的归属"，不是缓存里那份
     assert window.point_model.index(row, WAVE_COLUMN).data() == "const", \
         "恢复了而那一行还说 `已停`：命令根本没走到 backend"
     assert window.point_model.index(row_of(window, "启动命令"), WAVE_COLUMN).data() == "已停"
     assert "还剩 1 处" in window.status.currentMessage(), \
         "成功恢复后状态栏没说还剩几处人工接管"
     window.point_table.row_menu_actions(row_of(window, "启动命令"))[0].trigger()
-    window._tick()
+    window.refresh_rows_now()
     assert window.point_model.index(row_of(window, "启动命令"), WAVE_COLUMN).data() == "const"
     assert "全部交还" in window.status.currentMessage()
 

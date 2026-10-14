@@ -19,6 +19,11 @@ class PacketEvent:
     # （`Session._packet_sink` 造的事件）不带这个信息，也不参与接管判定；串口后端在自己
     # 那一路显式给 1（`modbus_base._own_write_frame`）。
     pdu_offset: int = 7
+    # 进缓冲的顺序号（**由 `PacketStore.add` 发**，不是 backend 自己填的）：报文窗靠它做
+    # 差集，只给"新来的那一段"发 `rowsInserted`、只给"被环形缓冲淘汰的那一段"发
+    # `rowsRemoved`。没有它就只能整表比内容——缓冲一满，每跳都要重画 5000 行（实测 /
+    # 65.6ms 一跳），而且**选中行会跟着内容一起漂**（差的是一行，界面看不出差在哪）。
+    seq: int = 0
 
 
 @dataclass

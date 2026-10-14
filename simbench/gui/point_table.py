@@ -304,33 +304,51 @@ class PointTableView(QtWidgets.QTableView):
 
 
 def _display(row: Row, header: str) -> str:
-    # `4x` 是一行里唯一算出来的格子，也是唯一可能算不出来的：带着错装载的行（区名写成
-    # `holding`）在这里会抛，而这个 dict 一次构造**整行**，`data()` 又被问哪一列都走它
-    # ——一抛就是 10 个格子全抛，Qt 把那行画成空白，操作员连"改完再启动"要开的这一行
-    # 都找不到。所以显示层给"算不出"的标记，与点位属性面板 `_update_convention` 同一个
-    # 口径；`conventional` 自己继续抛（它同时是面板的判定入口，那里靠异常区分"算不出"）。
-    # 猜一个前缀或把 `holding` 当 `hr` 才是这里真正的风险：现场会照着假地址对点表。
-    try:
-        convention = conventional(row.area, row.address)
-    except ValueError:
-        convention = NO_CONVENTION
-    return {
+    """一行里**某一格**的显示文案。
+
+    按列直算（2026-10-14 深度审查）：原来这里一次构造整行 10 个键的 dict，而 `data()` 每问
+    一格都要把整行算一遍——10 列 × 可见行 × 10Hz 的字典构造 + 字符串拼接。现在只算被问到的
+    那一格，**语义与兜底一个都没变**（既有那两条"脏表也要每格都读得出来"的用例照旧）。
+
+    `4x`（惯例）是一行里唯一**算出来**的格子，也是唯一可能算不出来的：带着错装载的行
+    （区名写成 `holding`）会让 `conventional` 抛。它只影响自己这一格——给 `—` 标记，
+    不猜前缀、也不替整行做主。判据与点位属性面板 `_update_convention` 同一个标记来源
+    （这里 import 的是同一个模块，不是抄一份）。
+    """
+    if header == "名称":
+        return row.name
+    if header == "区":
+        return row.area
+    if header == "地址":
         # S7 的 bool 把位一起显示（`6.3`）——点表里的写法就是它，同字节上的两个 bool
-        # 不带位在表上长得一模一样（写对了也看不出来右键的是哪一个）。Modbus 的点
-        # `bit` 恒为 None，这一格与以前逐字相同。
-        "名称": row.name, "区": row.area,
-        "地址": f"{row.address}.{row.bit}" if row.bit is not None else str(row.address),
-        CONVENTION_HEADER: convention, "类型": row.datatype,
-        "字序": row.word_order, VALUE_HEADER: row.value_text,
-        # S7 那一列装的其实是**字节**（`Row.registers` 在 S7 通道上是字节序列）：
-        # 按两位十六进制打，别把 0x41 打成 0041——那看着像 16 位寄存器，会把现场带偏。
-        # 判据用 datatype：S7 的类型名（real/word/...）与 Modbus 的（float32/uint16/...）
-        # 不相交，且 validate 强制"类型与传输匹配"，所以这个判据是可靠的。
-        "原始寄存器": " ".join(f"{b:02X}" if row.datatype in S7_TYPES else f"{r:04X}"
-                             for b, r in [(v, v) for v in row.registers]),
+        # 不带位在表上长得一模一样（写对了也看不出来右键的是哪一个）。
+        return f"{row.address}.{row.bit}" if row.bit is not None else str(row.address)
+    if header == CONVENTION_HEADER:
+        try:
+            return conventional(row.area, row.address)
+        except ValueError:
+            return NO_CONVENTION
+    if header == "类型":
+        return row.datatype
+    if header == "字序":
+        return row.word_order
+    if header == VALUE_HEADER:
+        return row.value_text
+    if header == RAW_HEADER:
+        # S7 那一列装的其实是**字节**（`Row.registers` 在 S7 通道上是字节序列）：按两位
+        # 十六进制打，别把 0x41 打成 0041——那看着像 16 位寄存器，会把现场带偏。判据用
+        # datatype：S7 的类型名（real/word/...）与 Modbus 的（float32/uint16/...）不相交，
+        # 且 validate 强制"类型与传输匹配"，所以这个判据可靠。
+        if row.datatype in S7_TYPES:
+            return " ".join(f"{byte:02X}" for byte in row.registers)
+        return " ".join(f"{register:04X}" for register in row.registers)
+    if header == "波形":
         # spec §7：被人工接管的点，波形列显示"已停"而不是波形名——"曲线还在跑"和
         # "这格的值是人/主站写进去的"在排查下发问题时是两个完全不同的答案。
         # 文案占原来那一列，列宽与列序一个都不动（界面口径：装不下改文案，不加宽不截断）。
-        "波形": "已停" if row.source == "manual" else row.waveform,
-        "只读": "是" if row.readonly else "",
-    }[header]
+        return "已停" if row.source == "manual" else row.waveform
+    if header == "只读":
+        return "是" if row.readonly else ""
+    # 列头是这张表自己给的（`data()` 只按 COLUMNS 里的表头问），认不出来是编程错误。
+    # 抛出去而不是回空串：空串会被 Qt 画成"这一格没值"，与真的没值分不开。
+    raise KeyError(f"unknown column header {header!r}")

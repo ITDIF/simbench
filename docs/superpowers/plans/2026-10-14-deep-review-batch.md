@@ -70,6 +70,10 @@ S7 侧另加一种点位类型 `s7string`（真 S7 STRING：前两字节 最大/
   ——3/4 的时间花在"解码 + 造 Row + 造文案"，而不是回读本身。
 * 报文窗（offscreen + 真 `QTableView`，每跳新增 10 帧）：缓冲未满 14.81ms/跳；
   缓冲写满（5000）**65.60ms/跳**（逐行 `dataChanged`）。
+* 优化之后（同一台机器、同一份脚本，2026-10-14 复测）：
+  **4000 点一跳 36.57 → 16.34ms**（其中引擎整批回读 12.98ms；GUI 侧从 25ms 降到 3.4ms）；
+  报文窗写满之后 **65.60 → 14.41ms/跳**（与"未写满"的 14.68ms 持平，那个"写满就掉悬崖"
+  的形状没有了）。
 
 ## 3b. 分批执行记录
 
@@ -84,6 +88,23 @@ S7 侧另加一种点位类型 `s7string`（真 S7 STRING：前两字节 最大/
 * 新增用例：`tests/test_fsio.py`（11 条）、`tests/test_diagnostics.py`（10 条）、
   `tests/test_gui_log.py`（5 条）、`tests/test_formats.py` 补 2 条多工作表。
 * 顺带：`simbench/__about__.py`（版本单一来源的第一块砖，O8 在 B3 收尾）。
+
+### B2　界面刷新（O3 / O4 / O11）· 已完成
+
+* `Session._row_cached`：值没变就把上一跳那个 `Row` **原样还回去**（键里带一行的全部输入：
+  容器名/身份/名字/类型/字序/初值/只读/波形/传输）。`_rebuild_index_locked` 换工程或改结构时
+  清空；`Session.revision` 给出"结构变过没有"。
+  **踩过的坑**：第一版键只带身份与类型，于是"改名字"这类 live 改动读到旧 `Row`
+  （被既有用例 `test_a_live_only_apply_from_the_menu_says_next_tick_not_restart` 逮住），
+  现在有 `test_performance.test_renaming_a_point_rebuilds_that_row` 单独钉住。
+* `engine/rows_pump.py`：后台线程按 100ms 取快照，界面 `rows()` 只读缓存；换通道/工程结构
+  变了/写成功这三条**同步取一次**（不许先空一拍）。失败保留上一份 + 报一次；
+  `Session.closed` 之后自己退场。窗口多了 `refresh_rows_now()`（改完属性、用例要"此刻的真值"）。
+* `packet_view.PacketModel.sync`：按 `PacketEvent.seq`（由 `PacketStore` 发号）做差集，
+  只发 `rowsInserted` / `rowsRemoved`；换过滤器或缓冲被清才 reset。选中行跟着序号走。
+* `point_table._display` 改成**按列直算**（原来每问一格都构造整行 10 键 dict）。
+* 新增用例：`tests/test_rows_pump.py` 9 条、`tests/test_performance.py` 4 条、
+  `test_gui_packet_view.py` 补 5 条（差集通知 / 选中跟序号 / 换过滤器仍 reset）。
 
 ## 4. 验收口径
 

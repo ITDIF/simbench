@@ -289,10 +289,12 @@ def test_event_dataclass_fields_are_the_contract():
 
     # M5 加了 `pdu_offset`（默认 7）：`write_targets` 靠它找 PDU 的起点，TCP 是 MBAP 之后、
     # RTU 是单元号之后。带默认值，所以既有那五处构造 `PacketEvent(...)` 的调用一个字没改。
+    # 2026-10-14 加了 `seq`（默认 0）：**由 `PacketStore.add` 发号**，报文窗靠它做差集
+    # （只给新来的那一段发 `rowsInserted`），因此构造事件的地方一处都不用改。
     assert names(PacketEvent) == ["channel", "direction", "raw", "unit_id",
-                                  "function_code", "parsed", "mono", "pdu_offset"]
+                                  "function_code", "parsed", "mono", "pdu_offset", "seq"]
     assert defaults(PacketEvent) == {"unit_id": None, "function_code": None,
-                                     "parsed": "", "mono": 0.0, "pdu_offset": 7}
+                                     "parsed": "", "mono": 0.0, "pdu_offset": 7, "seq": 0}
     assert names(ChannelState) == ["channel", "state", "detail"]
     assert defaults(ChannelState) == {"detail": ""}
     assert names(LogLine) == ["level", "text"]
