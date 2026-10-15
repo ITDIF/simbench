@@ -333,3 +333,57 @@ def test_planted_subprocess_outside_net_is_flagged(tmp_path):
     leaked = {pathlib.Path(o.rsplit(": ", 1)[0]).relative_to(root).as_posix()
               for o in offenders}
     assert leaked == {"engine/session.py", "gui/main_window.py"}, offenders
+
+# ---- backend 的门面：engine/gui 只许经 `simbench.backend` 与 `backend.events` 取东西 ----
+
+BACKEND_FACADE_OK = ("", "events")       # `backend` 本身（再导出的门面）与纯数据模块
+
+
+def _backend_submodules(path: pathlib.Path) -> list[str]:
+    """一个源文件里 `from ..backend.X import ...` 的 X（相对 import，level > 0）。
+
+    `backend` 本身与 `backend.events` 不在这里报（见 BACKEND_FACADE_OK）：它们一个是门面、
+    一个是纯数据。其余 `backend.<后端内部模块>` 都是越过门面去摸实现细节。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level > 0 and node.module:
+            head, _, rest = node.module.partition(".")
+            if head == "backend":
+                found.append(rest)
+    return found
+
+
+def _backend_facade_offenders(folder: str | None, root: pathlib.Path = ROOT) -> list[str]:
+    offenders: list[str] = []
+    for file in _python_files(folder, root):
+        for sub in _backend_submodules(file):
+            if sub not in BACKEND_FACADE_OK:
+                offenders.append(f"{file}: backend.{sub}")
+    return offenders
+
+
+def test_engine_and_gui_reach_backend_only_through_the_facade():
+    """`engine/` 与 `gui/` 不许 import 后端实现文件（`modbus_base` / `modbus_tcp` / ...）。
+
+    动机：2026-10-15 结构优化前，`engine/session.py` 直接 import 了 `modbus_base.ModbusBackendBase`，
+    `engine/ports.py` 直接 import 了 `modbus_tcp.check_port_is_free`。后端的内部文件一改名，
+    引擎就跟着断，而界面那一层也拿到了它不该知道的路径。现在统一走 `backend/__init__.py`
+    再导出的那一组名字；要新增对外的东西，先在门面里加一行，再用。
+    """
+    scanned = _scanned_files("engine") + _scanned_files("gui")
+    assert scanned, "engine/ 与 gui/ 一个文件都没扫到，这条守卫是空跑"
+    offenders = _backend_facade_offenders("engine") + _backend_facade_offenders("gui")
+    assert offenders == [], f"reached past the backend facade: {offenders}"
+
+
+def test_backend_facade_guard_catches_a_planted_internal_import(tmp_path):
+    """植入样本：`from ..backend.modbus_tcp import ...` 必须被抓；门面与 events 必须放行。"""
+    root = _fake_root(tmp_path, {
+        "engine/bad.py": "from ..backend.modbus_tcp import check_port_is_free\n",
+        "engine/good.py": "from ..backend import make_backend\nfrom ..backend.events import PacketEvent\n",
+    })
+    offenders = _backend_facade_offenders("engine", root)
+    assert len(offenders) == 1 and offenders[0].endswith("backend.modbus_tcp"), offenders
+    assert "good.py" not in offenders[0]

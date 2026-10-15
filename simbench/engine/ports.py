@@ -10,7 +10,7 @@ import `backend`，所以"这个端口现在有没有人占着"这件事由这�
 
 from __future__ import annotations
 
-from ..backend.modbus_tcp import check_port_is_free
+from ..backend import check_port_is_free
 
 
 def is_free(port: int, host: str = "0.0.0.0") -> bool:

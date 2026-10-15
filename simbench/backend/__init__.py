@@ -16,9 +16,11 @@ from ..project.model import channel_transport
 # 显式声明「我是给外面用的」，不是漏删的 import（ruff 的 F401 也认这个写法）。
 from .modbus_ascii import ModbusAsciiBackend
 from .modbus_base import BackendStartError as BackendStartError
+from .modbus_base import ModbusBackendBase as ModbusBackendBase
 from .modbus_rtu import ModbusRtuBackend
 from .modbus_rtutcp import RtuOverTcpBackend
 from .modbus_tcp import ModbusTcpBackend
+from .modbus_tcp import check_port_is_free as check_port_is_free
 from .modbus_udp import ModbusUdpBackend
 from .s7_server import S7Backend
 

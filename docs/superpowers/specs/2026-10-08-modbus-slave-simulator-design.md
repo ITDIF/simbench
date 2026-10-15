@@ -105,8 +105,12 @@ exe 打包（PyInstaller）不在 v1，作为独立里程碑在 v1 之后做完�
 ## 4. 架构
 
 ```
-gui/        PySide6：设备树 + 点位表 + 报文窗 + 启停控制 + CSV/工程对话框
-engine/     Session：唯一对 GUI 暴露的门面（启停/改值/拉取行 + 事件订阅），线程由 EngineRunner 持有
+gui/        PySide6：设备树 + 点位表 + 报文窗 + 启停控制 + CSV/工程对话框；
+            2026-10-15 拆分：`main_window.py`（组装/布局/心跳）+ `window_menus.py` / `window_edit.py` /
+            `window_io.py`（三个 mixin）+ `window_consts.py`（常量）+ `window_common.py`（小纯函数）
+engine/     Session：唯一对 GUI 暴露的门面（启停/改值/拉取行 + 事件订阅），线程由 EngineRunner 持有；
+            2026-10-15 拆分：`session.py`（生命周期/索引/事件）+ `reads.py`（取数）+ `writes.py`（写入/接管/恢复）
+            + `records.py`（Row/WriteResult/ChannelRuntime）+ `render.py`（文案与小判定）
 backend/    三条传输的后端：ModbusTcpBackend / ModbusRtuBackend（pymodbus）与 S7Backend（snap7）；
             与传输无关的那一半（波形 tick、值归属、报文/日志钩子、启停顺序）在
             `modbus_base.py` 的 `ModbusBackendBase`（**不 import pymodbus/snap7**），
@@ -121,6 +125,8 @@ net/        系统网络层（网卡现状/差异/专用网卡/设备 IP）；�
 不 import `pymodbus`/`snap7`/`PySide6`，也不 import `engine`/`gui`）。`codec` 与 `project` 不
 import `pymodbus`/`snap7`，也不 import `PySide6`；`backend` 不 import `PySide6`；`subprocess`
 只许出现在 `net/`。
+
+**门面约束（2026-10-15 结构优化，`tests/test_architecture.py` 守着）**：`engine/` 与 `gui/` 只许从 `simbench.backend` 门面（再导出的 `make_backend` / `ModbusBackendBase` / `check_port_is_free` / `BackendStartError` 等）与纯数据模块 `backend.events` 取东西，不许直接 import `modbus_base` / `modbus_tcp` 等实现文件。要对外新增一个名字，先在门面里再导出一行。
 
 线程模型（**2026-10-13 全面审查时按落地形状改写**；此前这一节写的是目标形状，"命令队列"
 与 `packet_event / validation_error` 这几个名字在实际代码里都不存在）：Qt 主线程 + 一个引擎

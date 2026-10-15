@@ -23,100 +23,30 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from .. import swallow
 from ..backend import BackendStartError, make_backend
 from ..backend.events import ChannelState, LogLine, PacketEvent
-from ..backend.modbus_base import ModbusBackendBase
-from ..codec import s7_codec
-from ..codec.point_codec import decode, encode
-from ..project.model import Point, Project, area_is_bit, channel_transport, is_s7, s7_span_bytes
+from ..project.model import Point, Project, channel_transport
 from ..project.validate import Issue, error_lines, validate_project
 from .packets import PacketStore
+from .reads import ReadMixin
+from .records import (
+    _READ_TIMEOUT,  # noqa: F401  （仍由本模块导出，老路径可 import）
+    _START_TIMEOUT,
+    _STOP_TIMEOUT,
+    _WRITE_TIMEOUT,  # noqa: F401
+    ChannelRuntime,
+    Row,  # noqa: F401  （再导出）
+    WriteResult,  # noqa: F401  （再导出）
+)
+from .render import _detail  # noqa: F401
 from .runner import EngineRunner
+from .writes import WriteMixin
 
-# 等引擎回话的三条上限。**口径**：GUI 能走到的每一条等待都用 `runner.call(...)`，
-# 不用裸 `submit(...).result(...)`——`call` 在超时会把引擎线程当时的栈帧一起写进异常
-# 消息，而裸 TimeoutError 在现场只剩"界面没响应"这一条线索（本项目最防的"看不出是谁卡的"）。
-#   `_START_TIMEOUT` 10s：backend 内部 `_await_ready` 自己 5s 就放弃，10s 严格在它之上，
-#              所以这里等到的必然是"已经报过错了"而不是"还在等"。
-#   `_STOP_TIMEOUT`  10s：实测 `stop()` 里 serve_forever 在 0.2ms 内收尾；10s 的含义是
-#              "根本没关掉"，宁可带上栈帧报错也不许把旧监听静默留着占端口。
-#   `_WRITE_TIMEOUT`  5s：写一个点是内存操作（改 SimRuntime 的寄存器列表），5s 不回
-#              说明引擎线程被别的东西占住了，再继续等下去只会让操作员多点几次同一格。
-_START_TIMEOUT = 10.0
-_STOP_TIMEOUT = 10.0
-_WRITE_TIMEOUT = 5.0
-# 整批回读的上限（见 `_snapshot_for`）：GUI 心跳每 100ms 调一次，等太久等于把界面卡住。
-# 正常一次回读是毫秒级，2 秒只可能意味着引擎线程没回话。
-_READ_TIMEOUT = 2.0
+__all__ = ["ChannelRuntime", "Row", "Session", "WriteResult"]
 
-
-@dataclass(frozen=True)
-class Row:
-    """点位表一行。字段顺序是**位置参数契约**：Task 5 的 `point_source.FakeEngine`
-    按这个顺序构造，改名或换序都要先看 `tests/test_session.py` 那条顺序断言。
-
-    `registers` 定死 `tuple[int, ...]`（A–I 表 G）：`_render` 与替身给的是同一种容器，
-    上层才能用 `!=` 判"这行变了没有"。回读失败时它是**空的**，不是 `[0]`。
-
-    `stale` 只在**通道在跑且回读失败**时为真。"没启动"不是异常（那时显示 CSV 初值
-    是正确行为），"启动了却没读到"才是——两者回落的是同一份初值文字，界面上分不出来，
-    而把"没读到"演成"设备报了这个值"正是本项目最防的那类假象，所以这里必须带出来。
-
-    `source` 是 spec §7 那唯一一条值归属：`waveform` = 曲线还在驱动这个点，`manual` =
-    被界面或主站接管过、波形一个字都不再写。它**只能放在最后一位且带默认值**：
-    `FakeEngine`/本文件的 `rows()` 都按位置构造，插进 `waveform` 前面会把 `readonly`
-    与 `waveform` 串成一列看着合法的错值——那种错测试全绿、现场读错。
-    """
-
-    channel: str
-    device: str
-    unit_id: int
-    name: str
-    area: str
-    address: int
-    datatype: str
-    word_order: str
-    value_text: str
-    registers: tuple[int, ...]
-    readonly: bool
-    waveform: str
-    stale: bool = False
-    source: str = "waveform"
-    # S7 的位（`DBX6.2` 里的 2）：**身份的一部分**，放最后一位且带默认值——`Row` 的字段
-    # 顺序是位置参数契约（`FakeEngine` 与一批用例按位置构造），插在前面会把 `readonly`
-    # 与 `waveform` 串成一列看着合法的错值。Modbus 的点恒为 None。
-    bit: int | None = None
-
-    @property
-    def key(self) -> tuple[str, int, str, int, int | None]:
-        """点位身份：同字节上的两个 S7 bool 是**两个**身份（带位才分得开）。"""
-        return (self.channel, self.unit_id, self.area, self.address, self.bit)
-
-
-@dataclass
-class WriteResult:
-    ok: bool
-    error: str = ""
-    value_text: str = ""
-    registers: tuple[int, ...] = ()
-
-
-@dataclass
-class ChannelRuntime:
-    name: str
-    running: bool = False
-    detail: str = ""
-    connections: int = 0
-    # 两条传输共用这个字段：具体是哪个后端由 `backend.make_backend()` 按通道类型选，
-    # 所以这里的类型是基类而不是某个传输（写死 TCP 那个类，读代码的人会以为串口不复用）。
-    backend: ModbusBackendBase | None = None
-    last_error: str = ""
-
-
-class Session:
+class Session(ReadMixin, WriteMixin):
     def __init__(self, runner: EngineRunner | None = None,
                  packet_store: PacketStore | None = None) -> None:
         self._runner = runner or EngineRunner()
@@ -445,315 +375,14 @@ class Session:
 
     # ---------- 点表读写 ----------
 
-    def rows(self, channel: str) -> list[Row]:
-        """按点表顺序出一批行。通道在跑就回读寄存器，没跑就用 CSV 初值。
 
-        `stale` 的判据是"通道在跑 **且** 这一行回读失败"：没跑的时候显示初值是
-        正确行为（ζ：一个通道都没起时表格照样可读），把它一起标灰就等于界面在
-        演出一个没发生的故障。
 
-        `source` 同一条口径：没起通道时一律 `waveform`，起之后现问 backend 那一份归属
-        状态——`source_is_waveform` 是无 await 的纯内存集合判定，与 `_read_back` 的直读
-        同一个口径；写侧（接管/恢复/tick）全部只在 loop 线程发生。
-        """
-        with self._lock:
-            runtime = self._channels.get(channel)
-            meta = list(self._rows_meta.get(channel, ()))
-        running = bool(runtime and runtime.running)
-        transport = self._transport(channel)
-        # 跑着的时候，**整批**回读在引擎线程上一次做完（见 `_snapshot`）。没跑就没有快照：
-        # 那时显示的是点表初值，一次跨线程调用都不发。
-        snapshot = self._snapshot_for(runtime, meta, transport, channel) if running else {}
-        out: list[Row] = []
-        for unit_id, device, pt in meta:
-            entry = snapshot.get((unit_id, pt.area, pt.address, pt.bit))
-            regs, failed, waveform = entry if entry is not None else (None, True, True)
-            out.append(self._row_cached(channel, device, unit_id, pt, regs, failed,
-                                        waveform, running, transport))
-        return out
 
-    def _row_cached(self, channel: str, device: str, unit_id: int, pt: Point, regs,
-                    failed: bool, waveform: bool, running: bool, transport: str) -> Row:
-        """造一行，**输入没变就把上一跳那一行原样还回去**。
 
-        为什么连 `Row` 一起缓存（实测）：光缓存"解码后的文案"只省掉三分之一的成本——
-        4000 行的表上，剩下那一大截是"每跳新建 4000 个 frozen dataclass"。这些字段全是
-        `(点位元信息, 寄存器, 归属, 在不在跑)` 的纯函数，所以这四样没变时复用上一跳那个对象
-        是安全的；模型那边靠 `==` 比行（frozen dataclass 逐字段比），同一批对象回来等于
-        一次都不重画。
 
-        代价是"复用同一个对象"这件事必须成立：`Row` 是 frozen 的（没人能就地改它），
-        `_rebuild_index_locked` 换工程/改结构时清空整张缓存（不会把上一份工程的行带给新的）。
 
-        **键必须带上一行的全部输入**——不只是身份与寄存器。第一版只带了
-        (身份, 类型, 字序, 初值)，于是"在属性面板里改个名字"这类 **live 改动**（不改结构、
-        不重建索引）会读到上一跳那个旧名字的 `Row`：表里一行都没变，看着像没生效
-        （由 `test_a_live_only_apply_from_the_menu_says_next_tick_not_restart` 逮住）。
-        名字 / 只读 / 波形都是 `Point` 上可以原地改的字段，所以它们都进键。
-        """
-        key = (channel, device, unit_id, transport, pt.area, pt.address, pt.bit, pt.name,
-               pt.datatype, pt.word_order, pt.initial, pt.readonly, pt.waveform)
-        cached = self._render_cache.get(key)
-        if cached is not None:
-            was_regs, was_failed, was_waveform, was_running, row = cached
-            if (was_regs == regs and was_failed == failed and was_waveform == waveform
-                    and was_running == running):
-                return row
-        value_text, registers = _render(pt, regs, transport)
-        row = Row(channel, device, unit_id, pt.name, pt.area, pt.address,
-                  pt.datatype, pt.word_order, value_text, registers,
-                  pt.readonly, pt.waveform, stale=failed and running,
-                  source="waveform" if waveform else "manual", bit=pt.bit)
-        self._render_cache[key] = (regs, failed, waveform, running, row)
-        return row
 
-    def _snapshot_for(self, runtime, meta, transport: str, channel: str) -> dict:
-        """整批快照（寄存器 + 归属）在引擎线程上取一次；超时/失败就交回空表。
 
-        空表的意思是"这一跳整批没读到"：`rows()` 把每一行标成 `stale`（界面灰显），与
-        "设备真报了这个值"分得开。**不把异常抛进 GUI 心跳**——10Hz 的界面炸一次就没了。
-
-        只报一次错（`self._read_failed`）：引擎不回话时每 100ms 一条日志会把日志窗刷干净，
-        而"表全是灰的"本身就是看得见的信号。
-        """
-        try:
-            snapshot = self._runner.call(
-                lambda: self._snapshot(runtime, meta, transport), _READ_TIMEOUT,
-                f"read rows of channel {channel}")
-        except Exception as exc:                    # noqa: BLE001
-            if not self._read_failed:
-                self._read_failed = True
-                self.publish_log(
-                    "error", f"channel {channel}: the engine did not answer the row read "
-                             f"within {_READ_TIMEOUT:g}s ({exc}); the table shows stale "
-                             f"values until it answers again")
-            return {}
-        self._read_failed = False
-        return snapshot
-
-    async def _snapshot(self, runtime, meta, transport: str) -> dict:
-        """**在引擎线程上**取整批快照：`{(unit, 区, 地址, 位): (寄存器|None, 失败?, 归波形?)}`。
-
-        为什么要有它（而不是让 `rows()` 一个一个直读）：运行态——寄存器缓冲与 `SourceStore`
-        ——按设计只由 loop 线程读写（`backend/ownership.py` 开头那段、spec §13 的跨线程那一课）。
-        直读单个 int 不会读出半个值，但**多寄存器的值**（float32/uint64 跨两格）在两格之间被
-        tick 改写时，界面上会出现一帧"谁都没写过"的数——正是本项目最防的那类假象。
-        收成一次之后，这一跳要么全看到、要么整批标 `stale`。
-
-        写成 `async` 是接口要求（`EngineRunner.call` 收的是**协程工厂**，不是同步函数）：
-        里面一个 `await` 都没有，因为要的就是"在 loop 线程上同步做完"。
-        """
-        backend = runtime.backend
-        if backend is None:
-            return {}
-        key = 0 if is_s7(transport) else None
-        out: dict = {}
-        for unit_id, _device, pt in meta:
-            regs, failed = self._read_back(runtime, pt, unit_id, transport)
-            waveform = backend.source_is_waveform(
-                key if key is not None else unit_id, pt.area, pt.address, bit=pt.bit)
-            out[(unit_id, pt.area, pt.address, pt.bit)] = (regs, failed, waveform)
-        return out
-
-    def manual_count(self, channel: str) -> int | None:
-        """当前被人工接管的**点位**数（状态栏那句"有 N 处被接管"用）。
-
-        按点位数而不是按地址数：`SourceStore.cleared()` 数的是地址，一个 uint64 点被接管
-        在那里是 4，而操作员改的是"一个点"——单位对不上，那个数就没法对着看。这里手里
-        就有点表，所以逐个点问归属，不要求 backend 交出整表快照（Task 2 复审的口径）。
-        通道没起时是 0：没起就谈不上接管。
-        """
-        with self._lock:
-            runtime = self._channels.get(channel)
-            meta = list(self._rows_meta.get(channel, ()))
-        if runtime is None or not runtime.running or runtime.backend is None:
-            return 0
-        # 与 `rows()` 同一条路：从引擎线程取一次整批快照，再在本地数。取不到（引擎没回话）
-        # 回 `None`——"不知道"与"0 处接管"是两件事，界面宁可不说那个数，也不能报一个假的 0。
-        snapshot = self._snapshot_for(runtime, meta, self._transport(channel), channel)
-        if not snapshot:
-            return None
-        return sum(1 for entry in snapshot.values() if not entry[2])
-
-    def restore_waveform(self, channel: str, unit_id: int, area: str,
-                         address: int, bit: int | None = None) -> bool:
-        """把一个人工接管的点交还给波形，返回"真还回去过东西没有"。
-
-        签名里只有**基础地址**，跨度在这里自己算：`Session` 手里有摊平的点表，取出该点的
-        `pt.span` 再投给 backend。少传跨度就会让一个 4 格的 uint64 恢复之后仍留 3 格是
-        `manual`——按地址数的 `SourceStore.cleared()` 因此永远回不了零，而按点数的那个
-        （`manual_count` 只问基础格）根本看不见这三格，界面上一切正常、地址却再也归不了波形。
-
-        两条拒绝（不在点表 / 通道没在跑）都是日志一句话 + `False`，不许从 Qt 槽位里逃出
-        `AttributeError`（M1 的 `_require_writer` 钉过同形问题）。恢复了什么要点名，
-        静默把值交还波形等于操作员看不见发生了什么。
-        """
-        runtime, _ = self._require(channel)
-        pt = self._points.get((channel, unit_id), {}).get((area, address, bit))
-        if pt is None:
-            self.publish_log("warning",
-                             f"{area} address {address} (unit {unit_id}) on channel "
-                             f"{channel} is not in the point table; nothing was "
-                             f"handed back to the waveform")
-            return False
-        if not runtime.running or runtime.backend is None:
-            self.publish_log("warning",
-                             f"point {pt.name} ({area} {address}, unit {unit_id}) on "
-                             f"channel {channel} is not running; the waveform was not "
-                             f"resumed")
-            return False
-        # 跨度与归属键都按传输取：S7 是 (0, 字节数)，Modbus 是 (unit_id, 寄存器格数)。
-        transport = self._transport(channel)
-        key = 0 if is_s7(transport) else unit_id
-        span = _span_of(pt, transport)
-        try:
-            restored = self._runner.call(
-                lambda: _arestore(runtime.backend, key, area, address, span, bit),
-                _WRITE_TIMEOUT,
-                f"restore waveform {area} {address} (unit {unit_id})")
-        except Exception as exc:                    # noqa: BLE001
-            self.publish_log("error",
-                             f"restore waveform for point {pt.name} ({area} {address}, "
-                             f"unit {unit_id}) failed: {exc}")
-            return False
-        if restored:
-            self.publish_log("info",
-                             f"point {pt.name} ({area} {address}, unit {unit_id}) on "
-                             f"channel {channel} handed back to the waveform; "
-                             f"{span} {'byte(s)' if transport == 's7' else 'register(s)'} released")
-        else:
-            # 没在 manual 上就别谎报"恢复了"：那句日志会是操作员唯一能看见的证据
-            self.publish_log("info",
-                             f"point {pt.name} ({area} {address}, unit {unit_id}) on "
-                             f"channel {channel} was already driven by the waveform")
-        return bool(restored)
-
-    def write(self, channel: str, unit_id: int, area: str, address: int,
-              text: str, bit: int | None = None) -> tuple[bool, str]:
-        """点位表模型（`gui/point_table`）用的写入口：只把 `WriteResult` 收成二元组。
-
-        判定与错误文案全部留在 `set_point`/codec 那一份里——GUI 抄一套自己的话术，
-        同一件错在现场就有两种说法。要 `value_text`/`registers` 的调用方直接用
-        `set_point`。
-        """
-        res = self.set_point(channel, unit_id, area, address, text, bit)
-        return (res.ok, res.error)
-
-    def set_point(self, channel: str, unit_id: int, area: str, address: int,
-                  text: str, bit: int | None = None) -> WriteResult:
-        """改一个点的值。类型不符/越界/超出点位跨度一律拒绝且不落寄存器。
-
-        引擎写只读点是允许的（M1 定的口径：readonly 是"挡主站"的墙），
-        所以从界面改只读量不会被拒——界面上要另外标注它是只读量。
-
-        位区与寄存器区分两条路走：M1 已钉 `write_registers(11, "co", ...)` 直接抛
-        `ValueError`（两边的"地址 0"含义不同，混用会把风机写成反向），所以 `area_is_bit`
-        的判定必须在**这里**做对，不许把区名原样丢给后端去猜。
-        """
-        runtime, _ = self._require(channel)
-        if not runtime.running or runtime.backend is None:
-            return WriteResult(False, f"channel {channel} is not running")
-        pt = self._points.get((channel, unit_id), {}).get((area, address, bit))
-        if pt is None:
-            # 不在点表（含未知 area、未知 unit、越界地址、对不上的位）一律在这里挡住：
-            # 放进 backend 就会变成 `unknown area 'xx'` 那种像模拟器 bug 的话。
-            return WriteResult(False, f"{area} address {address} is not in the point table")
-        transport = self._transport(channel)
-        if is_s7(transport):
-            return self._set_s7_point(runtime, pt, text, channel, unit_id, area, address)
-        try:
-            registers = encode(text, pt.datatype, pt.word_order)
-        except ValueError as exc:
-            return WriteResult(False, str(exc))
-        if len(registers) > pt.span:
-            # `Point.span` 是**初值**撑出来的跨度（`model.register_span`：string 按
-            # ceil(len/2)），所以把 string 点改成更长的文本时，编出来的寄存器比这个点占的
-            # 格子多——照写就踩到邻居的格子上，而 `_awrite` 按 `len(registers)` 标接管，
-            # `restore_waveform` 只还得回 `pt.span` 那一段：邻居从此永久 manual。
-            # 跨度真正的入口是点表的初值，所以那句得指到那里去，不是指这个编辑框。
-            return WriteResult(
-                False, f"point {pt.name} at {area} {address} is {pt.span} register(s), "
-                       f"this value needs {len(registers)}; widen it via the point's "
-                       f"初值 and restart the channel")
-        if len(registers) < pt.span:
-            # 写短了要把它**自己那一段里剩下的格子补零**（M4 计划判给"人定"的那条老账，
-            # 审查后这么定）：string 点按初值撑出跨度（"FAN-01" = 3 格），改成 "AB" 只编出
-            # 1 格；不补的话主站按跨度读回来是 "AB" + 上一版留下的尾巴（"ABMP07"），
-            # 那是界面在报一个没人写过的值。
-            # 只补到 `pt.span` 为止——补到别处就是 A2 那个"一次编辑接管三个点"的事故。
-            # 主站写（FC16）不走这条路，也不该走：主站写的是**寄存器**（写到哪就只动哪），
-            # 而界面编辑的是**点位**（跨度语义归点表初值管），两种语义不能混。
-            padded = tuple(registers) + (0,) * (pt.span - len(registers))
-            registers = list(padded)
-        try:
-            # 走 `call` 而不是裸 `submit(...).result()`：超时时 `call` 会把引擎线程当时的
-            # 栈帧带进消息。界面上"点了没反应"和"引擎卡在写 4x5 这一帧"是两种完全不同的
-            # 故障，后者能凭一张截图定位。5 秒的口径见 `_WRITE_TIMEOUT`。
-            #
-            # 接管状态在**同一个 lambda 里、写成功之后**记（spec §7）：`SourceStore` 是
-            # loop 线程的可变状态，主线程往它插一脚就是跨线程共享。写成 False（地址不在块内、
-            # 引擎拒绝）时一个状态都不动——"一次没写成的编辑把曲线停了"和主站写只读点被拒
-            # 是同一类误判。
-            if area_is_bit(area):
-                ok = self._runner.call(
-                    lambda: _awrite_bits(runtime.backend, unit_id, area, address,
-                                         bool(registers[0])),
-                    _WRITE_TIMEOUT, f"write {area} {address} (unit {unit_id}) "
-                                    f"on channel {channel}")
-            else:
-                ok = self._runner.call(
-                    lambda: _awrite(runtime.backend, unit_id, area, address, registers),
-                    _WRITE_TIMEOUT, f"write {area} {address} (unit {unit_id}) "
-                                    f"on channel {channel}")
-        except Exception as exc:                    # noqa: BLE001
-            return WriteResult(False, f"engine write failed: {exc}")
-        if not ok:
-            return WriteResult(False, f"{area} address {address} is outside the point table")
-        regs, failed = self._read_back(runtime, pt, unit_id, transport)
-        if failed or regs is None:
-            # 写成功但读不回来：这不是"值没变"，是回读通道出了毛病。宁可说"没读到"，
-            # 也不许回一个初值冒充当前值（那一格会被当成"设备报了这个值"）。
-            return WriteResult(False, f"read-back failed for {area} {address}")
-        value_text, registers_out = _render(pt, regs, transport)
-        with self._lock:
-            self._dirty = True
-        return WriteResult(True, "", value_text, registers_out)
-
-    def _set_s7_point(self, runtime, pt, text: str, channel: str, unit_id: int,
-                      area: str, address: int) -> WriteResult:
-        """S7 的改值：按 S7 类型编成字节 → 写进区域缓冲 → 回读一次。
-
-        与 Modbus 那条**分开**而不是在一条里塞 if：跨度单位（字节 vs 寄存器格）、编码器
-        （`s7_codec` vs `point_codec`）、写入口（`write_point_bytes` vs `write_registers`）
-        三处都不同，缝在一起就得靠 if 把两种语义粘着——一处的单位错就是"15 位还算得出来、
-        16 位少写一格"这类看不见的错。
-        """
-        span = _span_of(pt, "s7")
-        try:
-            raw = s7_codec.encode(text, pt.datatype, span)
-        except ValueError as exc:
-            message = str(exc)
-            if "at most" in message:
-                # 与 Modbus 那条同一句"该改哪里"：跨度归点表初值管，不在这个编辑框里
-                message = (f"{message}; widen it via the point's 初值 "
-                           f"and restart the channel")
-            return WriteResult(False, message)
-        try:
-            ok = self._runner.call(
-                lambda: _awrite_s7(runtime.backend, pt, raw),
-                _WRITE_TIMEOUT, f"write {area} {address} (unit {unit_id}) "
-                                f"on channel {channel}")
-        except Exception as exc:                    # noqa: BLE001
-            return WriteResult(False, f"engine write failed: {exc}")
-        if not ok:
-            return WriteResult(False, f"{area} address {address} is outside the point table")
-        regs, failed = self._read_back(runtime, pt, unit_id, "s7")
-        if failed or regs is None:
-            return WriteResult(False, f"read-back failed for {area} {address}")
-        value_text, registers_out = _render(pt, regs, "s7")
-        with self._lock:
-            self._dirty = True
-        return WriteResult(True, "", value_text, registers_out)
 
     def _transport(self, channel: str) -> str:
         """这一路是什么传输（读/写/归属三处都要按它分派，判定只在这里一次）。
@@ -860,42 +489,6 @@ class Session:
         return [runtime for runtime in self._channels.values()
                 if not self._stop_one(runtime)]
 
-    def _read_back(self, runtime: ChannelRuntime | None, pt: Point,
-                   unit_id: int,
-                   transport: str = "tcp") -> tuple[list[int] | None, bool]:
-        """回读一个点位当前的寄存器，返回 `(regs, failed)`。
-
-        `failed` 与"regs 是 None"不是一回事，必须分开说：
-
-        * 通道没跑（`runtime`/`backend` 为空）→ `(None, False)`。那是"还没起"，
-          不是异常，界面上显示 CSV 初值就是正确行为（不标灰）。
-        * 后端抛异常、或回读 `None`/空序列 → `(None, True)`。那是"起了却没读到"，
-          调用方（`rows()`）据此置 `stale`——否则这一格和"设备真报了这个值"同形。
-
-        空序列也算失败：`_render` 对 `[]` 同样回落初值，只判 None 会把"读到一串空"
-        当成成功，`stale` 就漏了这一条。
-        """
-        if runtime is None or runtime.backend is None:
-            return None, False
-        try:
-            if is_s7(transport):
-                # S7 回的是**字节**（bool 也回一个字节的 0/1）：`_render` 那一侧按 S7 类型解。
-                raw = runtime.backend.read_point_bytes(pt)
-                if raw is None or not raw:
-                    return None, True
-                return list(raw), False
-            if area_is_bit(pt.area):
-                bits = runtime.backend.read_bits(unit_id, pt.area, pt.address, 1)
-                if bits is None or not bits:
-                    return None, True
-                return [1 if bits[0] else 0], False
-            regs = runtime.backend.read_registers(unit_id, pt.area, pt.address, pt.span)
-        except Exception:                                # noqa: BLE001
-            return None, True
-        if not regs:
-            return None, True
-        return list(regs), False
-
 
 def _listen_endpoints(channel, source) -> list[tuple[str, int]]:
     """声明里这一路要额外听的地址（口径见 `net/endpoints.py`）。
@@ -906,89 +499,3 @@ def _listen_endpoints(channel, source) -> list[tuple[str, int]]:
     from ..net.endpoints import for_channel
 
     return for_channel(channel, source)
-
-
-def _detail(backend) -> str:
-    """通道状态那一栏显示的"主站该连哪"：由后端自己说，因为两条传输的答案是两种东西。
-
-    TCP 是"所有监听地址、多了截断"，串口是那一串串口参数（`COM3 19200 8E1`）——判定住在
-    `ModbusBackendBase.describe()` 里（子类覆盖），这一层只转发，免得"界面的说法"和
-    "后端的说法"各长一套。TCP 那个格式不能动：界面与用例按 `rpartition(":")` 取端口。
-    """
-    return backend.describe()
-
-
-def _span_of(pt: Point, transport: str) -> int:
-    """这个点占多大：Modbus 是寄存器格数，S7 是字节数（归属与交还都用它）。"""
-    return s7_span_bytes(pt.datatype, pt.initial) if is_s7(transport) else pt.span
-
-
-def _render(pt: Point, regs: list[int] | None,
-            transport: str = "tcp") -> tuple[str, tuple[int, ...]]:
-    """寄存器 -> 界面文案。回读失败（regs 为 None/空）时回落 CSV 初值。
-
-    回落本身有两种含义——①通道没起，本来就该显示初值；②通道在跑但读不到，显示初值
-    就是演给界面一个"设备报了这个值"。这一层分不出来（它拿不到通道状态），所以
-    `rows()` 用 `_read_back` 的 `failed` 补 `Row.stale` 把两者分开；这里不许改成
-    显示 0 或空串（那等于用一个假的 0 替掉"没读到"）。
-
-    寄存器一律回 `tuple`（A–I 表 G）：`Row.registers` 与 `WriteResult.registers`
-    共用这一份产出，两种容器并存会让上层的"这行变了没有"判等时好时坏。
-    """
-    if not regs:
-        return pt.initial, ()
-    try:
-        if is_s7(transport):
-            # `regs` 在 S7 这一路装的是**字节**（`_read_back` 的约定），按 S7 类型解
-            value = s7_codec.decode(bytes(regs), pt.datatype,
-                                    s7_span_bytes(pt.datatype, pt.initial))
-        else:
-            value = decode(list(regs), pt.datatype, pt.word_order)
-    except ValueError:
-        return pt.initial, tuple(regs)
-    if isinstance(value, bool):
-        return ("true" if value else "false"), tuple(regs)
-    if isinstance(value, float):
-        return (f"{value:g}", tuple(regs))
-    return (str(value), tuple(regs))
-
-
-async def _awrite(backend, unit_id, area, address, registers):
-    """寄存器写 + 人工接管，一次投递做完（两步都只在 loop 线程发生）。
-
-    接管按这次真写下去的跨度记：`set_point` 已经挡掉 `len(registers) > pt.span` 的编辑，
-    所以 `restore_waveform` 交还的 `pt.span` 恒是它的超集，恢复不会留尾巴。
-    """
-    ok = backend.write_registers(unit_id, area, address, registers)
-    if ok:
-        backend.mark_manual(unit_id, area, address, count=len(registers), who="gui")
-    return ok
-
-
-async def _awrite_s7(backend, pt, raw):
-    """S7 的写 + 接管，一次投递做完（两步都只在 loop 线程发生）。
-
-    归属键与跨度和事件那条路**必须一致**（0 / 字节数），否则界面改过的点在主站的
-    写事件里算另一段，`manual_count` 与"恢复波形"就会各说各话。
-    """
-    ok = backend.write_point_bytes(pt, raw)
-    if ok:
-        backend.mark_manual(0, pt.area, pt.address,
-                            count=s7_span_bytes(pt.datatype, pt.initial),
-                            who="gui", bit=pt.bit)
-    return ok
-
-
-async def _awrite_bits(backend, unit_id, area, address, value):
-    """位区写：一个线圈/离散输入就是一个点，跨度天然是 1。"""
-    ok = backend.write_bits(unit_id, area, address, value)
-    if ok:
-        backend.mark_manual(unit_id, area, address, count=1, who="gui")
-    return ok
-
-
-async def _arestore(backend, unit_id, area, address, count, bit=None):
-    """把整点的跨度交还波形。`runner.call` 只收协程，所以和上面两个同一个形状；
-    状态改动仍然全部发生在 loop 线程，主线程只是等一句"还真回去没有"。
-    """
-    return backend.restore_waveform(unit_id, area, address, count=count, bit=bit)
