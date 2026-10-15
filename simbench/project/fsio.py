@@ -96,9 +96,3 @@ def write_text_atomic(path, text: str, *, encoding: str = "utf-8",
     """文本版：`newline` 与 `Path.write_text` 同义，**默认 `None`**（= 平台默认换行）。"""
     return write_atomic(path, lambda handle: handle.write(text), binary=False,
                         backup=backup, encoding=encoding, newline=newline)
-
-
-def write_bytes_atomic(path, data: bytes, *, backup: bool = True) -> pathlib.Path:
-    """字节版（暂时只有测试与将来的二进制格式用得上）。"""
-    return write_atomic(path, lambda handle: handle.write(data), binary=True,
-                        backup=backup)

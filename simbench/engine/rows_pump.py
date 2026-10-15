@@ -99,12 +99,6 @@ class RowsPump:
             self._revision = revision
         return rows
 
-    def age(self) -> float:
-        """上一份快照是什么时候取的（秒）。从没取过回 `inf`。"""
-        with self._lock:
-            fetched = self._fetched_at
-        return float("inf") if not fetched else time.monotonic() - fetched
-
     def channel(self) -> str:
         return self._channel
 

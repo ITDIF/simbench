@@ -134,11 +134,6 @@ class Ledger:
             return set()
         return {a.guid for a in self.adapters}
 
-    def owned_device_instances(self) -> set[str]:
-        if self.corrupt:
-            return set()
-        return {a.device_instance.upper() for a in self.adapters if a.device_instance}
-
     def record_adapter(self, guid: str, name: str, device_instance: str,
                        stamp: str) -> None:
         wanted = _key(guid)

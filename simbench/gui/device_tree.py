@@ -17,8 +17,7 @@ from __future__ import annotations
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import theme
-
-_STATUS_MARK = {"stopped": "○", "starting": "◐", "running": "●", "error": "▲"}
+from .channel_state import STATUS_MARK
 
 # 通道名列定宽：设备名/通道名的长短不该让状态列跟着挪（口径 3）。
 _NAME_WIDTH = 240
@@ -59,7 +58,7 @@ class DeviceTree(QtWidgets.QTreeWidget):
         self._items.clear()
         self.clear()
         for channel in project.channels:
-            top = QtWidgets.QTreeWidgetItem([channel.name, _STATUS_MARK["stopped"]])
+            top = QtWidgets.QTreeWidgetItem([channel.name, STATUS_MARK["stopped"]])
             top.setData(0, _ROLE_CHANNEL, channel.name)
             self.addTopLevelItem(top)
             # `setExpanded` 必须在**插进视图之后**调：在那之前这一项在视图里还不存在，
@@ -90,16 +89,6 @@ class DeviceTree(QtWidgets.QTreeWidget):
         return item.data(0, _ROLE_UNIT)
 
     # ---------- 右键菜单 ----------
-
-    def menu_actions(self, item: QtWidgets.QTreeWidgetItem | None) -> list[QtGui.QAction]:
-        """那一项的右键动作清单：`contextMenuEvent` 与用例走**同一个**构造口。
-
-        空白处给"添加通道"（空工程里这是唯一能起步的地方），通道行给"添加设备/删除通道"，
-        设备行给"添加点位/删除设备"。设备行必须有"添加点位"：点位在表里，而**一个点位都
-        没有的设备在表上没有任何一行可以右键**——不从这里给，第一个点位就永远加不出来。
-        """
-        menu = self._menu_for(item)
-        return [] if menu is None else menu.actions()
 
     def contextMenuEvent(self, event) -> None:
         # `event.pos()` 是**控件**坐标，而 `itemAt` 吃的是**视口**坐标，中间必须过
@@ -157,7 +146,7 @@ class DeviceTree(QtWidgets.QTreeWidget):
         item = self._items.get(channel)
         if item is None:
             return ""
-        for name, mark in _STATUS_MARK.items():
+        for name, mark in STATUS_MARK.items():
             if item.text(1) == mark:
                 return name
         return ""
@@ -169,10 +158,10 @@ class DeviceTree(QtWidgets.QTreeWidget):
         item = self._items.get(channel)
         if item is None:
             return
-        if state not in _STATUS_MARK:
+        if state not in STATUS_MARK:
             # 未知状态不许留一个旧符号冒充现况——那是界面在演一出没发生的戏
             raise ValueError(f"unknown channel state {state!r}")
-        item.setText(1, _STATUS_MARK[state])          # 定宽列：换符号不改宽度
+        item.setText(1, STATUS_MARK[state])          # 定宽列：换符号不改宽度
         # 颜色按当前主题模式取（深浅两套各一组，见 theme.status_colors）
         brush = QtGui.QBrush(theme.status_colors()[state])
         item.setForeground(0, brush)

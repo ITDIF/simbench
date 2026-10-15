@@ -2,13 +2,13 @@ r"""生成 exe 的图标与版本资源（打包用，不进发布包）。
 
 两件事：
 
-1. `.ico`：把 `theme.app_icon()` 的画法在 16/32/48/64/128/256 六档上各画一遍，按 ICO 的
+1. `.ico`：把 `icons.app_icon()` 的画法在 16/32/48/64/128/256 六档上各画一遍，按 ICO 的
    容器格式（ICONDIR + 每条 ICONDIRENTRY + PNG 负载）打成一个文件。**每一档都自己画**
    （不是把 128 拉伸）：放大位图在 256 上会糊，而 exe 图标就是现场第一眼看到的东西。
 2. 版本资源：PyInstaller 的 `version=` 读的是 `version_info.txt`（VSVersionInfo 那段 DSL），
    它是个静态文件，不在这里生成——这个脚本只管图标。
 
-为什么要脚本而不是把 .ico 塞进仓库：图标是**产物**，它必须跟着 `theme.app_icon()` 那张画
+为什么要脚本而不是把 .ico 塞进仓库：图标是**产物**，它必须跟着 `icons.app_icon()` 那张画
 走（改一次配色/形状，重打一次包就该跟着变）。`spec` 会在构建时调 `ensure_icon()`，
 所以直接 `pyinstaller packaging/simbench.spec` 也不会缺图标。
 
@@ -61,11 +61,11 @@ def render_pngs(sizes=SIZES) -> dict[int, bytes]:
     from PySide6 import QtCore, QtGui
 
     app = QtGui.QGuiApplication.instance() or QtGui.QGuiApplication([])
-    from simbench.gui import theme
+    from simbench.gui import icons
 
     out: dict[int, bytes] = {}
     for size in sizes:
-        pixmap = theme.app_icon(size).pixmap(size, size)
+        pixmap = icons.app_icon(size).pixmap(size, size)
         buffer = QtCore.QBuffer()
         buffer.open(QtCore.QIODevice.WriteOnly)
         pixmap.toImage().save(buffer, "PNG")

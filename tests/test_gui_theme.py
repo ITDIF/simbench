@@ -214,10 +214,6 @@ def test_the_two_modes_differ_only_in_colour():
         assert not re.search(r"\{[a-z_]+\}", theme.qss(mode)), mode
         for key, value in theme._PALETTES[mode].items():
             assert QtGui.QColor(value).isValid(), (mode, key, value)
-    # 图标也是按模式取色的：两张色表的键要一样，且覆盖每一个画得出来的图标
-    assert set(theme._ICON_COLORS["light"]) == set(theme._ICON_COLORS["dark"])
-    for name in theme._DRAW:
-        assert name in theme._ICON_COLORS["light"], name
 
 
 def test_the_dark_palette_is_actually_dark_and_the_status_colours_go_with_it():

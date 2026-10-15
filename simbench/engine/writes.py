@@ -1,16 +1,18 @@
 """写侧：点值写入（寄存器 / 字节 / 位）、人工接管与"交还波形"。
 
-所有会改运行态的动作都经 unner.call 投回引擎线程执行（见 session.py 的线程模型）。
+所有会改运行态的动作都经 
+unner.call 投回引擎线程执行（见 session.py 的线程模型）。
 Session 通过 WriteMixin 继承这些方法，对外的名字与行为不变。
 """
 
 from __future__ import annotations
 
-from ..codec import s7_codec  # noqa: F401
-from ..codec.point_codec import encode  # noqa: F401
-from ..project.model import Point, area_is_bit, is_s7, s7_span_bytes  # noqa: F401
+from ..codec import s7_codec
+from ..codec.point_codec import encode
+from ..project.model import area_is_bit, is_s7, s7_span_bytes
 from .records import _WRITE_TIMEOUT, WriteResult
 from .render import _render, _span_of
+from .session_host import SessionHost
 
 
 async def _awrite(backend, unit_id, area, address, registers):
@@ -54,7 +56,7 @@ async def _arestore(backend, unit_id, area, address, count, bit=None):
     return backend.restore_waveform(unit_id, area, address, count=count, bit=bit)
 
 
-class WriteMixin:
+class WriteMixin(SessionHost):
     def restore_waveform(self, channel: str, unit_id: int, area: str,
                          address: int, bit: int | None = None) -> bool:
         """把一个人工接管的点交还给波形，返回"真还回去过东西没有"。

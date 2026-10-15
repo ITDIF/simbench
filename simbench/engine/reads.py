@@ -1,4 +1,5 @@
-"""读侧：点位表取数（ows）、整批快照、手动接管计数与单点回读。
+"""读侧：点位表取数（
+ows）、整批快照、手动接管计数与单点回读。
 
 都是"看"的操作：跑着的通道在引擎线程上取一次整批快照，没跑就只用 CSV 初值。
 Session 通过 ReadMixin 继承这些方法，对外的名字与行为不变。
@@ -9,9 +10,10 @@ from __future__ import annotations
 from ..project.model import Point, area_is_bit, is_s7
 from .records import _READ_TIMEOUT, ChannelRuntime, Row
 from .render import _render
+from .session_host import SessionHost
 
 
-class ReadMixin:
+class ReadMixin(SessionHost):
     def rows(self, channel: str) -> list[Row]:
         """按点表顺序出一批行。通道在跑就回读寄存器，没跑就用 CSV 初值。
 

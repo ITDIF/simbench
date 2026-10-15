@@ -26,7 +26,3 @@ _LOG_LINES = 5000                       # 日志窗只留最近多少行（与�
 PORT_PROBE = ports.is_free
 _TREE_STRETCH, _TABLE_STRETCH = 1, 4
 _FIRST_SPLIT = [600, 400]   # 上栏:下栏 首屏比例（见 _build_layout）
-_STATUS_WORD = {"stopped": "停止", "starting": "启动中", "running": "运行",
-                "error": "失败"}
-# 计数式摘要里状态的固定顺序：不按下标排，同一份现况每次渲染才是同一个字符串
-_STATUS_ORDER = ("running", "stopped", "error", "starting")

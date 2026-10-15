@@ -26,6 +26,7 @@ from PySide6 import QtGui, QtWidgets
 from ..backend.events import ChannelState
 from ..project.model import channel_transport, format_frame, is_serial, parse_frame
 from . import theme
+from .channel_state import STATUS_LABELS
 
 # 四态的文案共用一个定宽槽（88px）：主题把正文字号提到 10pt 之后 offscreen 实测最长的
 # 一条 "◐ 启动中" 文字宽 65px（9pt 时是 60px），88 是"装得下 + 留一点余量"；
@@ -33,10 +34,9 @@ from . import theme
 # 装不下时要改文案，**不许加宽、也不许截断成省略号**——由
 # `test_the_status_label_is_the_same_slot_in_every_state` 钉住。
 #
+# 四态的符号与中文在 `channel_state.py` 一处定义（面板、设备树、状态栏摘要共用一份）；
 # 颜色不在这里定义：深浅两套配色各有一组（白底上合适的绿放到深底上快看不见），
-# 由 `theme.status_colors()` 按当前模式给。这里只认"四态各一个符号"这件事。
-STATUS_LABELS = {"stopped": "○ 停止", "starting": "◐ 启动中",
-                 "running": "● 运行", "error": "▲ 失败"}
+# 由 `theme.status_colors()` 按当前模式给。
 
 _HOST_WIDTH = 120
 _PORT_WIDTH = 64

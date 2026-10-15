@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from . import theme
+from . import icons, theme
 from .dialogs import (
     ProjectFileError,
     read_point_table,
@@ -22,7 +22,7 @@ class MenuMixin:
         # 图标与文字并排：只留图标的话，现场得靠悬停猜哪个是"全部停止"，
         # 而这一排按钮里"停止"点错的代价是掉一路正在服务的从站。
         bar.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        bar.setIconSize(theme.icon_size())
+        bar.setIconSize(icons.icon_size())
         self.toolbar = bar
         self.act_start = self._toolbar_action(bar, "play", "全部启动", self._start_all)
         self.act_stop = self._toolbar_action(bar, "stop", "全部停止", self._stop_all)
@@ -48,7 +48,7 @@ class MenuMixin:
         图标名登记在 `self._icon_names` 上：切主题时底色变了，位图图标要按新模式重画一遍
         （样式表刷不掉已经画好的 QPixmap）。
         """
-        action = bar.addAction(theme.icon(icon), text, slot)
+        action = bar.addAction(icons.icon(icon), text, slot)
         action.setToolTip(text)
         self._icon_names.append((action, icon))
         return action
@@ -121,7 +121,7 @@ class MenuMixin:
             self.settings.theme = mode                   # 关窗时随几何一起落盘
         self.act_theme.setChecked(mode == "dark")
         for action, name in self._icon_names:
-            action.setIcon(theme.icon(name))
+            action.setIcon(icons.icon(name))
         for channel, state in self._states.items():
             self.tree.set_status(channel, state)
             self.channels.set_status(channel, state)

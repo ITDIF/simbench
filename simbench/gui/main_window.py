@@ -34,13 +34,14 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..engine.point_source import pumped_source
 from ..engine.rows_pump import RowsPump
 from ..project.validate import error_lines, validate_project
-from . import messages, theme
+from . import icons, messages, theme
 from .bridge import EngineBridge
 from .channel_panel import ChannelPanel
+from .channel_state import STATUS_ORDER, STATUS_WORD
 from .device_tree import DeviceTree
 
 # 用例 monkeypatch 的 seam：mixin 运行时经 `_mw()` 取这些名字，所以这里必须保留成本模块属性
-from .dialogs import (  # noqa: E402,F401
+from .dialogs import (
     IssueDialog,
     choose_offset,
     format_issues,
@@ -50,7 +51,7 @@ from .dialogs import (  # noqa: E402,F401
 )
 from .net_panel import NetPanel
 from .packet_view import PacketPanel
-from .point_props import PointPropertiesDialog  # noqa: E402,F401
+from .point_props import PointPropertiesDialog
 from .point_table import COLUMNS, PointTableModel, PointTableView
 from .verify_panel import VerifyPanel
 from .window_common import _one_line, _parse_issue
@@ -60,9 +61,7 @@ from .window_consts import (
     _LOG_LINES,
     _NOTICE_MS,
     _START_SIZE,
-    _STATUS_ORDER,
     _STATUS_SLOT_WIDTH,
-    _STATUS_WORD,
     _TABLE_STRETCH,
     _TICK_MS,
     _TREE_STRETCH,
@@ -90,7 +89,7 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         # 主题只落这一次（构造期）：运行期再动 setStyleSheet 会让 Qt 重新 polish，
         # sizeHint 有机会跟着变——那正是"状态一变布局就跳"的另一种写法（见 theme 模块）。
         theme.apply_theme()
-        self.setWindowIcon(theme.app_icon())
+        self.setWindowIcon(icons.app_icon())
         self.session = session
         self.store = store
         self.log_file = log_file
@@ -589,7 +588,7 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
     def _summary(self) -> str:
         if not self._states:
             return "未启动"
-        full = "；".join(f"{name}:{_STATUS_WORD[state]}"
+        full = "；".join(f"{name}:{STATUS_WORD[state]}"
                           for name, state in self._states.items())
         if self._fits(full):
             return full
@@ -597,8 +596,8 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         counts: dict[str, int] = {}
         for state in self._states.values():
             counts[state] = counts.get(state, 0) + 1
-        return " ".join(f"{_STATUS_WORD[state]}{counts[state]}"
-                        for state in _STATUS_ORDER if counts.get(state))
+        return " ".join(f"{STATUS_WORD[state]}{counts[state]}"
+                        for state in STATUS_ORDER if counts.get(state))
 
     def _fits(self, text: str) -> bool:
         return QtGui.QFontMetrics(self.status_label.font()).horizontalAdvance(
@@ -624,24 +623,22 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         event.accept()
 
 __all__ = [
-    "MainWindow",
-    "_one_line",
-    "_parse_issue",
     "PORT_PROBE",
     "_FIRST_SPLIT",
     "_GC_EVERY_S",
     "_LOG_LINES",
     "_NOTICE_MS",
     "_START_SIZE",
-    "_STATUS_ORDER",
-    "_STATUS_SLOT_WIDTH",
-    "_STATUS_WORD",
-    "_TABLE_STRETCH",
+        "_STATUS_SLOT_WIDTH",
+        "_TABLE_STRETCH",
     "_TICK_MS",
     "_TREE_STRETCH",
+    "MainWindow",
+    "PointPropertiesDialog",
+    "_one_line",
+    "_parse_issue",
     "choose_offset",
     "import_table",
     "open_project",
     "save_project_as",
-    "PointPropertiesDialog",
 ]

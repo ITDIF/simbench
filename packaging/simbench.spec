@@ -22,7 +22,7 @@
 另外 `dist/simbench-onefile.exe` 是**单文件**形态（拷给同事方便），启动慢是已知代价。
 
 三个 exe 都带**图标**与**版本资源**（资源管理器属性页里能看见产品名/版本）：图标由
-`make_icon.py` 在构建时按 `theme.app_icon()` 那张画生成（六档尺寸，各自画、不拉伸）。
+`make_icon.py` 在构建时按 `icons.app_icon()` 那张画生成（六档尺寸，各自画、不拉伸）。
 """
 
 import pathlib

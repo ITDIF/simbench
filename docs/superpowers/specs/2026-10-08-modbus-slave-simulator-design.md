@@ -108,9 +108,11 @@ exe 打包（PyInstaller）不在 v1，作为独立里程碑在 v1 之后做完�
 gui/        PySide6：设备树 + 点位表 + 报文窗 + 启停控制 + CSV/工程对话框；
             2026-10-15 拆分：`main_window.py`（组装/布局/心跳）+ `window_menus.py` / `window_edit.py` /
             `window_io.py`（三个 mixin）+ `window_consts.py`（常量）+ `window_common.py`（小纯函数）
+            + `icons.py`（图标现画）+ `channel_state.py`（通道四态的符号 / 中文，**一处定义**）
 engine/     Session：唯一对 GUI 暴露的门面（启停/改值/拉取行 + 事件订阅），线程由 EngineRunner 持有；
             2026-10-15 拆分：`session.py`（生命周期/索引/事件）+ `reads.py`（取数）+ `writes.py`（写入/接管/恢复）
             + `records.py`（Row/WriteResult/ChannelRuntime）+ `render.py`（文案与小判定）
+            + `session_host.py`（两个 mixin 的宿主契约，**只给类型检查器看**，运行时不加行为）
 backend/    三条传输的后端：ModbusTcpBackend / ModbusRtuBackend（pymodbus）与 S7Backend（snap7）；
             与传输无关的那一半（波形 tick、值归属、报文/日志钩子、启停顺序）在
             `modbus_base.py` 的 `ModbusBackendBase`（**不 import pymodbus/snap7**），
