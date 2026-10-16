@@ -130,6 +130,8 @@ import `pymodbus`/`snap7`，也不 import `PySide6`；`backend` 不 import `PySi
 
 **门面约束（2026-10-15 结构优化，`tests/test_architecture.py` 守着）**：`engine/` 与 `gui/` 只许从 `simbench.backend` 门面（再导出的 `make_backend` / `ModbusBackendBase` / `check_port_is_free` / `BackendStartError` 等）与纯数据模块 `backend.events` 取东西，不许直接 import `modbus_base` / `modbus_tcp` 等实现文件。要对外新增一个名字，先在门面里再导出一行。
 
+**类型检查的覆盖范围（2026-10-16 扩）**：`mypy` 覆盖 `project` / `codec` / `engine` / `backend` / `master` 五棵子树。先前只有前三棵，于是 engine 被检查、而它调用的 backend 契约（`make_backend()` 的返回值、`ModbusBackendBase` 的钩子签名）不在闸门内——边界单边可信。补齐的成本实测是 15 处报错，无一处需要 `# type: ignore`。仍在闸门外的是 `gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）。
+
 线程模型（**2026-10-13 全面审查时按落地形状改写**；此前这一节写的是目标形状，"命令队列"
 与 `packet_event / validation_error` 这几个名字在实际代码里都不存在）：Qt 主线程 + 一个引擎
 线程（`engine/runner.EngineRunner` 持有 asyncio loop）。
@@ -605,7 +607,7 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
    "只加不猜/只删自己的"差异判定、`net show|check|apply|up|clean|init|device` 子命令与
    提权、启动挂钩（起从站/开界面时自动配，失败不拦启动）、按声明多挂监听、GUI 网络页。
    落地在 `simbench/net/`（`plan.py`/`spec.py`/`state.py`/`ledger.py`/`device.py`/`win32.py`/
-   `endpoints.py`/`startup.py`/`cli.py`）与 `tests/test_net_*.py`/`test_backend_listeners.py`/
+   `endpoints.py`/`startup.py`/`cli.py`，外加叶子模块 `errors.py`）与 `tests/test_net_*.py`/`test_backend_listeners.py`/
    `test_gui_net_panel.py`，口径见 §14。全量 `.venv/Scripts/python.exe -m pytest`
    **1031 passed**（无 skip、无 xfail，**串行**跑：这套件绑真实临时端口，两份并行结果不可信）。
    **没有单独的计划文档**：这一段是用户在一次会话里直接提的功能，落地口径全部记在 §14 与

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from ..project.model import channel_transport, is_socket
 from . import spec as netspec
-from .state import NetError
+from .errors import NetError
 
 # 通道 host 取这些值时视为"所有本机地址都在听"
 _WILDCARD = frozenset({"", "0.0.0.0", "::", "*"})

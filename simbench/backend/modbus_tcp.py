@@ -18,7 +18,7 @@ import socket
 import time
 
 from pymodbus import FramerType
-from pymodbus.server import ModbusTcpServer
+from pymodbus.server import ModbusBaseServer, ModbusTcpServer
 
 from .modbus_base import (  # noqa: F401  （再导出：老路径 import 它的人不少）
     BackendStartError,
@@ -224,7 +224,10 @@ class ModbusTcpBackend(ModbusBackendBase):
     """
 
     _pdu_offset = 7                    # MBAP 头 7 字节，PDU 从第 7 字节开始
-    SERVER_CLASS = ModbusTcpServer     # 子类换 `ModbusUdpServer` 之类
+    # 按 pymodbus 的公共服务端基类标注，不按 TCP 那个具体类：`ModbusUdpServer` 与
+    # `ModbusTcpServer` 之间**没有**继承关系（各自继承 `ModbusBaseServer`），标成具体类会
+    # 让 UDP 那一支的覆盖被判成类型不符。子类换的是哪一个，由这条注解的宽窄兜住。
+    SERVER_CLASS: type[ModbusBaseServer] = ModbusTcpServer
     FRAMER = FramerType.SOCKET         # socket framer = MBAP；RTU-over-TCP 换 `FramerType.RTU`
     TRANSPORT = "tcp"                  # 这个后端对应哪种传输（`describe()` 与测试都用它）
 

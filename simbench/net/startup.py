@@ -31,9 +31,10 @@ from ..project.model import channel_transport
 from . import endpoints as netendpoints
 from . import spec as netspec
 from .device import MANAGED_ADAPTER_NAME, find_managed_adapter, inf_available, loopback_inf_path
+from .errors import NetError
 from .ledger import Ledger
 from .plan import foreign_owners, plan_addresses
-from .state import NetError, read_adapters, read_addresses, read_all_addresses
+from .state import read_adapters, read_addresses, read_all_addresses
 
 # 启动挂钩的总闸。空值=开；`0/no/off/false/none` 都算关（写哪种都认，免得为个字面量吵架）。
 AUTO_ENV = "SIMBENCH_NET_AUTO"

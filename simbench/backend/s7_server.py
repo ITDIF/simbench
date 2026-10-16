@@ -28,14 +28,21 @@ import contextlib
 import ctypes
 import time
 import warnings
+from types import ModuleType
 from typing import Any
 
 from ..codec.s7_codec import clamp_to_type, encode, read_bit, span_bytes, write_bit
-from ..project.model import parse_s7_area, s7_summary
+from ..project.model import Point, parse_s7_area, s7_summary
 from .modbus_base import BackendStartError, ModbusBackendBase
 
 # S7 也是 TCP 端口：归属判定与 TCP 同一套两级探针（bind + connect），不另写一份。
 from .modbus_tcp import check_port_is_free
+
+# 三个可选模块的**类型**先声明：`except` 那一支要把它们置成 None，不声明的话 mypy 按第一
+# 次赋值（Module）推，后面 `= None` 就成了赋值不符。
+_snap7_common: ModuleType | None
+_snap7_server: ModuleType | None
+_snap7_types: ModuleType | None
 
 try:                       # 延迟可用性：装不上依赖不该拦住"只用 Modbus 的人"
     with warnings.catch_warnings():
@@ -88,7 +95,7 @@ class S7Backend(ModbusBackendBase):
         await asyncio.to_thread(check_port_is_free, self.host, self.port,
                                 self.channel_name)
 
-    def _flatten_points(self) -> list[tuple[int, object]]:
+    def _flatten_points(self) -> list[tuple[int, Point]]:
         """定位键固定 0：S7 按区/DB/字节寻址，主站的事件里也没有 unit 这一维
         （用 unit_id 当键的话，事件驱动的归属标记就会一个点都命中不了）。"""
         return [(0, pt) for dev in self.channel.devices for pt in dev.points]
@@ -103,7 +110,9 @@ class S7Backend(ModbusBackendBase):
 
     def _create_server(self, devices) -> Any:
         """建 snap7 服务端 + 按点表挂区域缓冲（`devices` 恒为 None：S7 不看 Modbus 那套）。"""
-        if _snap7_server is None:
+        # 两个都判：下面 `load_library()` 走的是 `_snap7_common`，只判 `_snap7_server`
+        # 会在"只装了一半"时甩出一个不认识的 AttributeError。
+        if _snap7_common is None or _snap7_server is None:
             raise BackendStartError(f"channel {self.channel_name}: S7 support is not "
                                     f"installed; {DEPENDENCY_HINT}")
         try:
@@ -299,7 +308,7 @@ class S7Backend(ModbusBackendBase):
                     self._server.unlock_area(code, index)
 
 
-def _build_areas(channel) -> list[tuple[Any, int, Any, list]]:
+def _build_areas(channel) -> list[tuple[str, int, Any, int, Any, list]]:
     """按点表算每个区要多大、把初值填进去、建成 ctypes 缓冲。
 
     区按 `(区名, DB 号)` 分组（S7 的地址是"哪个区的第几个字节"）；缓冲区大小 = 该区最靠后的

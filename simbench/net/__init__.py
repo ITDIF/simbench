@@ -10,6 +10,8 @@ GUI 只显示差异，命令由这一层执行。
 分工：`spec.py`（声明文件）、`plan.py`（差异判定，纯函数）、`state.py`（只读现状）、
 `ledger.py`（我们加过什么）、`device.py` + `win32.py`（专用网卡）、`endpoints.py`（这一路
 通道要额外监听哪些地址）、`startup.py`（启动挂钩与网络页的入口）、`cli.py`（命令行）。
+`errors.py` 是**叶子**（只放 `NetError`，什么都不 import）：`endpoints.py` 与 `spec.py`
+都要用它，而它们不该因此把 `state.py` 那一层（ctypes + subprocess）拖进来。
 口径与"为什么"写在 spec §14。
 
 安全口径（现场不许留痕）：

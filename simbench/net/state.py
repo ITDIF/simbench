@@ -17,6 +17,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from .errors import NetError
+
 MANUAL, WELL_KNOWN, DHCP = 1, 2, 3
 
 _PS = ("powershell", "-NoProfile", "-NonInteractive", "-Command")
@@ -25,10 +27,6 @@ _ENCODING_PRELUDE = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
 _ADAPTER_FIELDS = ("Name", "InterfaceDescription", "ifIndex",
                    "InterfaceGuid", "Status", "MacAddress", "PnPDeviceID")
 _ADDRESS_FIELDS = ("InterfaceIndex", "IPAddress", "PrefixLength", "PrefixOrigin")
-
-
-class NetError(RuntimeError):
-    """读系统网络状态失败。消息是给人看的一句中文，不带 traceback。"""
 
 
 @dataclass(frozen=True)

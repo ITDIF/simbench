@@ -19,8 +19,14 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..project.model import area_is_bit, channel_transport, is_serial
+
+if TYPE_CHECKING:
+    # 只在类型检查时取：`_make_client()` 里那份 import 是**故意**延迟的（pymodbus 没装也
+    # 应该能 import 本模块、能跑不碰主站的路径），所以这里不能抬到运行时。
+    from pymodbus.client.base import ModbusBaseSyncClient
 
 
 @dataclass
@@ -36,7 +42,9 @@ class MasterLink:
     bytesize: int = 8
     stopbits: int = 1
     timeout: float = 1.0
-    _client: object | None = field(default=None, repr=False)
+    # 三种客户端（TCP / UDP / 串口）都继承 `ModbusBaseSyncClient`，connect/close/各类
+    # `read_*` 都在那个基类上——用 `object` 标等于把这一整层的调用全变成不可检查。
+    _client: ModbusBaseSyncClient | None = field(default=None, repr=False)
 
     @classmethod
     def for_channel(cls, channel, *, host: str | None = None, port: int | None = None,
@@ -73,7 +81,7 @@ class MasterLink:
                 self._client.close()
             self._client = None
 
-    def _make_client(self):
+    def _make_client(self) -> ModbusBaseSyncClient:
         from pymodbus import FramerType
         from pymodbus.client import ModbusSerialClient, ModbusTcpClient, ModbusUdpClient
 

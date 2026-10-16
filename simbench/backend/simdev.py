@@ -104,5 +104,7 @@ def build_sim_devices(project: Project) -> list[SimDevice]:
             if not blocks[i]:
                 blocks[i].append(placeholder_for(area))
             blocks[i].sort(key=lambda e: e.address)
-        devices.append(SimDevice(id=unit_id, simdata=tuple(blocks)))
+        # `by_unit` 里的值**本来就是** 4 元组（co/di/hr/ir 各一格）；再套一层 `tuple()`
+        # 会把定长元组降级成长度未知的 `tuple[list, ...]`，pymodbus 那个定长签名就收不下。
+        devices.append(SimDevice(id=unit_id, simdata=blocks))
     return devices

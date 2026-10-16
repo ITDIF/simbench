@@ -38,11 +38,11 @@ from .device import (
 # 「给外面用」），用例与 `startup.py` 按老路径 import 那两个名字。
 from .elevate import _run_elevated as _run_elevated
 from .elevate import _self_command_prefix as _self_command_prefix
+from .errors import NetError
 from .ledger import Ledger
 from .ledger import default_path as default_ledger_path
 from .plan import foreign_owners, plan_addresses
 from .state import (
-    NetError,
     is_elevated,
     read_adapters,
     read_addresses,

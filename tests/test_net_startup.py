@@ -22,7 +22,8 @@ import pytest
 
 from simbench.net import startup
 from simbench.net.device import MANAGED_ADAPTER_NAME
-from simbench.net.state import MANUAL, Adapter, Address, NetError
+from simbench.net.errors import NetError
+from simbench.net.state import MANUAL, Adapter, Address
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")

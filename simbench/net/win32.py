@@ -21,7 +21,7 @@ import sys
 from ctypes import wintypes
 from pathlib import Path
 
-from .state import NetError
+from .errors import NetError
 
 NET_CLASS_GUID = "{4d36e972-e325-11ce-bfc1-08002be10318}"
 LOOPBACK_HARDWARE_ID = "*MSLOOP"

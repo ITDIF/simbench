@@ -28,7 +28,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .state import Adapter, NetError, as_list, run_powershell
+from .errors import NetError
+from .state import Adapter, as_list, run_powershell
 
 # 固定名字：现场一眼能认出这是工具建的、可以删。也用它作为"账本丢了"时的认领依据。
 MANAGED_ADAPTER_NAME = "simbench 模拟网卡"

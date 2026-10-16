@@ -49,12 +49,20 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.13"
-# 只覆盖"数据与判定"那三棵子树（project / codec / engine）：界面与 net 那两层有大量
-# Qt / Windows API 的动态用法，全仓严格 = 几百条 `# type: ignore`，那是噪音不是保障。
-files = ["simbench/project", "simbench/codec", "simbench/engine"]
+# 覆盖"数据与判定"那五棵子树（project / codec / engine / backend / master）。
+# 2026-10-16 把 backend 与 master 拉进来的理由：engine 一直是被检查的，而它调用的正是
+# backend 的契约（`make_backend()` 的返回值、`ModbusBackendBase` 的钩子签名）——只查一半
+# 等于这条边界单边可信。实测纳入的成本是 15 处报错（无一处需要 `# type: ignore`：
+# pymodbus 的客户端/服务端找得到公共基类，snap7 那三个可选模块标成 `ModuleType | None`，
+# 两处返回类型注解写漏了格子）。同批还顺手逮到一处真隐患（`ownership.write_targets` 会把
+# `unit_id=None` 的帧当成写、往归属表里塞 None 键）。
+#
+# 仍在闸门外的两棵：`gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）——它们的
+# 注解要补到能过检查是另一档工作量，等有人真正去碰那两层时再逐个拉进来。
+files = ["simbench/project", "simbench/codec", "simbench/engine",
+         "simbench/backend", "simbench/master"]
 ignore_missing_imports = true
-# 被 import 进来的那几棵（backend/ 用的是 pymodbus 的动态 API、net/ 全是 ctypes 与
-# Windows 结构体）先不报：它们在闸门外，等各自的注解补完再逐个拉进来。
+# 被 import 进来但不在 `files` 里的那几棵（gui / net）先不报。
 follow_imports = "silent"
 warn_unused_ignores = true
 warn_redundant_casts = true

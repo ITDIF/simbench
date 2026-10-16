@@ -16,8 +16,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from .state import Address
+if TYPE_CHECKING:
+    # 只在类型检查时取：`Address` 在本文件里**只出现在注解**（`present: list[Address]`），
+    # 而 `from __future__ import annotations` 让注解不被求值。抬到运行时的话，这个"不读系统"
+    # 的模块就会因为一个数据类把 `state.py`（顶层 `ctypes` + `subprocess`）整个拖进来——
+    # 与它自己那句"必须能脱离真实网卡单测"正好相反。
+    from .state import Address
 
 
 @dataclass(frozen=True)

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..project import fsio
-from .state import NetError
+from .errors import NetError
 
 DEFAULT_PREFIX = 24
 DEFAULT_PORT = 502

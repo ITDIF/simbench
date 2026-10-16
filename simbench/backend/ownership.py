@@ -155,7 +155,11 @@ def write_targets(packet: PacketEvent) -> list[tuple[int, str, int, int]] | None
     漏标才是 spec §7 那条"值被波形顶回去"的事故。长度判定仍只有 `len(body) < 5` 一处（固定
     PDU 的字节数）：MBAP 的 length、byte count 都不参与，一块里挤几条报文也不管（切帧是调用方的事）。
     """
-    if packet.direction != "rx":
+    if packet.direction != "rx" or packet.unit_id is None or packet.function_code is None:
+        # `unit_id` 与 `function_code` 在 `PacketEvent` 上是 Optional（不是每条报文都带着
+        # 它们）。缺了就当"不是写"：漏标只会让那个点晚一点回到波形，而**照标**会往归属表里
+        # 塞一个 `None` 键——按 (unit_id, 区, 地址) 查的那一侧再也命中不了它，界面上只表现成
+        # "这条曲线不动"，比漏标难查得多。
         return None
     area = _WRITE_FC_AREA.get(packet.function_code)
     if area is None:

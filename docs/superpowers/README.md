@@ -17,6 +17,7 @@
 | `plans/2026-10-13-review-round2.md` | 第二轮深度审查的 12 条意见（本批） | 已完成（逐条有结论） |
 | `plans/2026-10-14-import-export-formats.md` | 多种导入导出格式（CSV / Excel / project.json 收进一张表）+ 协议适配器的结论与「加一种协议要改哪 16 处」 | 已完成 |
 | `plans/2026-10-14-deep-review-batch.md` | 深度审查那一批：13 条优化（原子保存、崩溃落盘、刷新性能、静态检查、设置、传输注册…）+ 2 项扩展（主站模式、三种新传输） | 已完成 |
+| `plans/2026-10-16-type-coverage-and-net-purity.md` | mypy 覆盖扩到 `backend/`+`master/`（15 处全用真标注修，顺带逮到 `write_targets` 的 None 键隐患）+ `NetError` 挪成叶子模块让 `net` 的纯模块摘掉 ctypes/subprocess | 已完成 |
 | `plans/2026-10-15-architecture-tidy.md` | 结构整理第二轮：CI 两条门禁（ruff / mypy）转绿 + 通道四态收成一处 + 删四个死函数 + 图标从 theme 拆出 | 已完成 |
 | `notes/2026-10-12-m5-rtu-probes.md` | M5 的前置实测（`socket://` 当虚拟串口那条路） | 实测记录 |
 | `notes/2026-10-13-s7-probes.md` | S7 的前置实测（snap7 能当服务端、事件码布局、两套区代码） | 实测记录 |

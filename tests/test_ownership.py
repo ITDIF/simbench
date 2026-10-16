@@ -52,6 +52,19 @@ def evt(fc: int, raw: bytes, unit: int = 11) -> PacketEvent:
     return PacketEvent("tcp-5020", "rx", raw, unit, fc, "", 0.0)
 
 
+def test_a_frame_missing_unit_or_function_code_is_never_a_write():
+    """`unit_id` 与 `function_code` 在 `PacketEvent` 上是**可缺的**（不是每条报文都带着）。
+
+    缺了必须当"不是写"：照标会往归属表里塞一个 `None` 键，而按 (unit_id, 区, 地址) 查的那
+    一侧再也命中不了它——现场只表现成"这条曲线不动"，比漏标难查得多。这条钉的是
+    `write_targets` 里那个早退（2026-10-16 纳入 mypy 时逮到的：原来只有 `direction` 一道闸）。
+    """
+    raw = bytes.fromhex("0001000000060b0600040058")      # 一条**合法**的 FC06 写
+    assert write_targets(evt(6, raw)) == [(11, "hr", 4, 1)]
+    assert write_targets(evt(6, raw, unit=None)) is None          # 不知道是哪个 unit
+    assert write_targets(PacketEvent("tcp-5020", "rx", raw, 11, None, "", 0.0)) is None
+
+
 def test_fc06_write_one_register_is_read_as_that_address():
     # tid=0001 unit=0B fc=06 addr=0004 value=0058
     assert write_targets(evt(6, bytes.fromhex("0001000000060b0600040058"))) \

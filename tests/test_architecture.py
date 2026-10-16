@@ -387,3 +387,115 @@ def test_backend_facade_guard_catches_a_planted_internal_import(tmp_path):
     offenders = _backend_facade_offenders("engine", root)
     assert len(offenders) == 1 and offenders[0].endswith("backend.modbus_tcp"), offenders
     assert "good.py" not in offenders[0]
+
+
+# ---- net 的纯模块：运行时不许 import 系统层（ctypes / subprocess） ----
+
+# 这几个模块按文档串是"纯函数 / 文件格式"，运行时都不该碰系统状态。`state.py` / `win32.py` /
+# `device.py` 不在这张表里——它们本来就跟系统打交道。
+NET_PURE = ("errors.py", "spec.py", "ledger.py", "plan.py", "endpoints.py")
+NET_SYSTEM = ("ctypes", "subprocess", "state")
+
+
+def _is_type_checking(test: ast.expr) -> bool:
+    """`if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:`——运行时不执行的那个分支。"""
+    return ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
+
+
+def _type_checking_lines(tree: ast.Module) -> set[int]:
+    """`if TYPE_CHECKING:` 覆盖到的行号。落在这个区间里的 import 不算运行时依赖。"""
+    covered: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and _is_type_checking(node.test):
+            covered.update(range(node.lineno, node.end_lineno + 1))
+    return covered
+
+
+def _net_system_offenders(root: pathlib.Path = ROOT) -> list[str]:
+    """`NET_PURE` 里那些文件**运行时**对系统层的依赖。
+
+    相对 import 要单独判：`_imported_modules` 会跳过它们（它按顶层包名判外部库），而这里要
+    抓的恰恰是 `from .state import NetError` 那种"为了一个名字把 ctypes + subprocess 拖进来"。
+    `if TYPE_CHECKING:` 里的 import 不算——那时它只是给类型检查器看的，运行时不会执行。
+    """
+    offenders: list[str] = []
+    for file in _python_files(SYSTEM_NET, root):
+        if file.name not in NET_PURE:
+            continue
+        tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
+        typed_only = _type_checking_lines(tree)
+        for node in ast.walk(tree):
+            # `ast.Module` 之类没有 `lineno`：那些节点本来也不是 import，跳过即可
+            if getattr(node, "lineno", None) in typed_only:
+                continue
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if _top_module(alias.name) in NET_SYSTEM:
+                        offenders.append(f"{file}: import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level and module == "state":
+                    offenders.append(f"{file}: from .state import ...")
+                elif not node.level and _top_module(module) in NET_SYSTEM:
+                    offenders.append(f"{file}: from {module} import ...")
+    return offenders
+
+
+def test_net_pure_modules_do_not_pull_in_the_system_layer():
+    """`endpoints.py` 的文档串写着"纯函数，不读系统"，这条把它变成可检查的。
+
+    背景（2026-10-16）：`NetError` 原来住在 `state.py`（顶层 `import ctypes` / `subprocess`），
+    于是 `endpoints.py` 与 `spec.py` 只为了指认一种错误、`plan.py` 只为了一个 `Address` 注解，
+    就把整个系统层拖了进来——实测 `import simbench.net.endpoints` 之后 `ctypes` 与
+    `subprocess` 都在 `sys.modules` 里。这与 `plan.py` 那句"这是'要不要动系统'的唯一判据，
+    所以它必须能脱离真实网卡单测"正好相反。把 `NetError` 挪成叶子（`net/errors.py`）、
+    `plan.py` 的 `Address` 收进 `TYPE_CHECKING` 之后，钉住这条防它漂回去。
+    """
+    scanned = [f for f in _python_files(SYSTEM_NET) if f.name in NET_PURE]
+    assert scanned, "net/ 里一个纯模块都没扫到，这条守卫是空跑"
+    offenders = _net_system_offenders()
+    assert offenders == [], f"net 的纯模块把系统层拖进来了: {offenders}"
+
+
+def test_the_net_guard_is_not_vacuous():
+    """守卫不许是空跑的另一半：`state.py` 里**确实**有人在 import 这两个库。
+
+    只判"纯模块干净"的话，哪天 `state.py` 把 `subprocess` 那一层挪走、这条扫描变成永远为
+    真，也没人会知道它已经不守任何东西了。
+    """
+    scanned = {f.name for f in _python_files(SYSTEM_NET)}
+    assert {"state.py", "errors.py", "plan.py"} <= scanned, scanned
+    state = ROOT / SYSTEM_NET / "state.py"
+    assert "ctypes" in _imported_modules(state), "state.py 不再 import ctypes，守卫方向反了"
+    assert "subprocess" in _imported_modules(state), "state.py 不再 subprocess，守卫方向反了"
+    # 叶子模块真的什么都不 import（`__future__` 不算——它是编译器指令，不是依赖）
+    errors = ROOT / SYSTEM_NET / "errors.py"
+    assert set(_imported_modules(errors)) <= {"__future__"}, "errors.py 应该是叶子"
+
+
+def test_the_net_pure_module_guard_catches_a_planted_system_import(tmp_path):
+    """植入样本：纯模块里写 `import subprocess` / `from .state import ...` 必须被抓。
+
+    同一株样本里放一个 `TYPE_CHECKING` 分支：那一种是**允许**的，不许被误报。
+    """
+    root = _fake_root(tmp_path, {
+        "net/plan.py": "import subprocess\n",
+        "net/spec.py": "from .state import NetError\n",
+        "net/endpoints.py": "from ctypes import windll\n",
+        "net/ledger.py": "import pathlib\n",
+        "net/errors.py": "from __future__ import annotations\n",
+        "net/state.py": "import subprocess\n",
+    })
+    (root / "net" / "ledger.py").write_text(
+        "from __future__ import annotations\n"
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from .state import Address\n",
+        encoding="utf-8")
+    offenders = _net_system_offenders(root)
+    assert len(offenders) == 3, offenders
+    joined = "; ".join(offenders)
+    for name in ("plan.py", "spec.py", "endpoints.py"):
+        assert name in joined, offenders
+    assert "ledger.py" not in joined, f"TYPE_CHECKING 里的 import 被误报了: {offenders}"

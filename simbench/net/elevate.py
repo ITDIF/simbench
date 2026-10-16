@@ -21,7 +21,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .state import NetError
+from .errors import NetError
 
 
 def _self_command_prefix() -> list[str]:

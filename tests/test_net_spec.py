@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from simbench.net.errors import NetError
 from simbench.net.spec import (
     DEFAULT_PORT,
     DeviceNet,
@@ -21,7 +22,6 @@ from simbench.net.spec import (
     save,
     unique_addresses,
 )
-from simbench.net.state import NetError
 
 
 def test_parses_a_minimal_declaration():
