@@ -66,7 +66,7 @@ setuptools>=81 移除的 `pkg_resources`）。**没装也能用 Modbus**：只�
 ```
 
 `examples/virtual-device.csv` 是一台**虚拟设备**（"隧道机电 1 号机"，unit id **11**）：
-四区都有点、保持寄存器 hr 0..17 **连续**，里面既有会动的（回路温度 sine、风速 ramp、
+四区都有点、保持寄存器 hr 0..14 **连续**，里面既有会动的（回路温度 sine、风速 ramp、
 启动命令 step）也有不动的（状态字、累计电量 uint64、铭牌 string）。
 
 Modbus Poll 里：Connection 选 **Modbus TCP/IP**、IP `127.0.0.1`、Port `5020`、Slave ID `11`；

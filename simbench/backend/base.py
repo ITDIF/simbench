@@ -313,11 +313,25 @@ class BackendBase:
         return payload
 
     def _note_master_writes(self, raw: bytes) -> None:
-        """一次到达的 rx 字节块 -> 切成帧 -> 逐帧把落在点表上的点标成 manual。
+        """一次到达的 rx 字节块 -> 切成帧 -> **把第一条**落在点表上的点标成 manual。
 
         为什么要自己切帧：pymodbus 在**组帧之前**就 trace，一个块里可能挤了两条写请求
-        （实测 24 字节一次到达），而 `write_targets` 按契约只解**第一条**，剩下那条就白写
-        不接管——而且漏得没有声音（spec §7 正是防"下发没生效"这类误判的）。
+        （实测 24 字节一次到达），而 `write_targets` 按契约只解**第一条**。
+
+        **为什么只标第一条**（2026-10-17 按实测改）。同一个块里第二条及之后的请求，
+        pymodbus 3.15.0 **既不落盘也不应答**：`transport/transport.py` 每次 `data_received`
+        只处理一条 PDU，剩下的字节留在 `recv_buffer` 里只记一条 `EXTRA_DATA` 日志。实测
+        （一条连接、同段两条写）：第二条的寄存器**一直没变**——等 1.5 秒不变、再发下一条请求
+        也不补、关连接也不补；主站那边只表现为"超时"。
+
+        原先这里是**逐帧都标**，当时的假设是"pymodbus 会把两条都写下去，只是没跟着标接管"。
+        那个假设不成立：标了没落盘的那一条 = 把它的曲线**停掉**（值冻在最后一格），而主站
+        那次写是失败的——纯副作用，而且静默。所以现在只标第一条（唯一真落盘的那条），
+        其余的显式报一行（`_emit` 带 60s 去重，不刷屏）。
+
+        trace 的 payload **不跨帧累计**（实测：逐条发各 12B/1 帧、同段两条 24B/2 帧、之后再发
+        又回到 12B/1 帧），所以"这个块里有几帧"就是"这一批到过几条请求"——`len(frames) > 1`
+        既不会误报，也不会漏报。
 
         为什么不给自己留"切不完的余量"（trace 的实测形状决定，别照直觉改回去）：
         `trace_packet` 拿到的是 transport 那一侧**累计**的缓冲，半个帧会在下一次连同新到的
@@ -329,8 +343,18 @@ class BackendBase:
         为止，不猜下一帧从哪儿开始——撒谎的长度字段同样会把 pymodbus 自己的组帧卡住，
         那次写压根落不到寄存器上，这里不替它标接管。
         """
-        for frame in self._split_frames(raw):
-            self._own_write_frame(frame)
+        frames = list(self._split_frames(raw))
+        if not frames:
+            return
+        self._own_write_frame(frames[0])
+        if len(frames) > 1:
+            # 这一批里还有请求，它们**不会**被处理（理由见上面那段实测）。出声，别静默：
+            # 主站那边只看到超时，操作员得能从日志里知道原因在模拟器这侧。
+            self._emit("warning", "batched_requests", (),
+                       f"{len(frames) - 1} more request(s) arrived in the same batch as the "
+                       f"frame being handled; this pymodbus build handles only the first one "
+                       f"per receive, so they are dropped (the master sees a timeout)",
+                       time.monotonic())
 
     def _own_write_frame(self, frame: bytes) -> None:
         """一整帧 rx 报文 -> 命中的点整段切成 manual（点表里没有的格子一律不理）。"""

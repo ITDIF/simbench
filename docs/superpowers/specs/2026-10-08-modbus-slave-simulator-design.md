@@ -536,6 +536,31 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
   `tests/test_integration_tcp.py::test_readonly_point_blocks_master_but_not_engine`）。
 - 波形算出 NaN / 超 datatype 范围 → 钳位到边界 + 只记一条日志（同点同类错误 60s 内不重复刷屏）。
 
+### 8.1 已知的上游限制：一个 TCP 段里只处理第一条请求（2026-10-17 实测）
+
+**事实**：一条连接上，如果一个 TCP 段里挤了两条及以上 Modbus 请求，**只有第一条被处理**
+（第二条既不落盘也不应答）。实测（原始 socket 拼一个段 + 真主站读回）：第二条的寄存器一直没变
+——等 1.5 秒不变、再发下一条请求也不补、关连接也不补；每轮如此，三条一轮的序列跑下来只有
+奇数 tid 生效。超过 1024 字节的那种"批量下发"更彻底：`transport/transport.py` 直接
+`recv_buffer = b""`，**整块丢**（实测一次发 100 条请求 → 0 条应答）。
+
+**根因在上游**（pymodbus 3.15.0，不是本项目的代码）：`transport/transport.py` 的
+`datagram_received` 每次只调一次 `callback_data`（解一条 PDU），剩下的字节留在 `recv_buffer`
+里只记一条 `EXTRA_DATA` 日志；`server/requesthandler.py` 那条处理链也是"一次一条"。服务端构造
+签名里没有可注入的协议类，所以想在本项目内绕开就得动 pymodbus 内部（版本敏感），风险大于收益
+——先如实记档，等上游修或等真的有人拿流水线主站验收时再动。
+
+**我们的处置**（`backend/base.py::_note_master_writes`）：接管**只跟着真落盘的那一条标**。
+原先这里是"逐帧都标"，当时的假设是"pymodbus 会把两条都写下去、只是没跟着标接管"——那个假设
+不成立（见上），于是"标了没落盘的那一条"= 把它的曲线**停掉**、值冻在最后一格，而主站那次写是
+失败的：纯副作用且静默。现在只标第一条，其余显式报一行
+（`_emit("warning", "batched_requests", ...)`，同一批只报一次，主站那边表现为超时，操作员能从
+日志里知道原因在模拟器这侧）。`tests/test_integration_tcp.py::test_a_second_request_in_the_same_segment_is_dropped_and_not_taken_over`
+钉住这三件事：第一条落盘且应答、第二条不落盘、**第二条不许被标接管**。
+
+**现场含义**：`Modbus Poll` 之类的主站**同时开多个轮询窗口**（复用一条连接）时，第二个窗口会
+一直超时。单窗口轮询不受影响。
+
 ## 9. 留缝位置（将来加 v2 功能不推翻结构）
 
 | 将来的需求 | 现在的缝 |

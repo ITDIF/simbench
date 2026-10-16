@@ -1386,29 +1386,64 @@ def test_an_address_that_is_not_a_point_leaves_the_ownership_state_empty(master)
     assert backend._sources.cleared() == 0
 
 
-def test_two_writes_inside_one_tcp_chunk_are_both_taken_over(open_backend):
-    """两条写请求挤进同一个 TCP 段：pymodbus 在**组帧之前**就 trace，所以 sink 一次拿到
-    的是这 24 个字节，而 `write_targets` 只解得出第一条。不按 MBAP 长度自己切，第二条就
-    白写不接管，而且漏得没有声音。
+def test_only_the_first_write_in_one_tcp_chunk_lands_and_is_taken_over(open_backend):
+    """同一个 TCP 段里两条写：**只有第一条**落盘并被接管，第二条被丢弃（2026-10-17 实测）。
 
-    `wait_for` 那条断言是"这一条测的确实是粘帧"的证据：真要拆成了两段，测的就是下面那条
-    而不是这条（切帧的缓冲区两种形状都得留下余量）。
+    先说当年为什么这条用例写的是"两条都被接管"：pymodbus 在**组帧之前**就 trace，sink 一次
+    拿到 24 字节（下面 `wait_for` 那一段仍然钉这条：两条帧确实粘在同一个字节块里到达），而
+    `write_targets` 按契约只解第一条——当时的推断是"pymodbus 会把两条都写下去、只是没跟着标
+    接管"，所以"逐帧都标"来补上第二条。
+
+    **实测把这个推断推翻了**（一条真实连接、同一个段里两条写）：
+      * 第二条的寄存器**一直没变**——等 1.5 秒不变、再发下一条请求也不补、关连接也不补；
+      * 主站那边只表现为"超时"（第二条没有任何响应）；
+      * 根因在上游：`transport/transport.py` 每次 `data_received` 只处理一条 PDU，剩下的字节
+        留在 `recv_buffer` 里只记一条 `EXTRA_DATA` 日志（见 spec §8.1）。
+    所以逐帧标接管是错的：标了没落盘的那一条 = 把它的曲线**停掉**、值冻在最后一格，而主站那次
+    写是失败的——纯副作用，而且静默。现在只标第一条，其余显式报一行（`batched_requests`）。
     """
     port = free_port()
     seen: list[bytes] = []
+    lines: list[tuple[str, str]] = []
     with open_backend(tunnel_project(port).channels[0],
-                      packet_sink=rx_chunks(seen)) as backend:
+                      packet_sink=rx_chunks(seen),
+                      log_sink=lambda level, text: lines.append((level, text))) as backend:
+        client = connect(port)
+        try:
+            got = client.read_holding_registers(2, count=1, device_id=11)
+            before = list(got.registers)
+        finally:
+            client.close()
+
         sock = raw_master(port)
         try:
+            # hr4 = 状态字（uint16，可写）；hr2 = VI风速（float32 的头一格）
             pair = fc06(4, 0x0058, tid=1) + fc06(2, 0x0102, tid=2)
             sock.sendall(pair)                       # 一次发出：两条帧粘在同一个字节块里
             wait_for(lambda: len(pair) in {len(chunk) for chunk in seen},
                      timeout=5.0, what="both frames delivered in one chunk")
-            for address in (2, 3, 4):                # 状态字（1 格）+ VI风速（2 格）
-                assert not backend.source_is_waveform(11, "hr", address), address
-            assert backend.source_is_waveform(11, "hr", 0), "CO浓度 被主站的写接管了"
         finally:
             sock.close()
+
+        client = connect(port)
+        try:
+            got = client.read_holding_registers(4, count=1, device_id=11)
+            assert list(got.registers) == [0x0058], "第一条写没落盘"
+            got = client.read_holding_registers(2, count=1, device_id=11)
+            assert list(got.registers) == before, (
+                f"第二条写居然落盘了（上游行为变了，这条用例要改成「两条都落盘」）: "
+                f"{before} -> {list(got.registers)}")
+        finally:
+            client.close()
+
+        assert not backend.source_is_waveform(11, "hr", 4), "真落盘的第一条该标接管"
+        for address in (2, 3):                       # VI风速 占 hr2-3
+            assert backend.source_is_waveform(11, "hr", address), (
+                f"hr{address}: 没落盘的那一条被标了接管——它的曲线会被停掉、值冻住，"
+                f"而主站那次写是失败的")
+        assert backend.source_is_waveform(11, "hr", 0), "CO浓度 没被主站写接管"
+        assert any("same batch" in text for _level, text in lines), (
+            f"丢了请求却一声不响：{lines}")
 
 
 def test_a_write_split_across_two_chunks_is_still_taken_over(open_backend):
