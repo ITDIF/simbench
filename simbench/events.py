@@ -1,4 +1,14 @@
-"""引擎往 GUI 抛的事件对象。字段是契约：加字段就加默认值，不要改名。"""
+"""引擎往 GUI 抛的事件对象。字段是契约：加字段就加默认值，不要改名。
+
+**为什么在根上**（2026-10-16 从 `backend/events.py` 挪出来）：这几类是**引擎与界面之间的
+契约**——产出方是 backend（后端收发包时造 `PacketEvent`、起停时造 `ChannelState`），消费方
+是 engine 与 gui。原先住在 backend 包里，代价直接落在架构守卫上：`tests/test_architecture.py`
+那条"界面不许 import backend"的线必须为它开一个口子（`gui → backend.events`）。挪到根上
+（与 `swallow.py` / `settings.py` 同级）之后没有这条异常，三方都能取，方向上也谁都不欠谁。
+
+**不能挪进 `engine/`**：backend 是这些事件的**产出方**，那样会变成 backend → engine，把依赖
+方向弄反。
+"""
 
 from __future__ import annotations
 

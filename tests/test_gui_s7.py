@@ -13,10 +13,10 @@
 import pytest
 from PySide6 import QtWidgets
 
-from simbench.backend.events import PacketEvent
 from simbench.engine.packets import PacketStore
 from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Row, Session
+from simbench.events import PacketEvent
 from simbench.gui.channel_panel import STATUS_LABELS, ChannelPanel
 from simbench.gui.packet_view import PacketModel
 from simbench.gui.point_props import PointPropertiesDialog

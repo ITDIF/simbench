@@ -121,6 +121,8 @@ codec/      point_codec：点位值 ↔ 原始寄存器序列（数据类型 × 
             s7_codec：S7 点位值 ↔ 字节序列（大端、无字序、bool 一位）
 project/    数据模型（Project/Channel/Device/Point）+ project.json + CSV 读写 + 校验
 net/        系统网络层（网卡现状/差异/专用网卡/设备 IP）；唯一允许跑 PowerShell 与 netsh 的包（§14）
+根下        横切与入口：`events.py`（engine 与 GUI 之间的事件契约，2026-10-16 从 `backend/` 挪出）、
+            `swallow.py`（吞异常的唯一出口）、`settings.py`、`diagnostics.py`、`csv_io_entry.py`、`__main__.py`
 ```
 
 依赖方向单向：`gui → engine → backend → project/codec`，`net` 是旁路（谁都可以调它，它
@@ -128,9 +130,11 @@ net/        系统网络层（网卡现状/差异/专用网卡/设备 IP）；�
 import `pymodbus`/`snap7`，也不 import `PySide6`；`backend` 不 import `PySide6`；`subprocess`
 只许出现在 `net/`。
 
-**门面约束（2026-10-15 结构优化，`tests/test_architecture.py` 守着）**：`engine/` 与 `gui/` 只许从 `simbench.backend` 门面（再导出的 `make_backend` / `BackendBase` / `check_port_is_free` / `BackendStartError` 等）与纯数据模块 `backend.events` 取东西，不许直接 import `base` / `modbus_tcp` 等实现文件。要对外新增一个名字，先在门面里再导出一行。
+**门面约束（2026-10-15 起，2026-10-16 收紧，`tests/test_architecture.py` 守着）**：`engine/` 只许从 `simbench.backend` 门面（再导出的 `make_backend` / `BackendBase` / `check_port_is_free` / `BackendStartError` 等）取东西，不许直接 import `base` / `modbus_tcp` 等实现文件；要对外新增一个名字，先在门面里再导出一行。
 
-**类型检查的覆盖范围（2026-10-16 扩）**：`mypy` 覆盖 `project` / `codec` / `engine` / `backend` / `master` 五棵子树。先前只有前三棵，于是 engine 被检查、而它调用的 backend 契约（`make_backend()` 的返回值、`BackendBase` 的钩子签名）不在闸门内——边界单边可信。补齐的成本实测是 15 处报错，无一处需要 `# type: ignore`。仍在闸门外的是 `gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）。
+**`gui/` 连门面都不许碰**（同一批收紧）：它对 `backend` 的引用数是 0。原先做不到——事件的纯数据类住在 `backend/events.py`（产出方是 backend、消费方是 engine 与 gui），于是这条线必须为它开个口子；现在那几类挪到了根上的 `simbench/events.py`（与 `swallow.py` 同级），口子封掉。
+
+**类型检查的覆盖范围（2026-10-16 扩）**：`mypy` 覆盖 `project` / `codec` / `engine` / `backend` / `master` 五棵子树，外加根下那几个模块（`events.py` / `swallow.py` / `settings.py` / `diagnostics.py` / `csv_io_entry.py` / `__main__.py` / `__about__.py`）。先前只有前三棵，于是 engine 被检查、而它调用的 backend 契约（`make_backend()` 的返回值、`BackendBase` 的钩子签名）不在闸门内——边界单边可信。补齐的成本实测是 15 处报错，无一处需要 `# type: ignore`。仍在闸门外的是 `gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）。
 
 线程模型（**2026-10-13 全面审查时按落地形状改写**；此前这一节写的是目标形状，"命令队列"
 与 `packet_event / validation_error` 这几个名字在实际代码里都不存在）：Qt 主线程 + 一个引擎

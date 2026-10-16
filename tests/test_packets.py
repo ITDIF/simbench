@@ -19,7 +19,6 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
-from simbench.backend.events import PacketEvent
 from simbench.backend.modbus_tcp import parse_packet
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import (
@@ -33,6 +32,7 @@ from simbench.engine.packets import (
 )
 from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Session
+from simbench.events import PacketEvent
 from tests.conftest import free_port
 
 

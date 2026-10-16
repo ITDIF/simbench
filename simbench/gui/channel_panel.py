@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from PySide6 import QtGui, QtWidgets
 
-from ..backend.events import ChannelState
+from ..events import ChannelState
 from ..project.model import channel_transport, format_frame, is_serial, parse_frame
 from . import theme
 from .channel_state import STATUS_LABELS

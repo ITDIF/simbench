@@ -26,11 +26,11 @@ import pytest
 from pymodbus.client import ModbusTcpClient
 from PySide6 import QtCore, QtWidgets
 
-from simbench.backend.events import ChannelState
 from simbench.backend.modbus_tcp import check_port_is_free
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore
 from simbench.engine.session import Session
+from simbench.events import ChannelState
 from simbench.gui import main_window as main_window_module
 from simbench.gui.dialogs import IssueDialog
 from simbench.gui.main_window import MainWindow

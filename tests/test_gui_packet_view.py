@@ -19,7 +19,6 @@
 import pytest
 from PySide6 import QtCore, QtWidgets
 
-from simbench.backend.events import PacketEvent
 from simbench.backend.modbus_tcp import parse_packet
 from simbench.engine.packets import (
     ALL,
@@ -29,6 +28,7 @@ from simbench.engine.packets import (
     RESPONSES,
     PacketStore,
 )
+from simbench.events import PacketEvent
 from simbench.gui.packet_view import PacketPanel
 
 COLUMNS = ("时间", "方向", "通道", "unit", "fc", "摘要", "原始字节")

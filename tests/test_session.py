@@ -26,12 +26,12 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
-from simbench.backend.events import ChannelState, LogLine, PacketEvent
 from simbench.backend.modbus_tcp import PortInUseError, check_port_is_free
 from simbench.codec.point_codec import encode
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Row, Session, WriteResult
+from simbench.events import ChannelState, LogLine, PacketEvent
 from simbench.project.model import Device, Point, Project, TcpChannel
 from tests.conftest import free_port
 

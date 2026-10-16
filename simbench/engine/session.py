@@ -26,7 +26,7 @@ from collections.abc import Callable
 
 from .. import swallow
 from ..backend import BackendStartError, make_backend
-from ..backend.events import ChannelState, LogLine, PacketEvent
+from ..events import ChannelState, LogLine, PacketEvent
 from ..project.model import Point, Project, channel_transport
 from ..project.validate import Issue, error_lines, validate_project
 from .packets import PacketStore

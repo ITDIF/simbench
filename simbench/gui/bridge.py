@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from PySide6 import QtCore
 
-from ..backend.events import ChannelState, LogLine, PacketEvent, PointChanged
+from ..events import ChannelState, LogLine, PacketEvent, PointChanged
 
 
 class EngineBridge(QtCore.QObject):

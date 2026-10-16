@@ -15,8 +15,8 @@ import time
 
 from pymodbus import FramerType
 
+from ..events import PacketEvent
 from ..project.model import channel_transport  # noqa: F401  （本模块只做后端，判定在别处）
-from .events import PacketEvent
 from .modbus_rtu import ModbusRtuBackend
 from .ownership import write_targets
 

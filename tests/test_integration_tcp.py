@@ -19,7 +19,6 @@ import time
 import pytest
 from pymodbus.client import ModbusTcpClient
 
-from simbench.backend.events import LogLine
 from simbench.backend.modbus_tcp import (
     ModbusTcpBackend,
     PortInUseError,
@@ -32,6 +31,7 @@ from simbench.backend.modbus_tcp import (
 )
 from simbench.codec.point_codec import encode
 from simbench.engine.session import Session
+from simbench.events import LogLine
 from simbench.project.model import Device, Point, Project, TcpChannel
 from simbench.project.validate import validate_project
 from tests.conftest import free_port

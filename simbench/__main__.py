@@ -14,9 +14,9 @@ import signal
 import sys
 
 from .__about__ import __version__
-from .backend import BackendStartError, UnsupportedTransportError, make_backend
+from .backend import BackendBase, BackendStartError, UnsupportedTransportError, make_backend
 from .csv_io_entry import load_point_table
-from .project.model import channel_transport, s7_summary, serial_summary
+from .project.model import Channel, channel_transport, s7_summary, serial_summary
 from .project.validate import error_lines, validate_project
 
 
@@ -264,7 +264,8 @@ def _apply_overrides(project, host: str | None, port: int | None) -> bool:
     return applied
 
 
-async def _serve(channels, quiet: bool, tick_ms: int) -> list[str]:
+async def _serve(channels: list[tuple[Channel, list[tuple[str, int]]]],
+                 quiet: bool, tick_ms: int) -> list[str]:
     """起**全部**通道（一个工程里可以有多种协议，也可以有多路同协议）。返回起不来的那些。
 
     `channels` 是 `[(通道, 额外监听地址)]`。**一路起不来不牵连别的**：现场一张表里
@@ -275,7 +276,7 @@ async def _serve(channels, quiet: bool, tick_ms: int) -> list[str]:
     就不该一个有曲线一个没有。`tick_ms` 不给默认值：默认 0 就是"忘了传也照样起监听、只是
     曲线静默不动"，而那正是 M4 之前的缺陷形状。调用方必须表态。
     """
-    started: list[tuple[object, object]] = []
+    started: list[tuple[Channel, BackendBase]] = []
     failures: list[str] = []
     for channel, extra_endpoints in channels:
         # 选后端只走 `make_backend`（与 Session 同一个装配口）：认不出的传输抛
@@ -410,6 +411,14 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             session.shutdown()
             return 0
+
+    # 走到这里 `args.gui` 一定是假（上面那条路要么开窗口、要么是 Ctrl+C，两条都 return 了），
+    # 而起手的 `parser.error` 已经保证"没有 --point-table 就必须有 --gui"——所以点表装好了。
+    # 这一句把这**两条不变量**收在一处：类型上给下面收口，万一哪天分支被重排，这里给的是一句
+    # 人话而不是某个属性上的 AttributeError。
+    if project is None:
+        print("[simbench] no point table loaded; pass one or use --gui", file=sys.stderr)
+        return 2
 
     if args.list:
         for channel in project.channels:

@@ -205,7 +205,7 @@ def test_the_packet_panel_does_not_get_a_written_height(window, qapp):
 
 
 def _flood(store, count: int) -> None:
-    from simbench.backend.events import PacketEvent
+    from simbench.events import PacketEvent
 
     store.paused = False
     for index in range(count):

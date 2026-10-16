@@ -415,6 +415,12 @@ class S7Channel:
     devices: list[Device] = field(default_factory=list)
 
 
+# 三种通道的**联合类型**：spec 里一直把它叫 "Channel"（§5 的数据模型：Project/Channel/
+# Device/Point），代码里原先在 `Project.channels` 与 `find_channel` 各手写一遍。给它一个
+# 名字，注解才写得下（`__main__._serve` 那份 `list[tuple[Channel, ...]]` 是第三处）。
+Channel = TcpChannel | SerialChannel | S7Channel
+
+
 # ---------- 传输（2026-10-14 E7：从两种扩到五种）----------
 #
 # 一份**事实表**：哪种传输跑在哪条载体上、帧是什么。做这一轮之前，"加一种协议要改哪 16 处"
@@ -449,7 +455,7 @@ def is_s7(transport: str) -> bool:
     return transport == "s7"
 
 
-def channel_transport(channel) -> str:
+def channel_transport(channel: Channel) -> str:
     """这一路用哪种传输（`tcp` / `udp` / `rtutcp` / `rtu` / `ascii` / `s7`）。
 
     未知的手写 `type` 原样回，由 validate 报（那种 `type` 我们不认识，也不许按 TCP 处理）。
@@ -468,7 +474,7 @@ def channel_transport(channel) -> str:
 
 @dataclass
 class Project:
-    channels: list[TcpChannel | SerialChannel | S7Channel] = field(default_factory=list)
+    channels: list[Channel] = field(default_factory=list)
     tick_ms: int = 100
 
     def iter_points(self):
@@ -477,7 +483,7 @@ class Project:
                 for pt in dev.points:
                     yield ch, dev, pt
 
-    def find_channel(self, name: str) -> TcpChannel | SerialChannel | S7Channel:
+    def find_channel(self, name: str) -> Channel:
         for ch in self.channels:
             if ch.name == name:
                 return ch

@@ -8,7 +8,7 @@ import threading
 
 from PySide6 import QtCore
 
-from simbench.backend.events import ChannelState, LogLine, PacketEvent, PointChanged
+from simbench.events import ChannelState, LogLine, PacketEvent, PointChanged
 from simbench.gui.bridge import EngineBridge
 
 

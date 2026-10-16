@@ -7,9 +7,9 @@ spec §7 的理由是现场最费时的误判——平台下发命令后值被�
 东西：只在引擎 loop 线程读写的运行态表，本身不含任何协议或波形知识。
 """
 
-from simbench.backend.events import PacketEvent
 from simbench.backend.modbus_tcp import parse_packet
 from simbench.backend.ownership import LogDedupe, SourceStore, write_targets
+from simbench.events import PacketEvent
 
 K = ("tcp-5020", 11, "hr", 4)
 

@@ -60,7 +60,13 @@ python_version = "3.13"
 # 仍在闸门外的两棵：`gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）——它们的
 # 注解要补到能过检查是另一档工作量，等有人真正去碰那两层时再逐个拉进来。
 files = ["simbench/project", "simbench/codec", "simbench/engine",
-         "simbench/backend", "simbench/master"]
+         "simbench/backend", "simbench/master",
+         # 根下的那些模块：`events.py` 是 engine 与 GUI 之间的契约，`swallow.py` 是吞异常的
+         # 唯一出口……它们都在关键路径上，只是不住在某个包目录里。2026-10-16 连同
+         # `events.py` 从 backend 挪出来一起纳入（不纳入的话它就悄悄掉出闸门了）。
+         "simbench/events.py", "simbench/swallow.py", "simbench/settings.py",
+         "simbench/diagnostics.py", "simbench/csv_io_entry.py", "simbench/__main__.py",
+         "simbench/__about__.py"]
 ignore_missing_imports = true
 # 被 import 进来但不在 `files` 里的那几棵（gui / net）先不报。
 follow_imports = "silent"

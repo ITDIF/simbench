@@ -8,9 +8,9 @@
 from __future__ import annotations
 
 from simbench import swallow
-from simbench.backend.events import LogLine
 from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Session
+from simbench.events import LogLine
 
 
 def test_the_book_keeps_the_first_place_and_the_last_error():

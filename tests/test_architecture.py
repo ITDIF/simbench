@@ -334,24 +334,37 @@ def test_planted_subprocess_outside_net_is_flagged(tmp_path):
               for o in offenders}
     assert leaked == {"engine/session.py", "gui/main_window.py"}, offenders
 
-# ---- backend 的门面：engine/gui 只许经 `simbench.backend` 与 `backend.events` 取东西 ----
+# ---- backend 的门面：engine 只许经门面取东西；gui 连 backend 都不许碰 ----
 
-BACKEND_FACADE_OK = ("", "events")       # `backend` 本身（再导出的门面）与纯数据模块
+# 允许的"越过门面"的名字：空集——只剩下门面 `backend/__init__.py` 本身
+# （`from ..backend import make_backend` 这种，见 `_backend_submodules` 的返回 ""）。
+BACKEND_FACADE_OK = ("",)
 
 
 def _backend_submodules(path: pathlib.Path) -> list[str]:
-    """一个源文件里 `from ..backend.X import ...` 的 X（相对 import，level > 0）。
+    """一个源文件里对 `backend` 内部模块的引用（相对与绝对两种写法都算）。
 
-    `backend` 本身与 `backend.events` 不在这里报（见 BACKEND_FACADE_OK）：它们一个是门面、
-    一个是纯数据。其余 `backend.<后端内部模块>` 都是越过门面去摸实现细节。
+    返回的是 `backend.` **之后**那一段：`from ..backend.modbus_tcp import ...` 回 `modbus_tcp`，
+    `from ..backend import make_backend`（门面）回空串，`from simbench.backend.base import ...`
+    回 `base`。空串在 `BACKEND_FACADE_OK` 里，其余一律算"越过门面去摸实现细节"。
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level > 0 and node.module:
-            head, _, rest = node.module.partition(".")
-            if head == "backend":
-                found.append(rest)
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.level > 0:
+                head, _, rest = node.module.partition(".")
+                if head == "backend":
+                    found.append(rest)
+            else:
+                parts = node.module.split(".")
+                if parts[:2] == ["simbench", "backend"]:
+                    found.append(".".join(parts[2:]))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if parts[:2] == ["simbench", "backend"]:
+                    found.append(".".join(parts[2:]))
     return found
 
 
@@ -364,29 +377,56 @@ def _backend_facade_offenders(folder: str | None, root: pathlib.Path = ROOT) -> 
     return offenders
 
 
-def test_engine_and_gui_reach_backend_only_through_the_facade():
-    """`engine/` 与 `gui/` 不许 import 后端实现文件（`base` / `modbus_tcp` / ...）。
+def test_engine_reaches_backend_only_through_the_facade():
+    """`engine/` 不许 import 后端实现文件（`base` / `modbus_tcp` / ...）。
 
-    动机：2026-10-15 结构优化前，`engine/session.py` 直接 import 了 `base.BackendBase`，
-    `engine/ports.py` 直接 import 了 `modbus_tcp.check_port_is_free`。后端的内部文件一改名，
-    引擎就跟着断，而界面那一层也拿到了它不该知道的路径。现在统一走 `backend/__init__.py`
-    再导出的那一组名字；要新增对外的东西，先在门面里加一行，再用。
+    动机：2026-10-15 结构优化前，`engine/session.py` 直接 import 了
+    `backend.base.BackendBase`，`engine/ports.py` 直接 import 了
+    `backend.modbus_tcp.check_port_is_free`。后端的内部文件一改名，引擎就跟着断。现在统一走
+    `backend/__init__.py` 再导出的那一组名字；要新增对外的东西，先在门面里加一行，再用。
     """
-    scanned = _scanned_files("engine") + _scanned_files("gui")
-    assert scanned, "engine/ 与 gui/ 一个文件都没扫到，这条守卫是空跑"
-    offenders = _backend_facade_offenders("engine") + _backend_facade_offenders("gui")
+    scanned = _scanned_files("engine")
+    assert scanned, "engine/ 一个文件都没扫到，这条守卫是空跑"
+    offenders = _backend_facade_offenders("engine")
     assert offenders == [], f"reached past the backend facade: {offenders}"
 
 
+def test_gui_does_not_touch_backend_at_all():
+    """`gui/` 对 `backend` 的引用必须是 **0**——连门面也不许。
+
+    这条"0"是 2026-10-16 才成立的：事件的纯数据类原先住在 `backend/events.py`（产出方是
+    backend，消费方是 engine 与 gui），于是"界面不许碰后端"必须为它开一个口子
+    （`gui → backend.events`）。把它挪到根上的 `simbench/events.py` 之后口子可以封掉：
+    界面只知道"事件长什么样"，不知道后端在哪、更不知道它内部怎么分文件。
+
+    与上一条的分工：上一条管"实现细节不许碰"，这一条更硬——连门面都不许。两条都留着，
+    是因为它们错的时候给出的线索不同（前者是"摸到了内部"，后者是"这个方向压根不该有边"）。
+    """
+    scanned = _scanned_files("gui")
+    assert scanned, "gui/ 一个文件都没扫到，这条守卫是空跑"
+    offenders = []
+    for file in scanned:
+        for sub in _backend_submodules(file):
+            offenders.append(f"{file}: backend.{sub}" if sub else f"{file}: backend")
+    assert offenders == [], f"gui/ 碰了 backend: {offenders}"
+
+
 def test_backend_facade_guard_catches_a_planted_internal_import(tmp_path):
-    """植入样本：`from ..backend.modbus_tcp import ...` 必须被抓；门面与 events 必须放行。"""
+    """植入样本：`from ..backend.modbus_tcp import ...` 必须被抓；门面必须放行。
+
+    样本里也放一条 `gui` 侧的相对引用，确认"连门面也不许"那条会报出来。
+    """
     root = _fake_root(tmp_path, {
         "engine/bad.py": "from ..backend.modbus_tcp import check_port_is_free\n",
-        "engine/good.py": "from ..backend import make_backend\nfrom ..backend.events import PacketEvent\n",
+        "engine/good.py": "from ..backend import make_backend\nfrom ..events import PacketEvent\n",
+        "gui/bad.py": "from ..backend import ChannelState\n",
+        "gui/good.py": "from ..events import ChannelState\n",
     })
-    offenders = _backend_facade_offenders("engine", root)
-    assert len(offenders) == 1 and offenders[0].endswith("backend.modbus_tcp"), offenders
-    assert "good.py" not in offenders[0]
+    engine_offenders = _backend_facade_offenders("engine", root)
+    assert len(engine_offenders) == 1, engine_offenders
+    assert engine_offenders[0].endswith("backend.modbus_tcp"), engine_offenders
+    gui_hits = [(f.name, _backend_submodules(f)) for f in _python_files("gui", root)]
+    assert gui_hits == [("bad.py", [""]), ("good.py", [])], gui_hits
 
 
 # ---- net 的纯模块：运行时不许 import 系统层（ctypes / subprocess） ----

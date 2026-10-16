@@ -6,7 +6,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 
-from ..backend.events import PacketEvent
+from ..events import PacketEvent
 
 ALL = "全部"
 REQUESTS = "请求"

@@ -27,8 +27,8 @@ from typing import Any
 
 from ..codec.point_codec import encode
 from ..codec.waveform import clamp_to_datatype, waveform_value
+from ..events import PacketEvent
 from ..project.model import Point, Project, area_is_bit
-from .events import PacketEvent
 from .ownership import LogDedupe, SourceStore, write_targets
 from .raw_writer import RawRegisterWriter
 from .simdev import build_sim_devices
