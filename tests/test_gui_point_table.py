@@ -75,6 +75,22 @@ def row_of(model, name):
 
 # ---------- 列与文案 ----------
 
+def test_every_column_is_centred_like_the_header(model):
+    """表头与数据**都居中**（2026-10-17 用户口径："数据没有居中"）。
+
+    改之前是"地址/惯例两列右对齐、其余走 Qt 默认左对齐"，而表头本来就是居中的（实测
+    `defaultAlignment` = AlignHCenter|AlignVCenter）——表头与数据各占一边，看着不齐。
+    这条把两边钉在同一个值上：哪天有人只改一边，这里就红。
+    """
+    want = int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+    roles = [model.data(model.index(0, i), QtCore.Qt.TextAlignmentRole)
+             for i in range(len(COLUMNS))]
+    assert roles == [want] * len(COLUMNS), roles
+    view = PointTableView()
+    assert int(view.horizontalHeader().defaultAlignment()) == want, \
+        "表头与数据不在同一种对齐上，又会出现「表头居中、数据靠边」"
+
+
 def test_columns_are_the_agreed_order():
     # 第三列是"惯例"不是"4x"（2026-10-14 改名）：这一列打的值随区变（4x/3x/1x/0x），
     # S7 上还算不出来（`—`）——"4x"这个词只在 Modbus 的 hr 区成立。

@@ -32,7 +32,6 @@ CONVENTION_HEADER = "惯例"
 class Column:
     header: str
     width: int
-    numeric: bool = False
 
 
 # 十列的宽度**逐列量过**（2026-10-14 全量重排，本机 Microsoft YaHei UI 9pt；量法与
@@ -46,11 +45,11 @@ COLUMNS: tuple[Column, ...] = (
     Column("名称", 250),
     # 56：`db4095` 要 51px（S7 的 DB 号上限 4095，四位数字 + `db`）。
     Column("区", 56),
-    Column("地址", 56, numeric=True),
+    Column("地址", 56),
     # 这一列打的是**现场惯例写法**（4x/3x/1x/0x 随区变），所以列头是"惯例"不是"4x"——后者
     # 只在 Modbus 的 hr 区成立，混装工程里就是错的；值自己带前缀，不用列头替它说。
     # 62：`4x65535` 要 56px。
-    Column(CONVENTION_HEADER, 62, numeric=True),
+    Column(CONVENTION_HEADER, 62),
     Column("类型", 58),          # `float32`/`string`/`dword` 要 48px
     Column("字序", 60),          # `CDAB` 要 41px
     # 132：17 位数字（累计电量那个 uint64）要 128px——这一列是操作员拿去和点表核对的数，
@@ -168,8 +167,12 @@ class PointTableModel(QtCore.QAbstractTableModel):
             # EditRole 也要给：只给 DisplayRole 的话，双击进来的编辑器是**空的**，
             # 用户会在空框里敲一个新值——那是界面自己造的误操作。
             return _display(row, spec.header)
-        if role == QtCore.Qt.TextAlignmentRole and spec.numeric:
-            return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        if role == QtCore.Qt.TextAlignmentRole:
+            # **表头与数据都居中**（2026-10-17 用户口径）。表头本来就是居中的（实测
+            # `defaultAlignment` = AlignHCenter|AlignVCenter），而数据原来是"地址/惯例两列
+            # 右对齐、其余走 Qt 默认左对齐"——表头与数据各行其是，看着不齐。
+            # 居中不改任何几何：列宽是定宽的（见 COLUMNS 的注释），对齐只影响文字在格子里的位置。
+            return int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
         if role == STALE_ROLE:
             return bool(row.stale)
         return None

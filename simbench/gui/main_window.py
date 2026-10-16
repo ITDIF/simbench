@@ -34,7 +34,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..engine.point_source import pumped_source
 from ..engine.rows_pump import RowsPump
 from ..project.validate import error_lines, validate_project
-from . import icons, messages, theme
+from . import i18n, icons, messages, theme
 from .bridge import EngineBridge
 from .channel_panel import ChannelPanel
 from .channel_state import STATUS_ORDER, STATUS_WORD
@@ -83,6 +83,9 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         # 主题只落这一次（构造期）：运行期再动 setStyleSheet 会让 Qt 重新 polish，
         # sizeHint 有机会跟着变——那正是"状态一变布局就跳"的另一种写法（见 theme 模块）。
         theme.apply_theme()
+        # 语言同理（也是进程级一次性改动）：`OK/Cancel/Yes/No` 这些**标准按钮**的文字来自
+        # Qt 的翻译文件，不装就是英文（界面上其余字都是中文，只有弹窗按钮是英文）。
+        i18n.install_chinese_ui()
         self.setWindowIcon(icons.app_icon())
         self.session = session
         self.store = store

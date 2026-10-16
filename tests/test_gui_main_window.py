@@ -243,6 +243,19 @@ def test_the_tick_only_rewrites_the_title_when_dirty_changes(window):
     assert len(seen) == 2, seen
 
 
+def test_the_window_installs_the_chinese_standard_buttons(make_window, monkeypatch):
+    """构造主窗那一步会把中文翻译装上（与主题同一处、同一姿态，2026-10-17）。
+
+    用替身记一次调用，而不是真去断言"按钮是中文"：翻译器是**进程级**的，前面任何一条界面
+    用例都可能已经装过，那样这条就恒真、也就守不住"把安装那一步挪走"这种改动了。
+    """
+    calls: list[int] = []
+    monkeypatch.setattr(main_window_module.i18n, "install_chinese_ui",
+                        lambda *args, **kwargs: calls.append(1) or True)
+    make_window()
+    assert calls == [1], "主窗构造期没装中文翻译：弹窗上的 OK/Cancel 会退回英文"
+
+
 def test_saving_without_a_path_asks_and_remembers_the_path(window, tmp_path, monkeypatch):
     """没有路径（新建的工程）时保存要问一次，并把选中的路径记下来。"""
     target = str(tmp_path / "saved.json")
