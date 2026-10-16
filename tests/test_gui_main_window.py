@@ -37,6 +37,7 @@ from simbench.gui.main_window import MainWindow
 from simbench.project.model import Device, Point, TcpChannel
 from simbench.project.validate import validate_project
 from tests.conftest import free_port
+from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -83,12 +84,15 @@ def connect(port: int) -> ModbusTcpClient:
 
 
 @pytest.fixture(autouse=True)
-def issue_lists(monkeypatch):
-    """把模态的错误清单换成记录器。
+def issue_lists():
+    """把模态的错误清单换成记录器：返回 `(注入给主窗的依赖, 交给对话框的那几份清单)`。
 
     `IssueDialog.exec()` 在 offscreen 下会开一个**嵌套事件循环**，用例永远回不来。清单
     本身对不对由 `test_the_issue_dialog_lists_every_error` 直接构造真对话框断言（不 exec），
     这里只钉"哪些清单被交给了对话框"以及状态栏那一句。
+
+    2026-10-16 之前是 `monkeypatch` 掉 `main_window.IssueDialog` 再返回那个清单——现在是把
+    假件交给主窗的 `deps`（见 `gui/deps.py`），两样东西一起从这个夹具出去。
     """
     shown: list[list[str]] = []
 
@@ -99,12 +103,11 @@ def issue_lists(monkeypatch):
         def exec(self, *_args) -> int:
             return 0
 
-    monkeypatch.setattr(main_window_module, "IssueDialog", Recorder)
-    return shown
+    return gui_deps(issues_dialog=Recorder), shown
 
 
 @pytest.fixture
-def make_window(qapp, engine_runner):
+def make_window(qapp, engine_runner, issue_lists):
     """工厂夹具：每条用例自己决定工程长什么样，teardown 统一收窗、收通道。
 
     runner 是会话级共享的，`session.shutdown()` 因此只停通道不收线程（归属口径）；
@@ -119,7 +122,7 @@ def make_window(qapp, engine_runner):
     def _make(project=None, path=CSV):
         store = PacketStore()
         session = Session(runner=engine_runner, packet_store=store)
-        window = MainWindow(session, store)
+        window = MainWindow(session, store, deps=issue_lists[0])
         window.use_project(project if project is not None else loaded(free_port()), path)
         window.resize(1200, 700)
         window.show()
@@ -160,7 +163,7 @@ def test_a_fresh_window_opens_at_two_thirds_of_the_screen_and_centred(qapp, engi
     """
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
-    window = MainWindow(session, store)
+    window = MainWindow(session, store, deps=gui_deps())
     try:
         area = qapp.primaryScreen().availableGeometry()
         hint = window.minimumSizeHint()
@@ -243,7 +246,7 @@ def test_the_tick_only_rewrites_the_title_when_dirty_changes(window):
 def test_saving_without_a_path_asks_and_remembers_the_path(window, tmp_path, monkeypatch):
     """没有路径（新建的工程）时保存要问一次，并把选中的路径记下来。"""
     target = str(tmp_path / "saved.json")
-    monkeypatch.setattr(main_window_module, "save_project_as",
+    monkeypatch.setattr(window.deps, "save_project_as",
                         lambda parent, project, suggested="": target)
     window._path = None
     window.session.mark_dirty()
@@ -266,7 +269,7 @@ def test_saving_with_a_path_writes_in_place_and_does_not_ask(window, monkeypatch
     （第一次跑时真踩过——用例在断言处失败，恢复那一行没跑到，示例点表被临时工程覆盖）。
     """
     asked: list[int] = []
-    monkeypatch.setattr(main_window_module, "save_project_as",
+    monkeypatch.setattr(window.deps, "save_project_as",
                         lambda parent, project, suggested="": asked.append(1) or "x")
     target = tmp_path / "in-place.csv"
     target.write_text(pathlib.Path(window._path).read_text(encoding="utf-8"),
@@ -286,7 +289,7 @@ def test_save_as_always_asks_even_when_a_path_is_known(window, tmp_path, monkeyp
     """另存为**总是**问：它的语义就是"换一个地方存"。"""
     target = str(tmp_path / "elsewhere.json")
     calls: list[str] = []
-    monkeypatch.setattr(main_window_module, "save_project_as",
+    monkeypatch.setattr(window.deps, "save_project_as",
                         lambda parent, project, suggested="": calls.append(suggested)
                         or target)
     current = str(window._path)                       # 另存为的默认文件名 = 当前路径
@@ -297,7 +300,7 @@ def test_save_as_always_asks_even_when_a_path_is_known(window, tmp_path, monkeyp
 
 def test_a_cancelled_save_keeps_the_star(window, monkeypatch):
     """用户在另存为里按了取消：改动还在，`*` 就不许消失（不然他以为已经存过了）。"""
-    monkeypatch.setattr(main_window_module, "save_project_as",
+    monkeypatch.setattr(window.deps, "save_project_as",
                         lambda parent, project, suggested="": None)
     window.session.mark_dirty()
     assert window._save_project(ask=True) is None
@@ -562,14 +565,14 @@ def test_a_restore_refused_by_the_engine_says_why_in_the_log_without_a_false_cou
 
 # ---------- 右键属性…（点位属性面板接线） ----------
 
-def _props_dialog_factory(monkeypatch, stage):
+def _props_dialog_factory(window, monkeypatch, stage):
     """把主窗的对话框接线换成"真面板 + 非模态 exec"：`stage(dialog)` 摆好改动。
 
     `exec()` 是会吞掉用例的模态嵌套循环（`IssueDialog.exec` 同形），这里用**真**
     `PointPropertiesDialog`，只把它实例的 `exec` 换成 `apply`：主窗读的本来就是
     `dialog.applied`，摆错形状（比如 apply 拒了还带 applied 回来）在这里就会露出来。
     """
-    real_cls = main_window_module.PointPropertiesDialog
+    real_cls = window.deps.point_props_dialog
 
     def factory(parent, project, key):
         dialog = real_cls(parent, project, key)
@@ -577,7 +580,7 @@ def _props_dialog_factory(monkeypatch, stage):
         dialog.exec = dialog.apply
         return dialog
 
-    monkeypatch.setattr(main_window_module, "PointPropertiesDialog", factory)
+    monkeypatch.setattr(window.deps, "point_props_dialog", factory)
 
 
 def test_the_properties_action_opens_the_panel_built_for_that_row(make_window, qapp,
@@ -595,7 +598,7 @@ def test_the_properties_action_opens_the_panel_built_for_that_row(make_window, q
         def exec(self) -> int:
             return 0
 
-    monkeypatch.setattr(main_window_module, "PointPropertiesDialog", Stub)
+    monkeypatch.setattr(window.deps, "point_props_dialog", Stub)
     row = row_of(window, "风机状态")
     window.point_table.row_menu_actions(row)[1].trigger()
     assert opened == [("tcp-5020", 11, "hr", 4, None)]
@@ -608,7 +611,7 @@ def test_a_structural_apply_from_the_menu_says_a_restart_is_needed(make_window, 
     """没起通道时应用地址改动：状态栏"已改 1 处，重启通道后生效"，表里立刻看得见新地址，
     标题带 `*`。"""
     window = make_window()
-    _props_dialog_factory(monkeypatch, lambda d: d.address_edit.setText("20"))
+    _props_dialog_factory(window, monkeypatch, lambda d: d.address_edit.setText("20"))
     window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
     message = window.status.currentMessage()
     assert "已改 1 处" in message and "重启通道后生效" in message, message
@@ -623,7 +626,7 @@ def test_a_live_only_apply_from_the_menu_says_next_tick_not_restart(make_window,
     """只改名称：状态栏说"下一拍生效"并且**不许**提重启——误导操作员去重启在跑的
     通道，比不说更糟。"""
     window = make_window()
-    _props_dialog_factory(monkeypatch, lambda d: d.name_edit.setText("风机状态B"))
+    _props_dialog_factory(window, monkeypatch, lambda d: d.name_edit.setText("风机状态B"))
     window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
     message = window.status.currentMessage()
     assert "下一拍" in message and "重启通道" not in message, message
@@ -639,7 +642,7 @@ def test_a_mixed_apply_names_both_effect_times(make_window, qapp, monkeypatch):
         dialog.address_edit.setText("20")
         dialog.name_edit.setText("风机状态B")
 
-    _props_dialog_factory(monkeypatch, stage)
+    _props_dialog_factory(window, monkeypatch, stage)
     window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
     message = window.status.currentMessage()
     assert "已改 2 处" in message, message
@@ -650,7 +653,7 @@ def test_a_refused_properties_apply_leaves_no_trace_in_the_window(make_window, q
                                                                   monkeypatch):
     """被拒（撞 CO浓度）的改动：地址列还是 4、标题不带 `*`、状态栏不给"已改"。"""
     window = make_window()
-    _props_dialog_factory(monkeypatch, lambda d: d.address_edit.setText("0"))
+    _props_dialog_factory(window, monkeypatch, lambda d: d.address_edit.setText("0"))
     window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
     window.point_model.refresh()
     assert window.point_model.index(row_of(window, "风机状态"), 2).data() == "4"
@@ -754,12 +757,13 @@ def test_a_dirty_point_table_is_an_issue_list_not_a_traceback(window, monkeypatc
                    encoding="utf-8")
     monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
                         staticmethod(lambda *a, **k: (str(bad), "工程 (*.csv)")))
+    _deps, shown = issue_lists
     window._open_project()
     log = window.log_view.toPlainText()
     assert "parse" in log, log
     assert "Traceback" not in log
-    assert issue_lists and "parse" in issue_lists[-1][0]
-    assert "line 2" in issue_lists[-1][0], "行号要在清单里，不然厂商改不动那张表"
+    assert shown and "parse" in shown[-1][0]
+    assert "line 2" in shown[-1][0], "行号要在清单里，不然厂商改不动那张表"
 
 
 def test_import_logs_the_guessed_port_note(window, monkeypatch, tmp_path):
@@ -769,9 +773,9 @@ def test_import_logs_the_guessed_port_note(window, monkeypatch, tmp_path):
                    "initial,waveform,wave_param,readonly\n"
                    "tcp-1502,D,11,x,hr,0,uint16,ABCD,1,const,,false\n",
                    encoding="utf-8")
-    monkeypatch.setattr(main_window_module, "import_table",
+    monkeypatch.setattr(window.deps, "import_table",
                         lambda *a, **k: str(src))
-    monkeypatch.setattr(main_window_module, "choose_offset", lambda parent=None: 0)
+    monkeypatch.setattr(window.deps, "choose_offset", lambda parent=None: 0)
     window._import_table()
     assert "port guessed as 1502" in window.log_view.toPlainText()
     assert window.session.channel("tcp-1502") is not None
@@ -852,11 +856,12 @@ def test_check_reports_everything_the_validator_found(window, issue_lists):
     project = loaded()
     project.channels[0].port = 0
     project.tick_ms = 5
+    _deps, shown = issue_lists
     window.use_project(project, window._path)
-    issue_lists.clear()
+    shown.clear()
     window._check()
-    codes = [line.split("]")[0].lstrip("[") for line in issue_lists[-1]]
-    assert "port" in codes and "tick_ms" in codes, issue_lists[-1]
+    codes = [line.split("]")[0].lstrip("[") for line in shown[-1]]
+    assert "port" in codes and "tick_ms" in codes, shown[-1]
     assert "2 个错误" in window.status.currentMessage()
 
 
@@ -929,7 +934,7 @@ def test_a_cancelled_save_at_close_keeps_the_window_open(window, monkeypatch):
     """
     monkeypatch.setattr(QtWidgets.QMessageBox, "question",
                         staticmethod(lambda *a, **k: QtWidgets.QMessageBox.Save))
-    monkeypatch.setattr(main_window_module, "save_project_as",
+    monkeypatch.setattr(window.deps, "save_project_as",
                         lambda parent, project, suggested="": None)
     window._path = None
     window.session.mark_dirty()

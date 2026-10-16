@@ -23,7 +23,7 @@ class EditMixin:
         """工具栏"新建工程"：空白起步，或 TCP / 串口 / S7 骨架起步。"""
         if not self._confirm_discard():
             return
-        dialog = NewProjectDialog(self, probe=_probe())
+        dialog = NewProjectDialog(self, probe=self.deps.probe)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         self.use_project(dialog.project, path=None, announce=False)
@@ -41,7 +41,7 @@ class EditMixin:
         对话框里那一步已经 `edit.add_channel`（带校验与回滚）；这里只让会话跟上，
         再把视图重画——不走 `load()`，所以不需要"先全部停止"。
         """
-        dialog = AddChannelDialog(self, self.session.project, probe=_probe())
+        dialog = AddChannelDialog(self, self.session.project, probe=self.deps.probe)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         if not self._edit_call("添加通道", lambda: self.session.add_channel(dialog.channel)):
@@ -306,7 +306,7 @@ class EditMixin:
         应用里两种都有就两句都说——只说一种就是另一半在撒谎。
         """
         try:
-            dialog = _mw().PointPropertiesDialog(self, self.session.project, key)
+            dialog = self.deps.point_props_dialog(self, self.session.project, key)
         except KeyError as exc:
             # 菜单建好与打开面板之间行没了（换工程的瞬间）：槽函数不许炸，给一句人话。
             self._log(f"[refused] 打开点位属性失败：{exc}")
@@ -329,17 +329,3 @@ class EditMixin:
         else:
             message = f"已改 {count} 处，下一拍生效"
         self.status.showMessage(message, _NOTICE_MS)
-
-
-def _probe():
-    """取 `main_window.PORT_PROBE`（运行时查，不在导入时绑死）：用例 monkeypatch 的正是那个名字。"""
-    from . import main_window
-
-    return main_window.PORT_PROBE
-
-
-def _mw():
-    """主窗模块（运行时取）：用例 monkeypatch 的名字都挂在那里，mixin 不能在导入时绑死。"""
-    from . import main_window
-
-    return main_window

@@ -25,12 +25,12 @@ from PySide6 import QtWidgets
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore
 from simbench.engine.session import Session
-from simbench.gui import main_window as main_window_module
 from simbench.gui.main_window import MainWindow
 from simbench.gui.point_props import PointPropertiesDialog
 from simbench.project.model import DATATYPES, Device, Point, TcpChannel
 from simbench.project.validate import error_lines, validate_project
 from tests.conftest import free_port
+from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -46,7 +46,7 @@ def window(qapp, engine_runner):
     assert not [i for i in issues if i.level == "error"], [str(i) for i in issues]
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
-    win = MainWindow(session, store)
+    win = MainWindow(session, store, deps=gui_deps())
     win.use_project(project, CSV)
     win.resize(1200, 700)
     win.show()
@@ -125,14 +125,14 @@ def load_dirty(window, key, **fields):
     return project
 
 
-def panel_from_the_slot(monkeypatch):
+def panel_from_the_slot(window, monkeypatch):
     """把主窗引用的对话框名字换成"真面板 + 非模态 exec"，供**直接调槽**的用例用。
 
     `exec()` 的模态嵌套循环会把用例吞掉（`IssueDialog` 同形），而构造路上真崩了的话，
     异常会原样从槽函数里逃到用例里——这正是"槽函数不许炸"要量的那一格。
     """
     opened: list = []
-    real_cls = main_window_module.PointPropertiesDialog
+    real_cls = window.deps.point_props_dialog
 
     def factory(parent, project, key):
         dialog = real_cls(parent, project, key)
@@ -140,7 +140,7 @@ def panel_from_the_slot(monkeypatch):
         dialog.exec = lambda *_args: 0
         return dialog
 
-    monkeypatch.setattr(main_window_module, "PointPropertiesDialog", factory)
+    monkeypatch.setattr(window.deps, "point_props_dialog", factory)
     return opened
 
 
@@ -499,7 +499,7 @@ def test_opening_the_panel_for_a_dirty_row_does_not_escape_the_slot(qapp, window
     状态栏也不能把一次成功的打开说成"该行点位已不在当前点表中"。
     """
     load_dirty(window, KEY, area="holding")
-    opened = panel_from_the_slot(monkeypatch)
+    opened = panel_from_the_slot(window, monkeypatch)
     window._show_point_props(("tcp-5020", 11, "holding", 4, None))
     assert len(opened) == 1, "面板没建起来：构造路上的异常还是从槽里逃出去了"
     assert opened[0].area_buttons["holding"].isChecked()

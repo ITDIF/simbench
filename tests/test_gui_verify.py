@@ -20,6 +20,7 @@ from simbench.engine.packets import PacketStore
 from simbench.engine.session import Session
 from simbench.gui.main_window import MainWindow
 from simbench.gui.verify_panel import BUTTON_WIDTHS, master_channel
+from tests.gui_support import gui_deps
 
 HEADER = ("channel,device,unit_id,name,area,address,datatype,word_order,"
           "initial,waveform,wave_param,readonly")
@@ -30,18 +31,6 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
-
-
-@pytest.fixture(autouse=True)
-def no_modal_dialogs(monkeypatch):
-    class Recorder:
-        def __init__(self, issues, parent=None) -> None:
-            pass
-
-        def exec(self, *_args) -> int:
-            return 0
-
-    monkeypatch.setattr("simbench.gui.main_window.IssueDialog", Recorder)
 
 
 def write_table(tmp_path: pathlib.Path, port: int) -> pathlib.Path:
@@ -65,7 +54,7 @@ def rig(qapp, engine_runner, tmp_path):
     engine_runner.call(lambda: backend.start(), _CALL_TIMEOUT, "verify panel: start")
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
-    window = MainWindow(session, store)
+    window = MainWindow(session, store, deps=gui_deps())
     window.use_project(project, str(table))
     window.show()
     qapp.processEvents()

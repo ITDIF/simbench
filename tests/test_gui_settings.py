@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
 from PySide6 import QtWidgets
 
 from simbench.csv_io_entry import load_point_table
@@ -16,22 +15,10 @@ from simbench.engine.session import Session
 from simbench.gui.main_window import MainWindow
 from simbench.settings import Settings
 from tests.conftest import free_port
+from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
-
-
-@pytest.fixture(autouse=True)
-def no_modal_dialogs(monkeypatch):
-    """错误清单与"未保存改动"都是模态的：换成记录器，否则用例回不来。"""
-    class Recorder:
-        def __init__(self, issues, parent=None) -> None:
-            pass
-
-        def exec(self, *_args) -> int:
-            return 0
-
-    monkeypatch.setattr("simbench.gui.main_window.IssueDialog", Recorder)
 
 
 def make_window(qapp, engine_runner, settings=None, path=CSV) -> MainWindow:
@@ -40,7 +27,7 @@ def make_window(qapp, engine_runner, settings=None, path=CSV) -> MainWindow:
     project.channels[0].port = free_port()
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
-    window = MainWindow(session, store, settings=settings)
+    window = MainWindow(session, store, settings=settings, deps=gui_deps())
     window.use_project(project, path)
     window.show()
     qapp.processEvents()

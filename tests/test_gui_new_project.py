@@ -19,7 +19,6 @@ from PySide6 import QtCore, QtWidgets
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore
 from simbench.engine.session import Session
-from simbench.gui import main_window as main_window_module
 from simbench.gui.channel_form import ChannelForm
 from simbench.gui.device_tree import DeviceTree
 from simbench.gui.main_window import MainWindow
@@ -27,6 +26,7 @@ from simbench.gui.new_project import AddChannelDialog, AddDeviceDialog, NewProje
 from simbench.project import edit, json_io
 from simbench.project.model import Device, Point, TcpChannel
 from tests.conftest import free_port
+from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -69,11 +69,18 @@ def answer(monkeypatch, choice):
 
 
 @pytest.fixture(autouse=True)
-def no_modal_dialogs(monkeypatch):
-    """两个模态框换成记录器：`exec()` 在 offscreen 下会开嵌套事件循环，用例回不来。
+def no_modal_dialogs():
+    """两个模态框换成记录器 + 端口探针说"都空着"；返回 `(注入给主窗的依赖, 属性面板被打开的 key)`。
 
-    错误清单本身对不对由 `test_gui_main_window.py` 直接构造真对话框断言；这里只挡掉
-    "点一下会弹框"那条路，顺便记录**属性面板被要求打开了哪一行**（加点位之后要开它）。
+    两个模态框：`exec()` 在 offscreen 下会开嵌套事件循环，用例回不来。错误清单本身对不对由
+    `test_gui_main_window.py` 直接构造真对话框断言；这里只挡掉"点一下会弹框"那条路，顺便记录
+    **属性面板被要求打开了哪一行**（加点位之后要开它）。
+
+    端口探针：不换掉的话，"新建 TCP 工程得到 tcp-5020"这类断言就取决于跑测试的机器上 5020
+    空不空。探针本身另有两条用例直接验（注入自己的替身）。
+
+    2026-10-16 之前这三样都是 `monkeypatch` 模块全局（`main_window.IssueDialog` /
+    `PointPropertiesDialog` / `PORT_PROBE`），现在是交给主窗的 `deps`（见 `gui/deps.py`）。
     """
     shown: list[tuple] = []
 
@@ -92,26 +99,18 @@ def no_modal_dialogs(monkeypatch):
         def exec(self, *_args) -> int:
             return 0
 
-    monkeypatch.setattr(main_window_module, "IssueDialog", Issues)
-    monkeypatch.setattr(main_window_module, "PointPropertiesDialog", Props)
-    return shown
-
-
-@pytest.fixture(autouse=True)
-def ports_all_free(monkeypatch):
-    """GUI 用例里默认"端口都空着"：不换掉探针的话，"新建 TCP 工程得到 tcp-5020"这类断言
-    就取决于跑测试的机器上 5020 空不空。探针本身另有两条用例直接验（注入自己的替身）。"""
-    monkeypatch.setattr(main_window_module, "PORT_PROBE", lambda _port: True)
+    return gui_deps(probe=lambda _port: True, issues_dialog=Issues,
+                    point_props_dialog=Props), shown
 
 
 @pytest.fixture
-def make_window(qapp, engine_runner):
+def make_window(qapp, engine_runner, no_modal_dialogs):
     built: list[MainWindow] = []
 
     def _make(project=None, path=CSV):
         store = PacketStore()
         session = Session(runner=engine_runner, packet_store=store)
-        window = MainWindow(session, store)
+        window = MainWindow(session, store, deps=no_modal_dialogs[0])
         window.use_project(project if project is not None else loaded(free_port()), path)
         window.resize(1200, 700)
         window.show()
@@ -300,6 +299,7 @@ def test_the_device_dialog_refuses_an_empty_name(make_window, qapp):
 
 def test_adding_a_point_lands_with_a_free_address_and_opens_the_properties(
         make_window, qapp, no_modal_dialogs):
+    _deps, shown = no_modal_dialogs
     window = make_window()
     window.tree.add_point_requested.emit("tcp-5020", 11)
     qapp.processEvents()
@@ -310,7 +310,7 @@ def test_adding_a_point_lands_with_a_free_address_and_opens_the_properties(
     assert (added.name, added.area, added.address, added.datatype) == \
         ("点位1", "hr", 12, "uint16")
     assert "点位1" in rows(window)
-    assert no_modal_dialogs == [("tcp-5020", 11, "hr", 12, None)], "加完没打开属性面板"
+    assert shown == [("tcp-5020", 11, "hr", 12, None)], "加完没打开属性面板"
     assert window.session.dirty is True
 
 
@@ -430,9 +430,9 @@ def test_open_and_import_ask_about_unsaved_changes_first(make_window, monkeypatc
     window.session.mark_dirty()
     answer(monkeypatch, QtWidgets.QMessageBox.Cancel)
     called: list[int] = []
-    monkeypatch.setattr(main_window_module, "open_project",
+    monkeypatch.setattr(window.deps, "open_project",
                         lambda parent=None: called.append(1))
-    monkeypatch.setattr(main_window_module, "import_table",
+    monkeypatch.setattr(window.deps, "import_table",
                         lambda *a, **k: called.append(2))
     window._open_project()
     window._import_table()
@@ -451,7 +451,7 @@ def test_saving_from_the_ask_writes_the_project(make_window, monkeypatch, tmp_pa
         json_io.save(project, target)          # 真写一份：主窗读的是返回值，盘上也得有东西
         return target
 
-    monkeypatch.setattr(main_window_module, "save_project_as", fake_save)
+    monkeypatch.setattr(window.deps, "save_project_as", fake_save)
     drive(monkeypatch, NewProjectDialog, edit.BLANK)
     window._new_project()
     qapp.processEvents()

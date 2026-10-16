@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from ..engine import ports
-
 _TICK_MS = 100
 # 起手尺寸 = 当前屏幕**可用区域**的这个比例（2026-10-14 用户口径：一半偏小，桌上还要摆
 # 主站工具/浏览器；2/3 是"看得全 + 还留得下别的东西"那一档）。分子/分母写在一起，
@@ -20,9 +18,5 @@ _NOTICE_MS = 8000                       # 拒绝理由要在状态栏留够一�
 _GC_EVERY_S = 5.0
 _STATUS_SLOT_WIDTH = 320                # 状态摘要的定宽槽（实测最长两条通道 ≈ 200px）
 _LOG_LINES = 5000                       # 日志窗只留最近多少行（与报文窗的 5000 帧同一量级）
-# "这个端口现在空着吗"的探针（新建工程 / 添加通道算默认端口时用）。放成模块级常量是为了
-# **用例能换掉它**：不换的话，"新建一个 TCP 工程得到 tcp-5020"这类断言就取决于跑测试的
-# 机器上 5020 空不空——那种红最难查。
-PORT_PROBE = ports.is_free
 _TREE_STRETCH, _TABLE_STRETCH = 1, 4
 _FIRST_SPLIT = [600, 400]   # 上栏:下栏 首屏比例（见 _build_layout）

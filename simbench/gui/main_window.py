@@ -38,20 +38,11 @@ from . import icons, messages, theme
 from .bridge import EngineBridge
 from .channel_panel import ChannelPanel
 from .channel_state import STATUS_ORDER, STATUS_WORD
+from .deps import WindowDeps
 from .device_tree import DeviceTree
-
-# 用例 monkeypatch 的 seam：mixin 运行时经 `_mw()` 取这些名字，所以这里必须保留成本模块属性
-from .dialogs import (
-    IssueDialog,
-    choose_offset,
-    format_issues,
-    import_table,
-    open_project,
-    save_project_as,
-)
+from .dialogs import format_issues
 from .net_panel import NetPanel
 from .packet_view import PacketPanel
-from .point_props import PointPropertiesDialog
 from .point_table import COLUMNS, PointTableModel, PointTableView
 from .verify_panel import VerifyPanel
 from .window_common import _one_line, _parse_issue
@@ -65,7 +56,6 @@ from .window_consts import (
     _TABLE_STRETCH,
     _TICK_MS,
     _TREE_STRETCH,
-    PORT_PROBE,
 )
 from .window_edit import EditMixin
 from .window_io import IoMixin
@@ -75,7 +65,8 @@ from .window_menus import MenuMixin
 class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
     """组装层：只做接线与呈现，判定全部留在 engine/project 那一份里。"""
 
-    def __init__(self, session, store, project=None, log_file=None, settings=None) -> None:
+    def __init__(self, session, store, project=None, log_file=None, settings=None,
+                 deps: WindowDeps | None = None) -> None:
         """`log_file` 是这次的**证据落点**（`simbench/diagnostics.py` 那份会话日志）。
 
         默认 `None` = 不落盘：用例构造窗口时不该往用户的 `%LOCALAPPDATA%` 里写文件；
@@ -84,6 +75,9 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
 
         `settings`（`simbench/settings.py`）给了就**恢复并记住**窗口几何、主题、最近打开的
         工程；不给就什么都不做（用例的几何断言因此不会被用户机器上的设置影响）。
+
+        `deps`（`gui/deps.py`）是往外界伸手的那几样——会弹框的对话框与端口探针。默认真件；
+        用例注入假件，不必再 monkeypatch 本模块的全局名字。
         """
         super().__init__()
         # 主题只落这一次（构造期）：运行期再动 setStyleSheet 会让 Qt 重新 polish，
@@ -94,6 +88,8 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         self.store = store
         self.log_file = log_file
         self.settings = settings
+        # 与外界的那几个接缝（会弹框的对话框、端口探针）；不给就是真件，用例注入假件。
+        self.deps = deps or WindowDeps()
         # 点位表的取数挪到后台（见 `engine/rows_pump.py`）：主线程那一跳只做模型 diff，
         # 不再等引擎回话——4000 点的表上一次 16ms，卡在心跳里就是 37% 的主线程预算。
         self.rows_pump = RowsPump(session)
@@ -477,7 +473,7 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
             self.status.showMessage(f"{len(errors)} 个错误，启动已被阻止")
         else:
             self.status.showMessage(f"{len(issues)} 个警告")
-        IssueDialog(issues, self).exec()
+        self.deps.issues_dialog(issues, self).exec()
         return False
 
 
@@ -623,22 +619,16 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         event.accept()
 
 __all__ = [
-    "PORT_PROBE",
     "_FIRST_SPLIT",
     "_GC_EVERY_S",
     "_LOG_LINES",
     "_NOTICE_MS",
     "_START_SIZE",
-        "_STATUS_SLOT_WIDTH",
-        "_TABLE_STRETCH",
+    "_STATUS_SLOT_WIDTH",
+    "_TABLE_STRETCH",
     "_TICK_MS",
     "_TREE_STRETCH",
     "MainWindow",
-    "PointPropertiesDialog",
     "_one_line",
     "_parse_issue",
-    "choose_offset",
-    "import_table",
-    "open_project",
-    "save_project_as",
 ]

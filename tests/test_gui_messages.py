@@ -14,7 +14,6 @@ from __future__ import annotations
 import pathlib
 import socket
 
-import pytest
 from PySide6 import QtWidgets
 
 from simbench.csv_io_entry import load_point_table
@@ -23,6 +22,7 @@ from simbench.engine.session import Session
 from simbench.gui import messages
 from simbench.gui.main_window import MainWindow
 from tests.conftest import free_port
+from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -32,25 +32,13 @@ def has_chinese(text: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in text)
 
 
-@pytest.fixture(autouse=True)
-def no_modal_dialogs(monkeypatch):
-    class Recorder:
-        def __init__(self, issues, parent=None) -> None:
-            pass
-
-        def exec(self, *_args) -> int:
-            return 0
-
-    monkeypatch.setattr("simbench.gui.main_window.IssueDialog", Recorder)
-
-
 def make_window(qapp, engine_runner) -> MainWindow:
     project, _notes, issues = load_point_table(CSV)
     assert not [i for i in issues if i.level == "error"]
     project.channels[0].port = free_port()
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
-    window = MainWindow(session, store)
+    window = MainWindow(session, store, deps=gui_deps())
     window.use_project(project, CSV)
     window.show()
     qapp.processEvents()

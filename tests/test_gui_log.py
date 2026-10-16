@@ -22,24 +22,12 @@ from simbench.engine.session import Session
 from simbench.gui import app as app_module
 from simbench.gui.main_window import MainWindow
 from tests.conftest import free_port
+from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
 
 BUTTON_WIDTHS = {"另存日志": 76, "清空": 64}
-
-
-@pytest.fixture(autouse=True)
-def no_modal_dialogs(monkeypatch):
-    """错误清单对话框是模态的：换成记录器，否则用例回不来。"""
-    class Recorder:
-        def __init__(self, issues, parent=None) -> None:
-            pass
-
-        def exec(self, *_args) -> int:
-            return 0
-
-    monkeypatch.setattr("simbench.gui.main_window.IssueDialog", Recorder)
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +48,7 @@ def make_window(qapp, engine_runner, log_file=None) -> MainWindow:
     project.channels[0].port = free_port()
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
-    window = MainWindow(session, store, log_file=log_file)
+    window = MainWindow(session, store, log_file=log_file, deps=gui_deps())
     window.use_project(project, CSV)
     window.resize(1100, 680)
     window.show()

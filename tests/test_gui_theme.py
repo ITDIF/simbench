@@ -26,27 +26,14 @@ from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore
 from simbench.engine.session import Session
 from simbench.gui import device_tree as device_tree_module
-from simbench.gui import main_window as main_window_module
 from simbench.gui import theme
 from simbench.gui.channel_panel import STATUS_LABELS
 from simbench.gui.main_window import MainWindow
 from simbench.gui.point_table import COLUMNS, RAW_COLUMN, VALUE_COLUMN
+from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
-
-
-@pytest.fixture(autouse=True)
-def no_modal_dialogs(monkeypatch):
-    """错误清单是模态的：换成记录器，否则用例回不来（与布局用例同一口径）。"""
-    class Recorder:
-        def __init__(self, issues, parent=None) -> None:
-            pass
-
-        def exec(self, *_args) -> int:
-            return 0
-
-    monkeypatch.setattr(main_window_module, "IssueDialog", Recorder)
 
 
 @pytest.fixture
@@ -58,7 +45,7 @@ def window(qapp, engine_runner):
     assert not [i for i in issues if i.level == "error"]
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
-    w = MainWindow(session, store)
+    w = MainWindow(session, store, deps=gui_deps())
     w.use_project(project, CSV)
     w.resize(1100, 680)
     w.show()

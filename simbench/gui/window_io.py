@@ -27,10 +27,10 @@ class IoMixin:
     def _import_table(self) -> None:
         if not self._confirm_discard():
             return
-        path = _mw().import_table(self, self._start_dir())
+        path = self.deps.import_table(self, self._start_dir())
         if not path:
             return
-        offset = _mw().choose_offset(self)
+        offset = self.deps.choose_offset(self)
         try:
             project, notes = read_point_table(path, offset)
         except ProjectFileError as exc:
@@ -43,7 +43,7 @@ class IoMixin:
         if not self._confirm_discard():
             return
         try:
-            project, path = _mw().open_project(self, self._start_dir())
+            project, path = self.deps.open_project(self, self._start_dir())
         except ProjectFileError as exc:
             self._show_issues([_parse_issue(exc.path, exc.detail)])
             return
@@ -55,7 +55,7 @@ class IoMixin:
     def _save_project(self, ask: bool = False) -> str | None:
         """保存。`ask=True` 是"另存为"（总要问路径）；否则**有路径就直接写回**。
 
-        原来无条件走 `_mw().save_project_as`：已经存过、路径都知道了，再点一次"保存"还是弹
+        原来无条件走 `save_project_as`：已经存过、路径都知道了，再点一次"保存"还是弹
         文件名对话框——一天存十次就问十次，人开始点错（`xx (2).json` 就是这么来的）。
         没有路径时才问（新建的工程第一次保存）。
         """
@@ -64,7 +64,7 @@ class IoMixin:
                 path = str(save_project_to(self.session.project, self._path))
                 self.status.showMessage(f"已保存 {self._path.name}", _NOTICE_MS)
             else:
-                path = _mw().save_project_as(self, self.session.project,
+                path = self.deps.save_project_as(self, self.session.project,
                                        str(self._path) if self._path else "")
         except ProjectFileError as exc:
             self._log(f"[error] 保存失败：{exc}")
@@ -173,10 +173,3 @@ class IoMixin:
             return
         self.settings.remember_dir(path)
         self.settings.save()
-
-
-def _mw():
-    """主窗模块（运行时取）：用例 monkeypatch 的名字都挂在那里，mixin 不能在导入时绑死。"""
-    from . import main_window
-
-    return main_window

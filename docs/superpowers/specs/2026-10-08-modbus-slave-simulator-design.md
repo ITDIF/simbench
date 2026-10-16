@@ -109,6 +109,7 @@ gui/        PySide6：设备树 + 点位表 + 报文窗 + 启停控制 + CSV/工
             2026-10-15 拆分：`main_window.py`（组装/布局/心跳）+ `window_menus.py` / `window_edit.py` /
             `window_io.py`（三个 mixin）+ `window_consts.py`（常量）+ `window_common.py`（小纯函数）
             + `icons.py`（图标现画）+ `channel_state.py`（通道四态的符号 / 中文，**一处定义**）
+            + `deps.py`（与外界的那几个接缝：会弹框的对话框、端口探针）
 engine/     Session：唯一对 GUI 暴露的门面（启停/改值/拉取行 + 事件订阅），线程由 EngineRunner 持有；
             2026-10-15 拆分：`session.py`（生命周期/索引/事件）+ `reads.py`（取数）+ `writes.py`（写入/接管/恢复）
             + `records.py`（Row/WriteResult/ChannelRuntime）+ `render.py`（文案与小判定）
@@ -548,7 +549,12 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
   01/02/03/04/05/06/15/16，并断言：正常读写值一致、越界读返回异常码、写只读点返回异常码、
   float32 在 CDAB 字序下读回数值正确、多 unit_id 路由正确。
 - **信号契约**：引擎 → GUI 的事件对象有 schema 测试，保证引擎侧单独跑时事件不缺字段。
-- **GUI**：不做 UI 自动化（YAGNI）。
+- **GUI**：不做 UI 自动化（YAGNI）。用例造主窗时把「与外界的那几个接缝」（会弹框的对话框、
+  端口探针）经 `gui/deps.py` 的 `WindowDeps` 注入假件——2026-10-16 之前是
+  `monkeypatch.setattr(main_window, ...)` 那种改模块全局的写法，代价是混在别的模块里的方法
+  必须运行时去 `main_window` 上现查那个名字（`_mw()`），读源码看不出这个方法到底依赖什么。
+  共享的假件在 `tests/gui_support.py`（不放 conftest：那是所有用例都会 import 的，而它要
+  import PySide6，内核用例不该被装上 Qt）。
 - **RTU**：端到端测不了（需真串口）。走 pymodbus 现成 `ModbusSerialServer`，
   交付时明确标注"需在笔记本 + USB-485 做一次人工冒烟"，不假称已验证。
 

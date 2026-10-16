@@ -20,6 +20,7 @@ from simbench.engine.session import Session
 from simbench.gui.main_window import MainWindow
 from simbench.project.model import Device, Point, TcpChannel
 from tests.conftest import free_port
+from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -39,24 +40,11 @@ def listening_hog():
     return hog, hog.getsockname()[1]
 
 
-@pytest.fixture(autouse=True)
-def no_modal_dialogs(monkeypatch):
-    """错误清单和文件对话框都是模态的：换成记录器，否则用例回不来（见主窗测试同一口径）。"""
-    class Recorder:
-        def __init__(self, issues, parent=None) -> None:
-            pass
-
-        def exec(self, *_args) -> int:
-            return 0
-
-    monkeypatch.setattr("simbench.gui.main_window.IssueDialog", Recorder)
-
-
 @pytest.fixture
 def window(qapp, engine_runner):
     store = PacketStore()
     session = Session(runner=engine_runner, packet_store=store)
-    w = MainWindow(session, store)
+    w = MainWindow(session, store, deps=gui_deps())
     w.use_project(loaded(free_port()), CSV)
     w.resize(1100, 680)
     w.show()
