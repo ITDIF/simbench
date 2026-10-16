@@ -1,5 +1,10 @@
 """后端共用的那一半：与传输无关的启停骨架、波形 tick、值归属、报文与日志钩子。
 
+**名字**（2026-10-16 改）：本文件原先叫 `modbus_base.py`、类叫 `ModbusBackendBase`。它承载的是
+"与传输无关的那一半"，而 S7 也继承它（`s7_server.py` 的 `S7Backend`）——S7comm 不是 Modbus，
+名字里带 Modbus 会让读者以为这一层只管 Modbus 那几条路，它的文档串还得反过来写一句
+"与传输无关"来纠正自己。现在按它**实际的身份**叫：`backend/base.py` 的 `BackendBase`。
+
 为什么单独成文件（M5 Task 3）：TCP 与 RTU 的后端除了"怎么建 server / 怎么确认起来了 /
 怎么把字节块切成帧"这三件事之外**完全一样**——点位摊平、波形算值与钳位、值归属
 （`SourceStore`）、运行期日志去重、raw_writer 读写、启停顺序。散文式的重复在这里的代价
@@ -92,7 +97,7 @@ def configure_library_logging(level: int = logging.ERROR) -> None:
 
 
 
-class ModbusBackendBase:
+class BackendBase:
     """传输无关的那一半：摊平点表、波形 tick、值归属、报文/日志钩子、启停的骨架。
 
     为什么要抽这一层（M5 Task 3）：波形算值、值归属、钳位去重、raw_writer 这几套有几十条

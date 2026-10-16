@@ -365,9 +365,9 @@ def _backend_facade_offenders(folder: str | None, root: pathlib.Path = ROOT) -> 
 
 
 def test_engine_and_gui_reach_backend_only_through_the_facade():
-    """`engine/` 与 `gui/` 不许 import 后端实现文件（`modbus_base` / `modbus_tcp` / ...）。
+    """`engine/` 与 `gui/` 不许 import 后端实现文件（`base` / `modbus_tcp` / ...）。
 
-    动机：2026-10-15 结构优化前，`engine/session.py` 直接 import 了 `modbus_base.ModbusBackendBase`，
+    动机：2026-10-15 结构优化前，`engine/session.py` 直接 import 了 `base.BackendBase`，
     `engine/ports.py` 直接 import 了 `modbus_tcp.check_port_is_free`。后端的内部文件一改名，
     引擎就跟着断，而界面那一层也拿到了它不该知道的路径。现在统一走 `backend/__init__.py`
     再导出的那一组名字；要新增对外的东西，先在门面里加一行，再用。

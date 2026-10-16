@@ -14,8 +14,7 @@ import time
 import pytest
 from pyS7 import S7Client
 
-from simbench.backend import make_backend
-from simbench.backend.modbus_base import BackendStartError
+from simbench.backend import BackendStartError, make_backend
 from simbench.backend.s7_server import S7Backend
 from simbench.project.model import Device, Point, S7Channel
 

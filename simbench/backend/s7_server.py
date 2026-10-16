@@ -33,7 +33,7 @@ from typing import Any
 
 from ..codec.s7_codec import clamp_to_type, encode, read_bit, span_bytes, write_bit
 from ..project.model import Point, parse_s7_area, s7_summary
-from .modbus_base import BackendStartError, ModbusBackendBase
+from .base import BackendBase, BackendStartError
 
 # S7 也是 TCP 端口：归属判定与 TCP 同一套两级探针（bind + connect），不另写一份。
 from .modbus_tcp import check_port_is_free
@@ -71,7 +71,7 @@ _CPU_RUN = 8                       # snap7 的 S7CpuStatusRun
 _START_TIMEOUT = 5.0
 
 
-class S7Backend(ModbusBackendBase):
+class S7Backend(BackendBase):
     """S7（ISO-on-TCP / S7comm）从站。"""
 
     TRANSPORT = "s7"

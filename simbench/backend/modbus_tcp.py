@@ -1,13 +1,13 @@
 """pymodbus Modbus TCP 从站：端口归属探针 + 建 server + MBAP 切帧。
 
 与传输无关的那一半（摊平点表、波形 tick、值归属、报文/日志钩子、启停顺序）搬去了
-`modbus_base.py`（M5 Task 3）：本文件只剩 TCP 专有的四件事——两级端口探针
+`base.py`（M5 Task 3）：本文件只剩 TCP 专有的四件事——两级端口探针
 （`check_port_is_free`）、`ModbusTcpServer` 的构造、等 listener 起来、按 MBAP 切帧与解析，
 外加"声明里的地址再挂几个监听"那一段。
 
 pymodbus 的 import 只允许出现在 backend/（tests/test_architecture.py 守这条线）。
-`configure_library_logging` 与 `_DropDatastoreNoise` 从基类模块再导出：它们在 M5 抽基类
-之前就住在这里，测试与排查脚本按老路径 import 它们。
+`configure_library_logging` 与 `_DropDatastoreNoise` 从 `base.py` 再导出：它们在 M5 抽基类
+之前就住在这里，`test_integration_tcp.py` 按老路径 import 它们。
 """
 
 from __future__ import annotations
@@ -20,9 +20,12 @@ import time
 from pymodbus import FramerType
 from pymodbus.server import ModbusBaseServer, ModbusTcpServer
 
-from .modbus_base import (  # noqa: F401  （再导出：老路径 import 它的人不少）
+# 前两个本文件自己要用（子类继承 + 抛错）；后两个是**再导出**——它们在 M5 抽基类之前就住在
+# 这里，`tests/test_integration_tcp.py` 按老路径 import（2026-10-16 核过：从本模块取走的名字
+# 就这些，别的一律直接走 `base`）。
+from .base import (  # noqa: F401
+    BackendBase,
     BackendStartError,
-    ModbusBackendBase,
     _DropDatastoreNoise,
     configure_library_logging,
 )
@@ -212,10 +215,10 @@ def parse_packet(raw: bytes) -> tuple[int | None, int | None, str]:
     return unit, function, f"unit {unit} fc {function} {len(body)}B {body[:8].hex(' ')}"
 
 
-class ModbusTcpBackend(ModbusBackendBase):
+class ModbusTcpBackend(BackendBase):
     """一个 socket 通道 = 一个 pymodbus server = 一个 loop 线程里的监听。
 
-    与传输无关的行为（波形、归属、报文/日志、启停顺序）全在 `ModbusBackendBase`；
+    与传输无关的行为（波形、归属、报文/日志、启停顺序）全在 `BackendBase`；
     本类只填那五个钩子，再加"声明里的地址再挂几个监听"。
 
     **三种 socket 传输共用这一层**（2026-10-14 E7）：`tcp`（MBAP）、`udp`（MBAP over UDP）、

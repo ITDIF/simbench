@@ -20,7 +20,7 @@ import socket
 
 from pymodbus.server import ModbusUdpServer
 
-from .modbus_base import BackendStartError
+from .base import BackendStartError
 from .modbus_tcp import ModbusTcpBackend
 
 # "这个地址不在本机"的错误码（与 TCP 那一支同一张表，Windows 是 WSAEADDRNOTAVAIL）。

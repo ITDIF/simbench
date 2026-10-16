@@ -1,15 +1,15 @@
 """引擎层共用的记录类型：点位行、写入结果、通道运行态，以及等引擎回话的上限。
 
-从 session.py 拆出来（2026-10-15 结构优化）：读侧（eads.py）、写侧（writes.py）与
-门面（session.py）都要用这些类型，放在门面里会造成互相 import。session.py 仍然把
-它们再导出，老路径（rom simbench.engine.session import Row）保持可用。
+从 `session.py` 拆出来（2026-10-15 结构优化）：读侧（`reads.py`）、写侧（`writes.py`）与
+门面（`session.py`）都要用这些类型，放在门面里会造成互相 import。`session.py` 仍然把
+它们再导出，老路径（`from simbench.engine.session import Row`）保持可用。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..backend import ModbusBackendBase
+from ..backend import BackendBase
 
 # 等引擎回话的三条上限。**口径**：GUI 能走到的每一条等待都用 `runner.call(...)`，
 # 不用裸 `submit(...).result(...)`——`call` 在超时会把引擎线程当时的栈帧一起写进异常
@@ -87,5 +87,5 @@ class ChannelRuntime:
     connections: int = 0
     # 两条传输共用这个字段：具体是哪个后端由 `backend.make_backend()` 按通道类型选，
     # 所以这里的类型是基类而不是某个传输（写死 TCP 那个类，读代码的人会以为串口不复用）。
-    backend: ModbusBackendBase | None = None
+    backend: BackendBase | None = None
     last_error: str = ""

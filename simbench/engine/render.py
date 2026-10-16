@@ -50,7 +50,7 @@ def _detail(backend) -> str:
     """通道状态那一栏显示的"主站该连哪"：由后端自己说，因为两条传输的答案是两种东西。
 
     TCP 是"所有监听地址、多了截断"，串口是那一串串口参数（`COM3 19200 8E1`）——判定住在
-    `ModbusBackendBase.describe()` 里（子类覆盖），这一层只转发，免得"界面的说法"和
+    `BackendBase.describe()` 里（子类覆盖），这一层只转发，免得"界面的说法"和
     "后端的说法"各长一套。TCP 那个格式不能动：界面与用例按 `rpartition(":")` 取端口。
     """
     return backend.describe()

@@ -115,7 +115,7 @@ engine/     Session：唯一对 GUI 暴露的门面（启停/改值/拉取行 + 
             + `session_host.py`（两个 mixin 的宿主契约，**只给类型检查器看**，运行时不加行为）
 backend/    三条传输的后端：ModbusTcpBackend / ModbusRtuBackend（pymodbus）与 S7Backend（snap7）；
             与传输无关的那一半（波形 tick、值归属、报文/日志钩子、启停顺序）在
-            `modbus_base.py` 的 `ModbusBackendBase`（**不 import pymodbus/snap7**），
+            `base.py` 的 `BackendBase`（**不 import pymodbus/snap7**），
             子类只填探针/建 server/等起来/切帧解析/数据面这几个钩子
 codec/      point_codec：点位值 ↔ 原始寄存器序列（数据类型 × 字序）；
             s7_codec：S7 点位值 ↔ 字节序列（大端、无字序、bool 一位）
@@ -128,9 +128,9 @@ net/        系统网络层（网卡现状/差异/专用网卡/设备 IP）；�
 import `pymodbus`/`snap7`，也不 import `PySide6`；`backend` 不 import `PySide6`；`subprocess`
 只许出现在 `net/`。
 
-**门面约束（2026-10-15 结构优化，`tests/test_architecture.py` 守着）**：`engine/` 与 `gui/` 只许从 `simbench.backend` 门面（再导出的 `make_backend` / `ModbusBackendBase` / `check_port_is_free` / `BackendStartError` 等）与纯数据模块 `backend.events` 取东西，不许直接 import `modbus_base` / `modbus_tcp` 等实现文件。要对外新增一个名字，先在门面里再导出一行。
+**门面约束（2026-10-15 结构优化，`tests/test_architecture.py` 守着）**：`engine/` 与 `gui/` 只许从 `simbench.backend` 门面（再导出的 `make_backend` / `BackendBase` / `check_port_is_free` / `BackendStartError` 等）与纯数据模块 `backend.events` 取东西，不许直接 import `base` / `modbus_tcp` 等实现文件。要对外新增一个名字，先在门面里再导出一行。
 
-**类型检查的覆盖范围（2026-10-16 扩）**：`mypy` 覆盖 `project` / `codec` / `engine` / `backend` / `master` 五棵子树。先前只有前三棵，于是 engine 被检查、而它调用的 backend 契约（`make_backend()` 的返回值、`ModbusBackendBase` 的钩子签名）不在闸门内——边界单边可信。补齐的成本实测是 15 处报错，无一处需要 `# type: ignore`。仍在闸门外的是 `gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）。
+**类型检查的覆盖范围（2026-10-16 扩）**：`mypy` 覆盖 `project` / `codec` / `engine` / `backend` / `master` 五棵子树。先前只有前三棵，于是 engine 被检查、而它调用的 backend 契约（`make_backend()` 的返回值、`BackendBase` 的钩子签名）不在闸门内——边界单边可信。补齐的成本实测是 15 处报错，无一处需要 `# type: ignore`。仍在闸门外的是 `gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）。
 
 线程模型（**2026-10-13 全面审查时按落地形状改写**；此前这一节写的是目标形状，"命令队列"
 与 `packet_event / validation_error` 这几个名字在实际代码里都不存在）：Qt 主线程 + 一个引擎
@@ -164,8 +164,8 @@ import `pymodbus`/`snap7`，也不 import `PySide6`；`backend` 不 import `PySi
   一路通道，所以调用方传的是 `Project(channels=[channel])`
 - **`backend.make_backend(channel, packet_sink, on_connection, tick_ms, log_sink,
   extra_endpoints)`** 是唯一按 `channel_transport()` 选后端的地方；两条传输共用的那一半
-  （波形 tick、值归属、报文/日志钩子、启停顺序）在 `backend/modbus_base.py` 的
-  `ModbusBackendBase`（**不 import pymodbus**），两个子类 `ModbusTcpBackend` /
+  （波形 tick、值归属、报文/日志钩子、启停顺序）在 `backend/base.py` 的
+  `BackendBase`（**不 import pymodbus**），两个子类 `ModbusTcpBackend` /
   `ModbusRtuBackend` 各自只填五个钩子（探针 / 建 server / 等起来 / 切帧 / 解析），
   对外都是 `start()` / `stop()` 两个协程
 - `codec/point_codec.encode(value, datatype, word_order) -> list[int]` /
@@ -182,7 +182,7 @@ import `pymodbus`/`snap7`，也不 import `PySide6`；`backend` 不 import `PySi
 数据流：
 
 - 录入：CSV/GUI → `project` 模型 → `validate()` → 生成 `SimDevice` 列表 → `Backend`
-- 运行：backend 的 tick（默认 100ms，`backend/modbus_base.py` 的 `_tick_loop`/`_tick_once`，
+- 运行：backend 的 tick（默认 100ms，`backend/base.py` 的 `_tick_loop`/`_tick_once`，
   两条传输共用一份；不在 `engine/`，为的是无头 CLI 也驱动曲线）→ `waveform_value` 算值 → `clamp_to_datatype`
   钳位 → `PointCodec.encode` →
   **直接改 `SimRuntime.block[..][2]` 的寄存器列表**（`backend/raw_writer.py`；已实测不能用
@@ -342,7 +342,7 @@ JSON 整数、`timeout` 必须是数字（`int(1.9)=1` 那种静默截断会让�
 
 **"要不要一个协议适配器"的答案：已经有了。** `project/model.channel_transport()` 是唯一的
 传输判据（全包 29 处 / 13 个文件都问它，没有第二套 isinstance 判定）、`backend.make_backend()`
-是唯一的装配口（界面 / 命令行 / 会话三条路都走它）、`ModbusBackendBase` 的钩子是与传输无关的
+是唯一的装配口（界面 / 命令行 / 会话三条路都走它）、`BackendBase` 的钩子是与传输无关的
 那一半（S7 接上去时 Modbus 两条路的既有用例一个断言没改）。真正缺的是**"注册"**：每种协议的
 事实（通道类、区清单、默认区、默认点位类型、名字语法、校验函数）散在 15 个文件里各写一遍，
 第四种协议要动 **16 处**——清单在 `plans/2026-10-14-import-export-formats.md` §4。**本轮不抽
@@ -589,7 +589,7 @@ hr/ir 一律以**原始 reg16 数组**写入 `SimCore`（`DataType.REGISTERS`）
    等人的仍是人工那一条：Task 7 Step 5 的界面冒烟清单。
 5. **M5 RTU backend（已完成）**：串口通道（模型/校验/CSV 与 JSON 往返/界面那一行）+
    `ModbusRtuBackend`。落地在计划 `docs/superpowers/plans/2026-10-12-modslave-m5-rtu.md`
-   （三段执行，偏离表 D1–D12），新增 `simbench/backend/modbus_base.py`（TCP 与 RTU 共用的
+   （三段执行，偏离表 D1–D12），新增 `simbench/backend/base.py`（2026-10-16 从 `modbus_base.py` 改名）（TCP 与 RTU 共用的
    那一半：波形 tick、值归属、报文/日志钩子、启停顺序；**不 import pymodbus**）与
    `simbench/backend/modbus_rtu.py`（串口探针 + `ModbusSerialServer` + 按 RTU 帧切帧）。
    验收**不需要硬件**：`ModbusSerialServer(port="socket://host:port")` 会自建 TCP 监听、

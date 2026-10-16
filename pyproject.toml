@@ -51,7 +51,7 @@ ignore = [
 python_version = "3.13"
 # 覆盖"数据与判定"那五棵子树（project / codec / engine / backend / master）。
 # 2026-10-16 把 backend 与 master 拉进来的理由：engine 一直是被检查的，而它调用的正是
-# backend 的契约（`make_backend()` 的返回值、`ModbusBackendBase` 的钩子签名）——只查一半
+# backend 的契约（`make_backend()` 的返回值、`BackendBase` 的钩子签名）——只查一半
 # 等于这条边界单边可信。实测纳入的成本是 15 处报错（无一处需要 `# type: ignore`：
 # pymodbus 的客户端/服务端找得到公共基类，snap7 那三个可选模块标成 `ModuleType | None`，
 # 两处返回类型注解写漏了格子）。同批还顺手逮到一处真隐患（`ownership.write_targets` 会把

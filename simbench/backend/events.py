@@ -17,7 +17,7 @@ class PacketEvent:
     # PDU 在 `raw` 里的起点（`write_targets` 靠它找地址与数量）：Modbus TCP 是 MBAP 之后的
     # 第 7 字节，RTU 是单元号之后的第 1 字节。默认 7 = 既有 TCP 形状——报文窗那条路
     # （`Session._packet_sink` 造的事件）不带这个信息，也不参与接管判定；串口后端在自己
-    # 那一路显式给 1（`modbus_base._own_write_frame`）。
+    # 那一路显式给 1（`base._own_write_frame`）。
     pdu_offset: int = 7
     # 进缓冲的顺序号（**由 `PacketStore.add` 发**，不是 backend 自己填的）：报文窗靠它做
     # 差集，只给"新来的那一段"发 `rowsInserted`、只给"被环形缓冲淘汰的那一段"发

@@ -15,8 +15,7 @@ import time
 import pytest
 from pymodbus.client import ModbusUdpClient
 
-from simbench.backend import make_backend
-from simbench.backend.modbus_base import BackendStartError
+from simbench.backend import BackendStartError, make_backend
 from simbench.backend.modbus_udp import ModbusUdpBackend, check_udp_port_is_free
 from simbench.project.model import Device, Point, TcpChannel
 

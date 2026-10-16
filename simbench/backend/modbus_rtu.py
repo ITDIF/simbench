@@ -1,6 +1,6 @@
 """pymodbus Modbus RTU 从站：串口归属探针 + 建 server + 按 RTU 帧切帧。
 
-与传输无关的那一半在 `modbus_base.py`（M5 Task 3）：波形 tick、值归属、报文/日志钩子、
+与传输无关的那一半在 `base.py`（M5 Task 3）：波形 tick、值归属、报文/日志钩子、
 启停顺序在两条传输上是同一份代码。本文件只留串口专有的四件事——串口归属探针
 （`check_serial_is_free`）、`ModbusSerialServer` 的构造、等它起来、按 RTU 帧形状切帧与解析。
 
@@ -29,7 +29,7 @@ from pymodbus import FramerType
 from pymodbus.server import ModbusSerialServer
 
 from ..project.model import serial_summary
-from .modbus_base import BackendStartError, ModbusBackendBase
+from .base import BackendBase, BackendStartError
 
 # `socket://` 那一路的"归属"就是那个 TCP 端口，判定与 TCP 一模一样（见
 # `check_serial_is_free`），所以直接用它那一份两级探针——两份探针一定会漂。
@@ -152,7 +152,7 @@ def check_serial_is_free(port: str, channel_name: str | None = None) -> None:
     handle.close()
 
 
-class ModbusRtuBackend(ModbusBackendBase):
+class ModbusRtuBackend(BackendBase):
     """串口上的 Modbus RTU 从站（ASCII 那一支继承它，只换 framer 与切帧）。"""
 
     TRANSPORT = "rtu"

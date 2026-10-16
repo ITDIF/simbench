@@ -3,7 +3,7 @@
 调用方（`engine/session.py`、`__main__._serve`）只认这个函数，不认具体后端类："选哪个
 后端"这件事散在几处的那种写法，加第三种通道时必然漏掉一处。
 
-两个后端共用的那一半（波形 tick、值归属、报文/日志钩子、启停顺序）在 `modbus_base.py`：
+两个后端共用的那一半（波形 tick、值归属、报文/日志钩子、启停顺序）在 `base.py`：
 `ModbusTcpBackend` 与 `ModbusRtuBackend` 各自只填五个钩子（探针、建 server、等起来、
 切帧、解析），所以"改一处波形逻辑、两条传输一起生效"是**结构上**成立的。
 """
@@ -11,12 +11,12 @@
 from __future__ import annotations
 
 from ..project.model import channel_transport
+from .base import BackendBase as BackendBase
+from .base import BackendStartError as BackendStartError
 
 # 再导出给调用方（`engine/session`、`__main__` 都从这里 import）：`as` 成同一个名字是
 # 显式声明「我是给外面用的」，不是漏删的 import（ruff 的 F401 也认这个写法）。
 from .modbus_ascii import ModbusAsciiBackend
-from .modbus_base import BackendStartError as BackendStartError
-from .modbus_base import ModbusBackendBase as ModbusBackendBase
 from .modbus_rtu import ModbusRtuBackend
 from .modbus_rtutcp import RtuOverTcpBackend
 from .modbus_tcp import ModbusTcpBackend
