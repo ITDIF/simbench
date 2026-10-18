@@ -87,6 +87,11 @@ class S7Backend(BackendBase):
         # `[(区名, DB 号, 服务端区代码, 区域编号, ctypes 缓冲, 该区点表)]`：区名/DB 号用来把
         # 点位对上缓冲，服务端代码/编号给 snap7 的注册与区域锁用。
         self._areas: list[tuple[str, int, Any, int, Any, list]] = []
+        # 波形 tick 上一跳给每个点写进去的字节，键与 `SourceStore` 同形状（区/地址/位）。
+        # `_write_point` 拿它判"缓冲还是不是我写的"，所以只在 loop 线程读写——与归属表同一条
+        # 纪律，也就同样被 S7 的事件线程绕过；绕过的后果由内容比对本身兜住（判出接管只会
+        # 少写一次，不会写错值）。
+        self._tick_written: dict[tuple[str, int, int | None], bytes] = {}
 
     # ---------- 基类的钩子 ----------
 
@@ -181,12 +186,64 @@ class S7Backend(BackendBase):
         return clamp_to_type(value, pt.datatype)
 
     def _write_point(self, key, pt, value) -> bool:
-        """引擎侧写值（波形 tick）= 改那块区域缓冲（主站下一次读就看得见，实测过）。"""
+        """引擎侧写值（波形 tick）= 改那块区域缓冲（主站下一次读就看得见，实测过）。
+
+        写之前先看缓冲**还是不是上一跳自己写的那串字节**：不是就说明主站已经改过，于是这一跳
+        一个字都不写、当场把该点标成接管并出声。
+
+        为什么要多这一次比对：主站的写与它的**事件**之间实测有中位 0.65ms 的间隔（snap7 在它
+        自己的线程上回调，见 `_on_event`），而波形节拍只看归属表、不看事件。所以"主站已经落了
+        盘、归属却还归曲线"这个中间态每一拍都可能出现——1000 次主站写里约 10 次会被这一跳顶掉
+        （2026-10-16 实测，`docs/superpowers/notes/s7_ownership_race_probe.py`）。事件靠不住，
+        缓冲不骗人：内容比对用的是写入那一刻就能同步看到的证据。
+
+        没有记录（这个点第一次被 tick 写，或上一次刚判出接管）就照常写：那时没有"本该是什么"
+        可比，而启动与恢复之后本来就该由曲线接手。
+        """
         try:
             raw = encode(value, pt.datatype, span_bytes(pt.datatype, pt.initial))
         except ValueError:
             return False                     # 编不出来（坏点表）：tick 的逐点兜会记一条日志
-        return self.write_point_bytes(pt, raw)
+        identity = (pt.area, pt.address, pt.bit)
+        mine = self._tick_written.get(identity)
+        if mine is not None:
+            present = self.read_point_bytes(pt)
+            if present is not None and present != mine:
+                # 与事件那条路用同一个键与同一个跨度（bool 占 1、位跟着走），否则两条路会把
+                # 同一个点记成两段，`manual_count` 与"恢复波形"就会各说各话。
+                span = 1 if pt.datatype == "bool" else span_bytes(pt.datatype, pt.initial)
+                self._sources.own(self.channel_name, key, pt.area, pt.address,
+                                  count=span, who="master", bit=pt.bit)
+                del self._tick_written[identity]
+                self._emit("warning", "takeover", (key, pt.area, pt.address),
+                           f"{pt.name} ({pt.area} {pt.address}, bit {pt.bit}) was already "
+                           f"rewritten by the master before its event arrived; the waveform "
+                           f"handed this point back", time.monotonic())
+                return False
+        if not self.write_point_bytes(pt, raw):
+            return False
+        self._tick_written[identity] = raw
+        return True
+
+    def restore_waveform(self, unit_id: int, area: str, address: int,
+                         count: int = 1, bit: int | None = None) -> bool:
+        """交还波形：归属清掉的同时，"我上次写进去的是哪串字节"也必须一起忘掉。
+
+        不忘掉就永远恢复不了：接管期间的每一跳 tick 都在 `is_waveform` 那一步被挡住，
+        `_write_point` 压根没跑，那份记录还停在接管**之前**的波形值上；恢复之后第一跳一看
+        缓冲里是主站的值、记录里是自己的旧值，就判定"又被主站写了"，当场把刚恢复的点重新标
+        成接管——操作员按了"恢复波形"，曲线却永远不接手。钉住这个形状的是
+        `test_the_tick_writes_into_the_area_and_respects_ownership` 的最后一步。
+
+        跨度与 `SourceStore.restore` 逐字节同口径（`bit` 只作用在基础地址那一个上），两条路
+        对"这一段有多大"必须给同一个答案。
+        """
+        handed_back = super().restore_waveform(unit_id, area, address, count=count, bit=bit)
+        if handed_back:
+            for offset in range(max(1, int(count))):
+                self._tick_written.pop((area, address + offset,
+                                        bit if offset == 0 else None), None)
+        return handed_back
 
     def read_point_bytes(self, pt) -> bytes | None:
         """读一个点占的那几个字节（`bool` 回一个字节的 `00`/`01`）。

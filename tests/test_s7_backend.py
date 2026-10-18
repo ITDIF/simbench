@@ -16,6 +16,7 @@ from pyS7 import S7Client
 
 from simbench.backend import BackendStartError, make_backend
 from simbench.backend.s7_server import S7Backend
+from simbench.codec.s7_codec import encode
 from simbench.project.model import Device, Point, S7Channel
 
 _CALL_TIMEOUT = 10.0
@@ -63,6 +64,12 @@ def open_s7(engine_runner, ch, **kwargs) -> S7Backend:
     backend = S7Backend(ch, **kwargs)
     engine_runner.call(lambda: backend.start(), _CALL_TIMEOUT, "s7 start")
     return backend
+
+
+def _word_point(backend) -> Point:
+    """点表里 `db1` 偏移 4 那个 word（"状态字"，const 波形 42）——上面两条用例的靶子。"""
+    return next(pt for _key, pt in backend._flatten_points()
+                if pt.area == "db1" and pt.address == 4)
 
 
 def test_the_factory_builds_the_s7_backend():
@@ -142,6 +149,58 @@ def test_the_tick_writes_into_the_area_and_respects_ownership(engine_runner):
         assert client.read(["DB1,W4"]) == [42], "交还之后曲线没接手"
     finally:
         client.disconnect()
+        engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "s7 stop")
+
+
+def test_a_master_write_whose_event_has_not_arrived_survives_the_next_tick(engine_runner):
+    """主站已经写进缓冲、归属事件却还没到（实测中位 0.65ms）——这一跳不许顶掉它。
+
+    `test_the_tick_writes_into_the_area_and_respects_ownership` 那条**结构性地抓不到**
+    这个形状：它先 `wait_for` 等归属落地、再手工调 `_tick_once`，于是"标记落地之前"那一拍
+    从来没有被测过。这里把中间态直接造出来：只动缓冲、不动归属。
+
+    判据用缓冲内容而不是事件：tick 上一跳写进缓冲的字节是它自己写的，如今不是了，就只能是
+    别人写的。这比等事件可靠——事件一定会迟到，而内容不会骗人。
+    """
+    port = free_port()
+    backend = open_s7(engine_runner, channel(port), tick_ms=0)
+    try:
+        backend._tick_once(now=1.0)                     # 曲线写了 42，并记住"这里是我的 42"
+        foreign = encode(777, "word", 2)
+        assert backend.write_point_bytes(_word_point(backend), foreign) is True
+        # 归属此刻**仍然**归曲线——事件还没到，这正是那 0.65ms 里的世界
+        assert backend.source_is_waveform(0, "db1", 4)
+
+        backend._tick_once(now=2.0)
+
+        assert backend.read_point_bytes(_word_point(backend)) == foreign, \
+            "曲线把主站刚写的值顶回去了（事件还没到，判据只能是缓冲内容）"
+        assert not backend.source_is_waveform(0, "db1", 4), \
+            "既然认定被接管，就必须当场标成 manual——否则下一跳还会再来一次"
+    finally:
+        engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "s7 stop")
+
+
+def test_the_takeover_detected_from_the_buffer_says_so_instead_of_going_silent(engine_runner):
+    """从缓冲内容判出的接管要出声：操作员看得见"这一格不是我顶的，是平台先动了"。
+
+    静默 abstain 比报一条错更坏：曲线不动、界面照旧、日志一个字都没有，只剩"这个值哪来的"
+    这一种猜。去重表按点与类别压 60s，所以这条只在头一次出声——与 clamp/failure 同一口径。
+    """
+    port = free_port()
+    lines: list[tuple[str, str]] = []
+    backend = open_s7(engine_runner, channel(port), tick_ms=0,
+                      log_sink=lambda level, text: lines.append((level, text)))
+    try:
+        backend._tick_once(now=1.0)
+        assert backend.write_point_bytes(_word_point(backend), encode(777, "word", 2)) is True
+        backend._tick_once(now=2.0)
+
+        warnings = [text for level, text in lines if level == "warning"]
+        assert warnings, f"接管了却一个字没说：{lines!r}"
+        assert any("状态字" in text or "db1 4" in text for text in warnings), \
+            f"那句警告没点名是哪个点：{warnings!r}"
+    finally:
         engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "s7 stop")
 
 
