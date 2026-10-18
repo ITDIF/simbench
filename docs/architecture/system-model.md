@@ -45,6 +45,8 @@ simbench 平时**当**从站被上游主站读，必要时反过来**当**主站
 
 走界面还是走命令行由 `packaging/entry.py:17-39` 判：stdout 为 `None`，或 exe 名以 `-gui` 结尾。
 
+**这三种形态已于 2026-10-18 在本机真构建、真冒烟验证过**（15/15 通过，其中 S7 与 Excel 两条只有冻结形态才验得到），不再是「只读了 spec 源码」的状态。构建耗时、体积与冒烟清单见 §12.1；过程中撞到的 `packaging/build.ps1` 编码问题记在 §五。
+
 **提权子进程不是另一个程序**：`net` 的写操作（`device create|remove` / `up` / `clean`）用 `Start-Process -Verb RunAs` 把**同一个 exe** 再启一遍，参数经 `%TEMP%` 里一个带 pid 的 JSON 任务文件传递，结果经另一个 JSON 文件回传（`simbench/net/elevate.py:56-93`）。只有这四条命令提权，GUI 与只读命令不提权（`simbench/net/cli.py:256-262,385-394,439-446,553-563`）。
 
 五个落盘存储，写入路径全部经 `project/fsio.py` 的同一套"临时文件 + `os.replace` 原子替换、覆盖前留一份 `.bak`"（`fsio.py:35-91`；调用方 `csv_io.py:146`、`json_io.py:286`、`xlsx_io.py:196`、`net/spec.py:124`、`master/report.py:70,85`）：
@@ -117,7 +119,7 @@ __main__ →  gui / master / net / project / crosscut（全部延迟 import）
 
 **锁纪律**：`SourceStore`（人工接管地址表）与 `LogDedupe` **没有锁**，靠的是"只在引擎 loop 线程上碰"这条单线程约束（`backend/ownership.py:1-8`、`base.py:137-139`）；GUI 侧的写命令一律经 `runner.call` 投回 loop 线程（`engine/writes.py:174-191`）。`Session._lock`（RLock）守 `_channels/_points/_rows_meta/_render_cache/_sinks/_revision`（`session.py:57`）；`PacketStore._lock` 只守 deque，监听器在锁外调（`packets.py:55-64,86-108`）；`RowsPump._lock` 只守缓存的行列表（`rows_pump.py:42,96-99`）。
 
-**这条约束有一处实证例外**：S7 的 `_on_event` 在 **snap7 DLL 自己的线程上**改 `SourceStore`（`s7_server.py:297-323`），而 `SourceStore` 本身无锁（`ownership.py:23`）；被 DLL 区域锁保护的只是区域缓冲（`s7_server.py:19-21,352-366`）。**已实测结案：竞态确实存在，且不是罕见事件——单次主站写约 1% 会被同一跳波形静默顶掉并冻住（10/1000 实测），限制项是 snap7 的事件送达延迟（中位 0.65ms）而不是 Python 侧那几十微秒；它是逻辑竞态（GIL 下集合不会被写坏），Modbus 那五条路结构上不可能有它。全部证据见第十节。**
+**这条约束有一处实证例外**：S7 的 `_on_event` 在 **snap7 DLL 自己的线程上**改 `SourceStore`（`s7_server.py:297-323`），而 `SourceStore` 本身无锁（`ownership.py:23`）；被 DLL 区域锁保护的只是区域缓冲（`s7_server.py:19-21,352-366`）。**已实测结案：竞态确实存在，且不是罕见事件——单次主站写约 1% 会被同一跳波形静默顶掉并冻住（10/1000 实测），限制项是 snap7 的事件送达延迟（中位 0.65ms）而不是 Python 侧那几十微秒；它是逻辑竞态（GIL 下集合不会被写坏），Modbus 那五条路结构上不可能有它。全部证据见第十节；**这条已在本会话内修复**（判据换成缓冲内容比对 + 读回与写共用一次区域锁），修复前后数据见第十一节。**
 
 ### 通道生命周期与部分失败
 
@@ -163,6 +165,7 @@ __main__ →  gui / master / net / project / crosscut（全部延迟 import）
 | `ChannelRuntime.connections` 字段从未被读写 | 声明 `engine/records.py:87`；`simbench/` 全树 grep 无第二处引用 | — |
 | `BackendBase` 的 `on_connection` 钩子只有测试传值 | 贯穿所有构造器（`base.py:114,123`、`modbus_tcp.py:237-239`、`s7_server.py:80-83`、`__init__.py:36,49,54,59`），在 `base.py:375-376` 被触发；但 `session.py` 与 `__main__._serve` 都不传，唯一传真值的地方是 `tests/test_integration_tcp.py:446` | 生产路径上是空钩子 |
 | `net apply` 子命令有分派、**无 subparser** | 分派 `net/cli.py:723-724`，实现 `_cmd_apply` 在 `:355-419`，提权调用在 `:387`；但 `:629-691` 的 subparser 注册里没有 `apply` | 从命令行不可达；`startup.py:52-67` 复用的是 `up` |
+| **两个 `.ps1` 都是 UTF-8 无 BOM，Windows PowerShell 5.1 读不动** | `packaging/build.ps1`（无 BOM、423 个非 ASCII 字节）被本机 PS 5.1 解析出 **2 个语法错误**（`:53` 字符串缺终止符、`:28` 缺 `}`）；把同一份内容前面加 `EF BB BF` 再解析 → **0 个错误**。`packaging/lock.ps1` 同形状（无 BOM、276 个非 ASCII 字节）。本机是 `5.1.26100.9711` + GBK 控制台；`pwsh`（PS7，默认按 UTF-8 读）可用 | **这是活的、可复现的故障，不是死代码**：README:203 与 `build.ps1` 自己的用法注释都写着 `\.\packaging\build.ps1`，而那正是敲进 PS 5.1 的路径。补 BOM 或改用 `pwsh -File` 都能解决，本次没动文件 |
 | `net/ledger.py` 有两条完全相同的 `return` | `:94` 与 `:95` 逐字相同 | 第二条不可达 |
 | `SERIAL_MARK = "@"` 定义了两次 | `project/model.py:60` 与 `:64`，值相同、注释近似 | — |
 | `_cmd_device_write` 两个分支都返回 0 | `net/cli.py:272-274`：`if result.get("already"): return 0` 紧跟 `return 0` | 条件判断无实际作用 |
@@ -210,12 +213,10 @@ __main__ →  gui / master / net / project / crosscut（全部延迟 import）
 
 **中等置信度**：两个人类 actor 的划分（依据 README 章节结构，代码无角色概念）；`spec §4` 滞后于 `master/` 这个判断（依据是 §4 清单里没有它 + 守卫为它开了豁免 + 守卫注释注明加入日期，三处信号一致但没有一条直接说"spec 忘了更新"）。
 
-**未决 / 待验证**（这些是本轮**没有**回答的问题，需要另起一轮或直接实测）：
+**未决 / 待验证**：第七节原先挂的四项**全部已结案**，没有遗留。结案位置：`PointChanged` → §9.1；全量套件 → §9.2；S7 跨线程竞态 → §十（发生率实测）与 §十一（修复 + 关闭剩余缝隙）；`net apply` 的来历与 `gui/net` 的 mypy 成本 → §12.2 与 §12.3。另外 §12.1 把"三种 exe 形态本机无法复现"这条缺口也补上了。
 
-1. **`net apply` 是被 `up` 取代后忘了删，还是准备再暴露出来**。有分派（`net/cli.py:723-724`）、有实现（`:355-419`）、有提权调用（`:387`），但没注册 subparser（`:629-691`），从命令行不可达；`startup.py:52-67` 复用的是 `up`。要查历史或问作者。
-2. **`gui/` 与 `net/` 在 mypy 闸门外**这件事，是"暂不划算"还是"有具体阻碍"。`pyproject.toml:60-61` 给的理由是"注解要补到能过检查是另一档工作量，等有人真正去碰那两层时再逐个拉进来"——这是意图陈述，不是实测结论。
+还剩一件**新发现的、不属于本模型范围**的事：`packaging/build.ps1` 与 `lock.ps1` 的编码缺陷（见 §五最后一条），它是活的故障，但修它属于打包/CI 那条线。
 
-原先列在这里的三项（`PointChanged` 的来历、全量套件是否全绿、**S7 跨线程改 `SourceStore` 是否构成竞态**）**已分别在第 9.1、9.2、第十节查清并结案**——第三项的答案是"确实构成竞态，但只是逻辑竞态且窗口很窄"。
 
 ## 八、怎么重新生成
 
@@ -299,7 +300,7 @@ Success: no issues found in 47 source files      rc=0
 
 安装带来的 7 个包（`ruff 0.17.0`、`mypy 2.4.0`、`typing_extensions 4.16.0`、`mypy_extensions 1.1.0`、`pathspec 1.1.1`、`librt 0.16.0`、`ast_serialize 0.13.0`）与 `requirements.lock.txt` 里的钉子**逐个一致**，所以这次是把 venv 拉**回**锁文件的口径，没有越过钉子升级任何既有包。因为动了环境，全量套件重跑了一遍，结果见 9.4。
 
-**唯一仍缺的开发依赖是 `pyinstaller`**（钉子 `pyinstaller==6.22.3` + `pyinstaller-hooks-contrib==2026.8`，两者都在 `requirements.lock.txt` 里，但 `pip list` 里没有）。后果是 `packaging/build.ps1` 在本机跑不了，也就是**三种 exe 形态本轮无法在本机复现**——第二节对容器的描述全部来自 `packaging/simbench.spec` 与 `entry.py` 的源码，加上 `packaging/SMOKE.md` 里记录的十条冒烟结果，不是本机实跑冻结产物得到的。
+`pyinstaller` 原先也不在 `.venv` 里（钉子 `pyinstaller==6.22.3` + `pyinstaller-hooks-contrib==2026.8`，都在 `requirements.lock.txt`）。**2026-10-18 已按钉子装上，并在本机把三种 exe 形态真构建、真冒烟跑通（15/15）**，见 §12.1。
 
 顺带把"全量套件为什么 0 skipped"这件事坐实：`pys7 3.1.1` **是装着的**（`from pyS7 import S7Client` 在 `tests/test_s7_backend.py:15` 与 `tests/test_s7_session.py:11` 是模块级硬 import，缺了会直接 collection error 而不是 skip），所以那三个 S7 用例文件（`test_s7_backend.py` 254 行 / `test_s7_session.py` 237 行 / `test_s7_model.py` 204 行）是**真跑**的，`python-snap7 1.3` 也在。套件里没有任何 `skip` / `importorskip` 逻辑（`tests/conftest.py` 与三个 S7 用例文件里 grep 均为 0 命中），0 skipped 是"没有一条被跳过"，不是"跳过的没显示"。
 
@@ -562,10 +563,7 @@ pytest（全量，串行）           1577 passed in 252.43s                    
 backend 会把它的 listener 协程留在共享 loop 上"），于是 collect 与图上的 Qt 操作都越来越贵，排在
 后面的文件付得最多。**这是一条真实的结构性成本，但它解释不了跨轮次那个幅度。**
 
-**为什么不动 gc 策略**：`gc.disable()` 是承重的——`conftest.py:41` 记着实测"`packet_view +
-integration_tcp` 这一对在回收开着时 3/3 挂死，`gc.disable()` 后 3/3 跑完"，那是跨线程销毁 `QWidget`
-死锁的规避手段。降频会让对象活得更久、并把回收攒成一次大爆发，正好把那条挂死风险买回来；而它换来的
-收益是一条**被机器状态主导**的秒数曲线，收益没有被证明存在。真要动必须拿那对挂死组合做回归，属单独一轮。
+**为什么不动 gc 策略**：实测下来**没有可换的收益**，所以不改（数据见 §11.7）。这条结论来自测量，不是照抄 `conftest.py` 那句注释——§11.7 同时更正了我先前一句没被实验支持的话。
 
 提交状态：§11.1–§11.5 那一轮修复连同模型与探针已作为 `69864e1` / `f5e3b73` 推到 `origin/main`；
 **§11.6（关闭剩余缝隙）是之后的改动，尚未提交。**
@@ -596,3 +594,120 @@ integration_tcp` 这一对在回收开着时 3/3 挂死，`gc.disable()` 后 3/3
 47 files 通过；自然频率再跑 1000 轮仍 **0 命中**，强制交错那条仍是"主站值保住"，事件中位延迟
 0.601ms（与 §10.2b 的 0.651ms 同量级，仍然远大于 Python 侧窗口——但现在已经与正确性无关，因为
 拦截不再依赖事件什么时候到）。
+
+### 11.7 降 collect 频率实验：没有收益，并且更正我先前一句错话
+
+做法：临时把 `_collect_on_main_thread` 改成"每 20 条用例才 collect 一次"（备份 conftest → 打补丁 →
+跑 → 从备份还原 → `git diff --exit-code tests/conftest.py` 确认与 HEAD 一致）。**这个改动没有留下，
+也没有提交。**
+
+| 测量 | 结果 |
+|---|---|
+| GUI 组基线（同一命令跑三次） | 154.38s / 149.34s / 153.12s（散布约 5s，即 ±3.3%） |
+| GUI 组、每 20 条才 collect | **144.58s** |
+| 差 | 4.8–9.8s，**落在基线自身的散布带上** |
+
+所以**降频没有可证明的收益**（全量约 150s 的 GUI 组里省下不到 10 秒，且与噪声同量级）。"每条用例一次
+全量 collect"看着吓人，实际不是主要成本项。
+
+安全性一侧也做了：**那对文档里记着"回收开着时 3/3 挂死"的组合**
+（`tests/test_gui_packet_view.py` + `tests/test_integration_tcp.py`）在降频状态下连跑三轮，
+89 个点到 100%、无 F/E、退出码 0/0/0，**没有挂死**。
+
+**更正一句我先前写在本文里的话**：我写过"降频会让对象活得更久、把回收攒成一次大爆发，正好把那条挂死
+风险买回来"。这句**没有实验依据，而且方向被实测否证了**——`gc.disable()` 仍然开着，被推迟的只是"主线程
+上那次显式 collect"的**时机**，它并没有把销毁搬到别的线程上，所以不会触发那个互等成环。真实的风险面是
+内存占用，不是死锁；而这次想省的又是时间。**没有收益的事不必去承担任何形式的风险**，这才是"不改"的正确
+理由，原句那个理由是我想当然。
+
+一处诚实记录：本打算同时测**峰值工作集**（降频会让对象攒更久），但仪表不可信——`OpenProcess` 掩码写成
+0x1010、`GetProcessMemoryInfo` 在 kernel32 里真名是 `K32GetProcessMemoryInfo`，改好后仍报"pytest+Qt 子
+进程峰值 4 MB"，与同一次运行里本进程自测 17 MB 对照明显不对。按本仓库"任何仪表先拿已知事件验准再用"的
+口径，**这个内存数我没有采信，相关结论一律不建立在它上面**。要拿它得另做：用一个已知分配 200 MB 的子
+进程校准仪表，再做实验。
+
+另外记一条踩过的坑：`pytest.ini` 里已有 `addopts = -q`，命令上再加 `-q` 会变成 `-qq`，**把"N passed in
+Xs"那行摘要一起吞掉**（日志只剩 162 字节的进度点）。判断"到底跑了多少条"要数点、或去掉重复的 `-q`。
+
+---
+
+## 十二、剩余未决项的结案（2026-10-18）
+
+### 12.1 三种 exe 形态：本机真构建、真冒烟
+
+```
+构建  pwsh -File packaging/build.ps1        158.9s，Build complete!
+产物  dist/simbench/simbench.exe              5.6 MB
+      dist/simbench/simbench-gui.exe          5.6 MB
+      dist/simbench-onefile.exe              48.8 MB
+      dist/simbench/_internal/              ~114 MB（onedir 合计 123 MB）
+      dist/simbench/examples/               covi-tunnel.csv + virtual-device.csv（build.ps1 放的）
+冒烟  .venv\Scripts\python.exe packaging/smoke.py   → 15/15 通过，EXIT=0
+```
+
+体积与 `packaging/SMOKE.md:66-70` 记的 2026-10-14 那轮基本一致（onedir 125.1→123 MB，onefile
+49.2→48.8 MB），所以第二节关于"三种形态共用一份包树、差别只在 console 开关与压缩方式"的描述
+现在是**本机实跑过**的，不再是读 spec 的推断。
+
+冒烟里真正只有冻结形态才验得到的两条，本轮都过：
+
+- **S7**：`snap7.dll 真进包` —— 冻结的 exe 起 S7 从站、`pys7` 真主站读写回，`|Δ|=0.0`；
+- **Excel**：`openpyxl 真进包` —— 且表头在第 2 行（上面压着一行标题）也认得出来。
+
+另：`pyinstaller` 装上后没动其它包的版本（`altgraph 0.17.5`、`pefile 2024.8.26`、
+`pywin32-ctypes 0.2.3` 都是新引入的依赖，不冲突），装完复跑过 `ruff`/`mypy`/架构守卫。
+
+**唯一的拦路石不是 PyInstaller，是 `build.ps1` 的编码**（§五最后一条）：这台机的 Windows
+PowerShell 5.1 读无 BOM 的 UTF-8 `.ps1` 会直接解析失败，所以文档里那条
+`\.\packaging\build.ps1` 在 PS 5.1 下**跑不起来**；本轮是用 `pwsh`（PS7）跑的。
+
+### 12.2 `net apply` 的来历：不是"被取代后忘删"，是落地那天就没接线
+
+对 `git log -S` 逐串查 + 直接跑命令行验：
+
+- `git log --oneline -S "_cmd_apply" --all` 只命中 **`4bfd638`（2026-10-13）**——那正是
+  `simbench/net/` **整包首次落地**的那个提交；此后没有任何提交再动过 `apply`。
+- 取 `4bfd638` 那一版 `net/cli.py` 直接看：`_cmd_apply` 在 `:380`、`args.cmd == "apply"` 分派在
+  `:746`，而注册出来的子命令只有 `show / check / device / init` 加上那个循环里的 `("up","clean")`。
+  **`add_parser("apply")` 从第一天起就不存在。** 现在（HEAD）那一处循环仍是 `("up","clean")`，一样。
+- 实测人直接敲：`python -m simbench net apply --dry-run` → `error: argument cmd: invalid choice:
+  'apply' (choose from show, check, device, init, up, clean)`，rc=2；对照组 `net up --dry-run` rc=0。
+
+⇒ 所以它不是重构残留，是**从来没接过线**。今天没有任何活路径因此坏掉。
+
+**但有一条二阶风险值得记下来**：`_run_elevated` 把子命令名拼进**提权子进程的 argv**
+（`elevate.py:80-82`：`parts = [cmd] if isinstance(cmd, str) else list(cmd)`，再
+`passthrough = [*command[1:], *parts, "--elevated", "--job", …]`），而 `cli.py:387` 传的正是字符串
+`"apply"`。所以**一旦哪天给 `apply` 注册了 subparser，它的提权那一步仍然会当场碎掉**——子进程重进
+同一个 parser 时按名字找不到自己。这段死代码不只是"没人用"，按现在写法是**跑不通的**。这条是给未来
+真要接线的人的提示，不是本轮要改的东西。
+
+### 12.3 `gui/` 与 `net/` 的 mypy 成本：实测 243 与 4，那句"另一档工作量"把两件事混为一谈
+
+不用改 `pyproject.toml`——命令行传路径就覆盖 `files`，所以零侵入就量得到。
+
+| 纳入目标 | 结果 | 错误码分布 |
+|---|---|---|
+| `simbench/gui` | **243 errors in 18 files**（checked 25） | `attr-defined` **204**、`arg-type` 11、`has-type` 6、`func-returns-value` 6、`call-overload` 6、`union-attr` 5、`assignment` 5 |
+| `simbench/net` | **4 errors in 2 files**（checked 12） | `assignment` 2、`arg-type` 2 |
+
+`gui/` 那 204 条 `attr-defined` 的位置很说明问题：`window_edit.py` 76、`window_io.py` 39、
+`window_menus.py` 28 —— **三个 mixin 占 143 条**。这正是 `plans/2026-10-15-architecture-tidy.md:21-24`
+记过的那个形状："拆成 mixin 之后 mypy 单独看 mixin 时看不见 `Session` 上那些名字"，而他们**已经为此
+造好了工具**（`engine/session_host.py`：宿主契约声明一次，运行时不加行为）。把它照搬到
+`MenuMixin/EditMixin/IoMixin` 就能吃掉大头，不是未知领域。
+
+`net/` 那 4 条很小，而且都不是"ctypes 结构体"那种难缠形状：
+
+```
+net/spec.py:47  Incompatible types in assignment (expression has type "int", target has type "str")
+net/spec.py:49  同上
+net/cli.py:333  Argument 1 to "load_companion" has incompatible type "Any | None"; expected "str | Path"
+net/cli.py:335  Argument 1 to "companion_path" has incompatible type "Any | None"; expected "str | Path"
+```
+
+⇒ `pyproject.toml:60-61` 那句"仍在闸门外面的两棵：`gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows
+结构体）——注解要补到能过检查是另一档工作量"，**把代价差着两个数量级的两件事混成了一件事**。实测是：
+`net/` 是 4 处、当天就能纳入；`gui/` 是 243 处、但大头有现成解法。这是**结论**，不是建议——要不要纳入、
+分几步纳入，由作者定，本轮没有动 `pyproject.toml`。
+
