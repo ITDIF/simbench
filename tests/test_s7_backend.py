@@ -152,6 +152,78 @@ def test_the_tick_writes_into_the_area_and_respects_ownership(engine_runner):
         engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "s7 stop")
 
 
+def _one_point_channel(port: int) -> S7Channel:
+    """只有一条 const 波形的最小 S7 表 —— 取锁次数要数得准，表里就只能有一个点。"""
+    return S7Channel("s7-1", host="127.0.0.1", port=port, devices=[
+        Device("D1", 11, [Point("温度", "db1", 0, "real", initial="12.5",
+                                waveform="const", wave_param={"value": "20"})])])
+
+
+def test_the_takeover_check_and_the_write_share_one_area_lock(engine_runner):
+    """读回比对与写必须在**同一次**区域锁里做完，否则主站能挤进两者之间。
+
+    为什么拿"取锁次数"当判据（而不是开两个线程抢时序）：实测 snap7 1.3 的服务线程写区域时
+    **确实**取这把锁——我们持锁 3s 期间 pys7 主站的 write 一个字节都落不进去、最后超时；
+    而 `lock_area` 在同一线程重入会直接阻塞（所以绝不能在这两个方法里嵌套调用它们自己）。
+    于是"一次 `_write_point` 只取一次锁"就是"检查与写入之间没人插得进来"唯一可稳定观测的形状。
+    写成靠 sleep 抢时序的用例会偶发红，那种用例本身就不诚实。
+    """
+    port = free_port()
+    backend = open_s7(engine_runner, _one_point_channel(port), tick_ms=0)
+    try:
+        backend._tick_once(now=1.0)                 # 先建立"我记得自己写过"的那条记录
+        locks = {"n": 0}
+        server = backend._server
+        orig_lock = server.lock_area
+
+        def counting_lock(*args):
+            locks["n"] += 1
+            return orig_lock(*args)
+
+        server.lock_area = counting_lock
+        try:
+            backend._tick_once(now=2.0)             # 读回比对 + 写
+        finally:
+            server.lock_area = orig_lock
+
+        assert locks["n"] == 1, (f"这一跳取了 {locks['n']} 次区域锁：读回比对与写各锁了一次，"
+                                 f"中间那道缝里主站的写能落进来再被覆盖掉")
+    finally:
+        engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "s7 stop")
+
+
+def test_the_public_area_read_and_write_still_take_the_lock(engine_runner):
+    """把加锁拆成"外壳 + 裸操作体"之后，两个公开方法各自仍须取锁——一次都不许少。
+
+    这条是给重构上的保险：`read_point_bytes` / `write_point_bytes` 是界面写值路径（`set_point`）
+    与 `Session` 回读共用的入口，它们一旦变成不取锁的裸操作，多字节的 real/uint64 就会让主站
+    读到半个值（模块头那条跨线程纪律）。那种破损是静默的，只有次数能被数出来。
+    """
+    port = free_port()
+    backend = open_s7(engine_runner, _one_point_channel(port), tick_ms=0)
+    try:
+        pt = backend._flatten_points()[0][1]
+        locks = {"n": 0}
+        server = backend._server
+        orig_lock = server.lock_area
+
+        def counting_lock(*args):
+            locks["n"] += 1
+            return orig_lock(*args)
+
+        server.lock_area = counting_lock
+        try:
+            assert backend.read_point_bytes(pt) == encode(12.5, "real", 4)
+            assert locks["n"] == 1, f"read_point_bytes 取锁 {locks['n']} 次，它不锁就等于没锁"
+            assert backend.write_point_bytes(pt, encode(99.0, "real", 4)) is True
+            assert locks["n"] == 2, f"write_point_bytes 没取锁（累计应到 2，实到 {locks['n']}）"
+        finally:
+            server.lock_area = orig_lock
+        assert backend.read_point_bytes(pt) == encode(99.0, "real", 4)
+    finally:
+        engine_runner.call(lambda: backend.stop(), _CALL_TIMEOUT, "s7 stop")
+
+
 def test_a_master_write_whose_event_has_not_arrived_survives_the_next_tick(engine_runner):
     """主站已经写进缓冲、归属事件却还没到（实测中位 0.65ms）——这一跳不许顶掉它。
 

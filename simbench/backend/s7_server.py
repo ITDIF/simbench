@@ -199,30 +199,76 @@ class S7Backend(BackendBase):
 
         没有记录（这个点第一次被 tick 写，或上一次刚判出接管）就照常写：那时没有"本该是什么"
         可比，而启动与恢复之后本来就该由曲线接手。
+
+        读回与写在**同一次**区域锁里做：实测主站的服务线程写区域时也取这把锁（持锁 3s 期间
+        pys7 的 write 落不进去、最后超时），所以一次锁 = 检查与写之间没人插得进来；取两次锁的
+        话，那条缝里落进来的主站值仍会被这一次写覆盖掉。`own()`、日志、编码一律留在锁外——
+        持锁期间主站是**阻塞**的，把慢东西放进锁里就等于把它的超时变大。
         """
         try:
             raw = encode(value, pt.datatype, span_bytes(pt.datatype, pt.initial))
         except ValueError:
             return False                     # 编不出来（坏点表）：tick 的逐点兜会记一条日志
+        entry = self._area_of(pt)
+        if entry is None or self._server is None:
+            return False                     # 地址不在任何已注册的块上，与 write_point_bytes 同口径
         identity = (pt.area, pt.address, pt.bit)
         mine = self._tick_written.get(identity)
-        if mine is not None:
-            present = self.read_point_bytes(pt)
-            if present is not None and present != mine:
-                # 与事件那条路用同一个键与同一个跨度（bool 占 1、位跟着走），否则两条路会把
-                # 同一个点记成两段，`manual_count` 与"恢复波形"就会各说各话。
-                span = 1 if pt.datatype == "bool" else span_bytes(pt.datatype, pt.initial)
-                self._sources.own(self.channel_name, key, pt.area, pt.address,
-                                  count=span, who="master", bit=pt.bit)
-                del self._tick_written[identity]
-                self._emit("warning", "takeover", (key, pt.area, pt.address),
-                           f"{pt.name} ({pt.area} {pt.address}, bit {pt.bit}) was already "
-                           f"rewritten by the master before its event arrived; the waveform "
-                           f"handed this point back", time.monotonic())
-                return False
-        if not self.write_point_bytes(pt, raw):
+        wrote = False
+        with self._area_lock(entry):
+            present = self._read_naked(entry, pt)
+            stale = mine is not None and present is not None and present != mine
+            if not stale:
+                wrote = self._write_naked(entry, pt, raw)
+        if stale:
+            # 与事件那条路用同一个键与同一个跨度（bool 占 1、位跟着走），否则两条路会把
+            # 同一个点记成两段，`manual_count` 与"恢复波形"就会各说各话。
+            span = 1 if pt.datatype == "bool" else span_bytes(pt.datatype, pt.initial)
+            self._sources.own(self.channel_name, key, pt.area, pt.address,
+                              count=span, who="master", bit=pt.bit)
+            del self._tick_written[identity]
+            self._emit("warning", "takeover", (key, pt.area, pt.address),
+                       f"{pt.name} ({pt.area} {pt.address}, bit {pt.bit}) was already "
+                       f"rewritten by the master before its event arrived; the waveform "
+                       f"handed this point back", time.monotonic())
+            return False
+        if not wrote:
             return False
         self._tick_written[identity] = raw
+        return True
+
+    def _read_naked(self, entry, pt) -> bytes | None:
+        """不带锁读这个点占的那几位。**只在已经持有时调用**。
+
+        拆出来是为了让 `_write_point` 能把"读回比对"与"写"放进**同一次**区域锁：`lock_area`
+        实测**不可重入**（同一线程连着取第二次会直接阻塞），所以已经持锁时绝不能再调
+        `read_point_bytes` / `write_point_bytes` 那两个各自加锁的公开方法——那是自死锁，
+        症状恰好就是本仓库 2026-10-11 那次"引擎不回话 + 连片超时"的形状。
+        """
+        _name, _db, _code, _index, buffer, _points = entry
+        if pt.datatype == "bool":
+            if pt.bit is None:
+                return None
+            index = pt.address * 8 + pt.bit
+            if index >= len(buffer) * 8:
+                return None
+            return b"\x01" if read_bit(buffer, index) else b"\x00"
+        span = span_bytes(pt.datatype, pt.initial)
+        if pt.address + span > len(buffer):
+            return None
+        return bytes(buffer[pt.address:pt.address + span])
+
+    def _write_naked(self, entry, pt, raw: bytes) -> bool:
+        """不带锁把字节写进区域缓冲（`bool` 只动那一位）。**只在已经持有时调用**。"""
+        _name, _db, _code, _index, buffer, _points = entry
+        if pt.datatype == "bool":
+            if pt.bit is None:
+                return False
+            write_bit(buffer, pt.address * 8 + pt.bit, bool(raw[0]) if raw else False)
+            return True
+        if pt.address + len(raw) > len(buffer):
+            return False                     # 地址不在块内（点表与缓冲不一致）
+        ctypes.memmove(ctypes.byref(buffer, pt.address), raw, len(raw))
         return True
 
     def restore_waveform(self, unit_id: int, area: str, address: int,
@@ -254,43 +300,21 @@ class S7Backend(BackendBase):
         entry = self._area_of(pt)
         if entry is None or self._server is None:
             return None
-        _name, _db, _code, _index, buffer, _points = entry
-        if pt.datatype == "bool":
-            if pt.bit is None:
-                return None
-            index = pt.address * 8 + pt.bit
-            if index >= len(buffer) * 8:
-                return None
-            with self._area_lock(entry):
-                return b"\x01" if read_bit(buffer, index) else b"\x00"
-        span = span_bytes(pt.datatype, pt.initial)
-        if pt.address + span > len(buffer):
-            return None
         with self._area_lock(entry):
-            return bytes(buffer[pt.address:pt.address + span])
+            return self._read_naked(entry, pt)
 
     def write_point_bytes(self, pt, raw: bytes) -> bool:
         """把一个点占的那几个字节写进区域缓冲：`bool` 只动那一位，其余整段覆盖。
 
-        `Session.set_point`（界面改值）与波形 tick 都走这一条——两条路对"写进哪里"必须
-        是同一个答案（各写一份迟早漂）。
+        `Session.set_point`（界面改值）走这一条。波形 tick 不走这里——它要把"读回比对"与
+        "写"放进**同一次**区域锁，走 `_write_point`；两条路对"写进哪里"仍是同一个答案
+        （都落在 `_write_naked` 上），各写一份 memmove 迟早漂。
         """
         entry = self._area_of(pt)
         if entry is None or self._server is None:
             return False
-        _name, _db, _code, _index, buffer, _points = entry
-        if pt.datatype == "bool":
-            if pt.bit is None:
-                return False
-            with self._area_lock(entry):
-                write_bit(buffer, pt.address * 8 + pt.bit,
-                          bool(raw[0]) if raw else False)
-            return True
-        if pt.address + len(raw) > len(buffer):
-            return False                     # 地址不在块内（点表与缓冲不一致）
         with self._area_lock(entry):
-            ctypes.memmove(ctypes.byref(buffer, pt.address), raw, len(raw))
-        return True
+            return self._write_naked(entry, pt, raw)
 
     # ---------- 主站事件 ----------
 
