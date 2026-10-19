@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 from .errors import NetError
+from .state import no_window_kwargs
 
 
 def _self_command_prefix() -> list[str]:
@@ -78,7 +79,7 @@ def _run_elevated(args, cmd: str | list[str], job: dict) -> dict:
               f"-WorkingDirectory '{Path.cwd()}' "
               f"-FilePath '{command[0]}' -ArgumentList @({quoted}); exit $p.ExitCode")
     proc = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                          capture_output=True, timeout=600)
+                          capture_output=True, timeout=600, **no_window_kwargs())
 
     if not result_path.exists():
         detail = ""

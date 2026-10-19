@@ -63,8 +63,9 @@ def _capture_relaunch(monkeypatch, tmp_path, frozen: bool):
     result_path = tmp_path / "result.json"
     seen: dict[str, object] = {}
 
-    def fake_run(argv, capture_output=True, timeout=None):
+    def fake_run(argv, capture_output=True, timeout=None, **kwargs):
         seen["argv"] = list(argv)
+        seen["kwargs"] = kwargs                     # 提权那条 PowerShell 也不许开窗口
         script = argv[-1]
         seen["script"] = script
         result_path.write_text(json.dumps({"ok": True, "message": "done"}),
@@ -84,22 +85,27 @@ def _capture_relaunch(monkeypatch, tmp_path, frozen: bool):
 
     payload = net_cli._run_elevated(_Args(), ["device", "create"], {"action": "create"})
     assert payload["ok"] is True
-    return seen["script"], seen["argv"]
+    return seen
 
 
 def test_relaunch_argv_when_running_from_source(monkeypatch, tmp_path):
-    script, argv = _capture_relaunch(monkeypatch, tmp_path, frozen=False)
+    seen = _capture_relaunch(monkeypatch, tmp_path, frozen=False)
+    script, argv = seen["script"], seen["argv"]
     job = str(pathlib.Path(tempfile.gettempdir())
               / f"simbench_net_{os.getpid()}_job.json")
     assert _argument_list(script) == ["-m", "simbench", "net", "device", "create",
                                       "--elevated", "--job", job]
     assert argv[:1] == ["powershell"]
     assert f"-FilePath '{sys.executable}'" in script
+    # 窗口版 GUI 里跑这一步时不许闪 cmd（2026-10-19 现场：点「启动」闪窗并卡几秒）
+    import subprocess
+    assert seen["kwargs"]["creationflags"] == subprocess.CREATE_NO_WINDOW
 
 
 def test_relaunch_argv_when_frozen_drops_the_module_flag(monkeypatch, tmp_path):
     """冻结后 `-m simbench` 必须消失，`net` 直接跟在 exe 后面。"""
-    script, _ = _capture_relaunch(monkeypatch, tmp_path, frozen=True)
+    seen = _capture_relaunch(monkeypatch, tmp_path, frozen=True)
+    script = seen["script"]
     job = str(pathlib.Path(tempfile.gettempdir())
               / f"simbench_net_{os.getpid()}_job.json")
     assert _argument_list(script) == ["net", "device", "create", "--elevated", "--job", job]

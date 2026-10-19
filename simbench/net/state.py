@@ -76,11 +76,24 @@ def is_elevated() -> bool:
         return False
 
 
+def no_window_kwargs() -> dict:
+    """起控制台子进程时统一用的 kwargs：**窗口版 GUI 里不许闪一个 cmd**。
+
+    `simbench-gui.exe` 是 `console=False` 构建，而 `powershell` / `pnputil` 是**控制台程序**：
+    从窗口版进程里直接 `subprocess.run` 会给它们各开一个控制台窗口（2026-10-19 现场：点
+    「启动」闪一个 cmd、还卡几秒）。`CREATE_NO_WINDOW` 让子进程没有窗口，stdout/stderr 照旧
+    走管道；POSIX 上没有这个标志，回空字典（本包本来就只服务 Windows，留着是为了别的用例能跑）。
+    """
+    flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": flag} if flag else {}
+
+
 def run_powershell(script: str, timeout: float = 60.0) -> str:
     """跑一段 PowerShell 并回 stdout。失败时抛 NetError，stderr 原文附在后面。"""
     try:
         proc = subprocess.run([*_PS, _ENCODING_PRELUDE + script],
-                              capture_output=True, timeout=timeout)
+                              capture_output=True, timeout=timeout,
+                              **no_window_kwargs())
     except FileNotFoundError as exc:
         raise NetError("找不到 powershell；这一层需要 Windows PowerShell") from exc
     except subprocess.TimeoutExpired as exc:

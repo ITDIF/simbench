@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import socket
 from pathlib import Path
 
 from ..project.model import channel_transport
@@ -150,6 +151,20 @@ def _concrete_hosts(project) -> list[tuple[str, str, object]]:
     return found
 
 
+def _binds_locally(host: str) -> bool:
+    """这个地址现在能不能 bind 上（毫秒级、不起进程、不读系统）。
+
+    判据就是"本机有没有这个地址"：能 bind 说明它在本机某块网卡上（至于是哪块，不影响"能不能
+    监听"）。端口用 0，避免撞上任何真实占用；`with` 保证 bind 完立刻 close。
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind((host, 0))
+        return True
+    except OSError:
+        return False
+
+
 def _prepare_concrete_hosts(point_table, project, apply: bool) -> list[str]:
     """没有声明、但通道 host 写成了具体地址：**把它当"要配到专用网卡上的地址"**。
 
@@ -170,6 +185,11 @@ def _prepare_concrete_hosts(point_table, project, apply: bool) -> list[str]:
     addresses = sorted({host for _name, host, _port in hosts})
     name, host, port = hosts[0]
     more = f"（另有 {len(hosts) - 1} 路同样）" if len(hosts) > 1 else ""
+    if apply and all(_binds_locally(address) for address in addresses):
+        # 快路（2026-10-19 现场）：地址已经在本机——绝大多数"已经配好了"的点「启动」走的都是
+        # 这里：毫秒级、不起 PowerShell、不闪 cmd、不卡秒。真正的对账（要不要收回、有没有被
+        # 别的网卡占着）只在"地址不在本机"时才值得做，启动路径上没有理由每次都跑一遍。
+        return [f"通道 {name} 的 host {host}:{port}{more} 已在本机网卡上，无需改动"]
     lead = [f"通道 {name} 的 host 是具体地址 {host}:{port}{more}：把 {len(addresses)} 个地址"
             f"配到专用网卡上（模拟器要在这个地址上监听）"]
     desired = [(address, _DEFAULT_PREFIX) for address in addresses]

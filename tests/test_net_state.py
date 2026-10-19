@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
+from simbench.net import state as net_state
 from simbench.net.cli import _parse_ip_spec
 from simbench.net.ledger import Ledger
 from simbench.net.state import (
@@ -30,6 +32,30 @@ _ADAPTERS = [
      "ifIndex": 4, "InterfaceGuid": "{11111111-2222-3333-4444-555555555555}",
      "Status": "Up", "MacAddress": "9C-2F-9D-9E-35-F1"},
 ]
+
+
+def test_powershell_never_opens_a_console_window(monkeypatch):
+    """窗口版 GUI 里起 PowerShell **不许闪 cmd**（2026-10-19 现场：点「启动」闪窗并卡几秒）。
+
+    `simbench-gui.exe` 是 `console=False` 构建，而 `powershell` 是**控制台程序**——不带
+    `CREATE_NO_WINDOW` 时它会各开一个窗口。这条钉住 `run_powershell` 真的带上了它
+    （输出仍走管道，所以解析那一侧不受影响）。
+    """
+    seen: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = b"[]"
+        stderr = b""
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        seen.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(net_state.subprocess, "run", fake_run)
+    assert net_state.run_powershell("Get-NetIPAddress") == "[]"
+    assert seen["creationflags"] == subprocess.CREATE_NO_WINDOW
 
 
 def test_single_adapter_object_is_normalised_to_a_list():

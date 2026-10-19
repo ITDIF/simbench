@@ -22,6 +22,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 from .errors import NetError
+from .state import no_window_kwargs
 
 NET_CLASS_GUID = "{4d36e972-e325-11ce-bfc1-08002be10318}"
 LOOPBACK_HARDWARE_ID = "*MSLOOP"
@@ -222,6 +223,7 @@ def remove_device(instance_id: str) -> str:
         raise NetError("没有给设备实例 ID")
     try:
         proc = subprocess.run(["pnputil", "/remove-device", instance_id],
+                          **no_window_kwargs(),
                               capture_output=True, timeout=120)
     except FileNotFoundError as exc:
         raise NetError("找不到 pnputil") from exc

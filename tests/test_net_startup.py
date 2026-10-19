@@ -112,6 +112,27 @@ def _project(host: str, *, name: str = "tcp-5020", port: int = 5020) -> Project:
     return Project(channels=[TcpChannel(name=name, host=host, port=port)])
 
 
+def test_an_address_already_on_this_machine_is_checked_without_reading_the_system(
+        tmp_path, monkeypatch):
+    """地址已在本机：**毫秒级 bind 一下就够了**——不读系统、不起 PowerShell、不提权。
+
+    现场（2026-10-19）：界面上点「启动」每次都跑一遍 PowerShell 读网卡，窗口版会闪 cmd 并卡
+    1~3 秒，而绝大多数时候地址早就配好了。快路只用一次 bind 探针（端口 0），成本与"读一个
+    本地地址"同级，也不会弹任何窗口。
+    """
+    _forbid_system(monkeypatch)                       # 任何一次系统读都当场炸
+    monkeypatch.setattr(startup, "_binds_locally", lambda host: True)
+
+    def refuse(*_args):
+        raise AssertionError("地址已在本机，不该去提权/跑 net up")
+
+    monkeypatch.setattr(startup, "apply_up_ips", refuse)
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    lines = startup.prepare(table, project=_project("10.99.99.99"))
+    assert len(lines) == 1 and "已在本机网卡上" in lines[0], lines
+
+
 def test_a_concrete_host_without_a_declaration_is_put_on_the_dedicated_nic(
         tmp_path, monkeypatch):
     """没有声明、但通道 host 是具体 IP：启动时**把它配到专用网卡上**（2026-10-19 现场反馈）。
@@ -419,8 +440,9 @@ def test_device_create_relaunches_with_both_subcommand_words(monkeypatch, tmp_pa
     result = tmp_path / "result.json"
     launched = {}
 
-    def fake_powershell(argv, capture_output, timeout):
+    def fake_powershell(argv, capture_output, timeout, **kwargs):
         launched["argv"] = argv
+        launched["kwargs"] = kwargs
         result.write_text(json.dumps({"ok": True, "message": "已创建"}),
                           encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
