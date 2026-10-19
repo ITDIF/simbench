@@ -9,8 +9,9 @@
 1. **没有声明文件时默认一声不吭**。IP 是环境相关的（现场、同事机器各不同），"这个工程没
    声明网络"是合法状态而不是错误；每次启动都念一遍只会让人学会忽略这行提示。**例外**是
    通道 host 写成了具体地址（不是 `0.0.0.0`/`127.0.0.1` 这类本机地址）：那等于把设备那一侧
-   的 IP 塞进了通道自己的监听地址，本机不一定有它——这时给一条不读系统的提示
-   （`_concrete_hosts_hint`）。声明文件**坏了**（半截 JSON、端口写成字符串）则报一句原话
+   的 IP 塞进了通道自己的监听地址，本机不一定有它——这时**把它配到专用网卡上**
+   （`_prepare_concrete_hosts`；只加不删，理由写在那里）。声明文件**坏了**（半截 JSON、
+   端口写成字符串）则报一句原话
    ——那是真写错了，但同样不拦启动。
 2. **`SIMBENCH_NET_AUTO=0` 是总闸**。测试与 CI 靠它保证**绝不碰真网卡**：用例会装载
    `examples/` 下的点表，而现场那份点表旁边早晚会躺着一份 `.net.json`——没有这道闸，
@@ -49,6 +50,10 @@ _PREFIX = "[net] "
 # 这些 host 都表示"本机"或"所有本机地址"：不需要额外往网卡上加地址，也就不需要提示。
 _LOCAL_HOSTS = frozenset({"", "0.0.0.0", "::", "*", "localhost", "127.0.0.1", "::1"})
 
+# 没有声明、只能从通道 host 取地址时的掩码位数。与 `cli._parse_ip_spec` 同一个默认（现场惯例 /24）：
+# 这里不猜掩码，只是把"裸 IP"变成 `net up --ip` 能吃的样子。
+_DEFAULT_PREFIX = 24
+
 
 def auto_enabled() -> bool:
     """启动挂钩开着吗。测试与 CI 用 `SIMBENCH_NET_AUTO=0` 关掉。"""
@@ -73,6 +78,25 @@ def apply_up(point_table) -> tuple[int, list[str]]:
     return code, [_strip(line) for line in lines]
 
 
+def apply_up_ips(addresses: list[str]) -> tuple[int, list[str]]:
+    """跑一次 `net up --ip ...`（点表旁边**没有**网络声明时用）。与 `apply_up` 同形。
+
+    为什么需要第二条：`apply_up` 走的是 `net up --point-table`，而它在没有声明时会直接报
+    "点表旁边没有网络声明"（见 `cli._desired_addresses`）。既然这一路的地址来源是通道 host，
+    就把它们按 `--ip` 交过去——那是同一条命令、只是地址不从声明里取。
+    """
+    from .cli import main as net_main
+
+    argv = ["up"]
+    for address in addresses:
+        argv += ["--ip", address]
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+        code = net_main(argv)
+    lines = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
+    return code, [_strip(line) for line in lines]
+
+
 def _strip(line: str) -> str:
     return line[len(_PREFIX):] if line.startswith(_PREFIX) else line
 
@@ -91,8 +115,8 @@ def prepare(point_table, *, apply: bool = True, project=None) -> list[str]:
         return [problem]
     if declaration is None:
         # 没有声明本身是合法状态（口径 1），但"通道 host 写成了具体地址"不是：那等于把设备那
-        # 一侧的 IP 塞进了通道自己的监听地址。见 `_concrete_hosts_hint`。
-        return _concrete_hosts_hint(point_table, project)
+        # 一侧的 IP 塞进了通道自己的监听地址，本机不一定有它。见 `_prepare_concrete_hosts`。
+        return _prepare_concrete_hosts(point_table, project, apply)
     # 先按**通道类型**过滤（纯串口工程一个地址都不配），再判空：过滤完为空就与"声明里没有
     # 设备地址"同一条路——一声不吭，而且**连系统都不读**（下面 `_prepare` 那几次读网卡/
     # 账本调用一个都不发）。审查发现的那条就是漏了这个过滤：一份纯串口的点表旁边躺着旧
@@ -126,29 +150,39 @@ def _concrete_hosts(project) -> list[tuple[str, str, object]]:
     return found
 
 
-def _concrete_hosts_hint(point_table, project) -> list[str]:
-    """没有声明、却把具体 IP 写进了通道 host：给两条**能直接执行**的路。
+def _prepare_concrete_hosts(point_table, project, apply: bool) -> list[str]:
+    """没有声明、但通道 host 写成了具体地址：**把它当"要配到专用网卡上的地址"**。
 
-    为什么要破一次"没有声明就一声不吭"（口径 1，2026-10-19 现场反馈）：那条口径的前提是
-    通道 host 是 `0.0.0.0` / `127.0.0.1` 这种本机地址。写成具体的设备 IP 时，本机不一定有它，
-    启动会以 `address is not configured on any local adapter` 失败；而那句报错里建议的
-    `net up --point-table` 在**没有声明**时走不通（它会回"点表旁边没有网络声明"）。所以这里给
-    一条真能跑的：`net up --ip <地址>`（不带掩码时按 /24 算，见 `cli._parse_ip_spec`）。
+    为什么（2026-10-19 现场反馈）：用户写 `10.136.107.240:5020` 就是想在这台机器的这个地址上
+    起从站；本机没这个地址时 bind 必然失败，看着就像"启动时没用虚拟网卡"。专用网卡本来就是
+    干这件事的，网络声明只是**地址的来源之一**——通道 host 是另一个来源（一路一个地址）。
 
-    **不读系统**（口径 1 的另一半）：地址到底在不在本机，留给真正 bind 时的报错去判；这条提示
-    只按模型里的形状说话，所以每次启动的成本仍然是一次模型遍历。
+    三条边界与声明那条完全一致（都落在 `_prepare` 里）：只认专用网卡、已经一致时不提权、
+    地址被别的网卡占着只报不抢。地址在不在本机、要不要提权，都由 `_prepare` 的只读对账决定；
+    真动手时走 `net up --ip`（没有声明时 `--point-table` 那条路走不通）。
+
+    通配/回环 host（`0.0.0.0` / `127.0.0.1` / `localhost` ...）不进来：它们本来就只听本机，
+    不需要往网卡上加任何地址——那条路仍然一声不吭（口径 1）。
     """
     hosts = _concrete_hosts(project)
     if not hosts:
         return []
+    addresses = sorted({host for _name, host, _port in hosts})
     name, host, port = hosts[0]
     more = f"（另有 {len(hosts) - 1} 路同样）" if len(hosts) > 1 else ""
-    return [
-        f"通道 {name} 的 host 是具体地址 {host}:{port}{more}，而点表旁边没有网络声明"
-        f"（{netspec.companion_path(point_table)}）。这个地址若不在本机，启动会失败。",
-        f"两种走法：① 把它配到专用网卡：python -m simbench net up --ip {host}"
-        f"（要管理员）；② 把通道 host 改回 0.0.0.0，再用 net init 生成声明、让设备 IP 单独监听。",
-    ]
+    lead = [f"通道 {name} 的 host 是具体地址 {host}:{port}{more}：把 {len(addresses)} 个地址"
+            f"配到专用网卡上（模拟器要在这个地址上监听）"]
+    desired = [(address, _DEFAULT_PREFIX) for address in addresses]
+    try:
+        lines = _prepare(Path(point_table), desired, apply,
+                         run=lambda: apply_up_ips(addresses),
+                         command=_command_ips(addresses),
+                         remove_stale=False)
+    except NetError as exc:
+        return [*lead, f"网络准备失败：{exc}；模拟照常启动"]
+    except Exception as exc:               # noqa: BLE001 —— 与上面同一条口径：网络不许拦启动
+        return [*lead, f"网络准备时出了意外（{exc}），已跳过；模拟照常启动"]
+    return lead + lines
 
 
 def status(point_table, project=None) -> list[str]:
@@ -233,7 +267,21 @@ def _unmatched_line(declaration, project) -> list[str]:
             "——名字要跟点表里的设备名一模一样"]
 
 
-def _prepare(point_table: Path, desired: list[tuple[str, int]], apply: bool) -> list[str]:
+def _prepare(point_table: Path, desired: list[tuple[str, int]], apply: bool,
+             *, run=None, command: str | None = None,
+             remove_stale: bool = True) -> list[str]:
+    """只读对账 + 按需提权。`run`/`command` 让"地址从哪来"可换（声明 / 通道 host）。
+
+    默认是声明那条（`net up --point-table`）；通道 host 那条传 `apply_up_ips` 与 `net up --ip`
+    的写法过来——两条路的判据、边界与报告口径完全共用，只是地址来源不同。
+
+    `remove_stale=False` 只给通道 host 那条用：**声明能表达"这个工程要的完整集合"**，所以
+    "账本记过、但现在不要了"就可以收回；而通道 host 只能表达"这一路要的地址"，据此收回等于
+    把别的实例/别的点表正在用的地址拔掉（实测预览里就会出现"待收回 10.136.107.240"）。
+    所以那条路只加不删，陈旧地址留给 `net clean` 或声明那条去收。
+    """
+    run = run or (lambda: apply_up(point_table))
+    command = command or _command(point_table)
     ledger = Ledger.load()
     adapters = read_adapters()
     adapter = find_managed_adapter(adapters, ledger.owned_adapter_guids())
@@ -244,11 +292,11 @@ def _prepare(point_table: Path, desired: list[tuple[str, int]], apply: bool) -> 
                     f"{loopback_inf_path().name}（环回适配器驱动），这一步要人工处理"]
         if not apply:
             return [f"需要建专用网卡 {MANAGED_ADAPTER_NAME} 并配 {len(desired)} 个地址",
-                    _command(point_table)]
-        return _report(apply_up(point_table), f"专用网卡 {MANAGED_ADAPTER_NAME} 已就绪")
+                    command]
+        return _report(run(), f"专用网卡 {MANAGED_ADAPTER_NAME} 已就绪", command)
 
-    plan = plan_addresses(adapter.label, desired, read_addresses(adapter.if_index),
-                          ledger.owned(adapter.guid))
+    owned = ledger.owned(adapter.guid) if remove_stale else set()
+    plan = plan_addresses(adapter.label, desired, read_addresses(adapter.if_index), owned)
     # 只关心**声明里那几个**地址有没有被别的网卡占着：机器上别的网卡当然有一堆地址
     # （WLAN 的、虚拟机的），把它们算进来会让"已经一致"永远判不出来。
     blocked = _blocked_elsewhere(adapter.if_index, desired)
@@ -264,10 +312,9 @@ def _prepare(point_table: Path, desired: list[tuple[str, int]], apply: bool) -> 
         return [f"网络对不上：{adapter.label}", *plan.summary(), *occupied]
 
     if not apply:
-        return [f"网络待处理：{adapter.label}", *plan.summary(), *occupied,
-                _command(point_table)]
+        return [f"网络待处理：{adapter.label}", *plan.summary(), *occupied, command]
 
-    return _report(apply_up(point_table), f"网络已就绪：{adapter.label}")
+    return _report(run(), f"网络已就绪：{adapter.label}", command)
 
 
 def _blocked_elsewhere(if_index: int, desired: list[tuple[str, int]]) -> dict[str, str]:
@@ -278,13 +325,21 @@ def _blocked_elsewhere(if_index: int, desired: list[tuple[str, int]]) -> dict[st
     return foreign_owners(desired, others)
 
 
-def _report(result: tuple[int, list[str]], ready: str) -> list[str]:
+def _report(result: tuple[int, list[str]], ready: str,
+            command: str | None = None) -> list[str]:
     """`net up` 的输出转成给启动路径看的话；成功且无话可说时就报一句"已就绪"。"""
     code, lines = result
     if code == 0:
         return lines or [ready]
     # `net up` 的部分成功（有几个地址加不上）也是回 2：把它的原话留下，再补一句"接下来去哪看"。
-    return [*lines, "网络没完全配好；模拟照常启动，可用 `python -m simbench net show` 看现状"]
+    retry = f"（手动重试：{command}）" if command else ""
+    return [*lines, "网络没完全配好；模拟照常启动，可用 `python -m simbench net show` 看现状"
+                    + retry]
+
+
+def _command_ips(addresses: list[str]) -> str:
+    joined = " ".join(f"--ip {address}" for address in addresses)
+    return f"应用：python -m simbench net up {joined}"
 
 
 def _command(point_table: Path) -> str:

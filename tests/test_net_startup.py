@@ -55,8 +55,12 @@ def _declare(tmp_path, devices=({"name": "风机-1", "ip": "10.0.0.1"},),
 
 
 def _install(monkeypatch, *, adapters=(OURS,), addresses=(), elsewhere=(),
-             ledger=(), owned=(), inf=True, apply=None):
-    """把系统那几处读口换成假数据，并记下 `net up` 被怎么调的。"""
+             ledger=(), owned=(), inf=True, apply=None, apply_ips=None):
+    """把系统那几处读口换成假数据，并记下 `net up` 被怎么调的。
+
+    两种写法各记一处：`.table` 是 `--point-table`（声明那条），`.ips` 是 `--ip`（没有声明、
+    地址来自通道 host 那条）。返回命名对象而不是 list：两条路的记录要能分开断言。
+    """
     monkeypatch.setattr(startup, "read_adapters", lambda: list(adapters))
     monkeypatch.setattr(startup, "read_addresses",
                         lambda if_index: [a for a in addresses if a.if_index == if_index])
@@ -67,15 +71,22 @@ def _install(monkeypatch, *, adapters=(OURS,), addresses=(), elsewhere=(),
     monkeypatch.setattr(startup, "inf_available", lambda: inf)
     monkeypatch.setattr(startup, "loopback_inf_path",
                         lambda: pathlib.Path(r"C:\Windows\INF\netloop.inf"))
-    calls = []
+    calls = SimpleNamespace(table=[], ips=[])
 
     def record(table):
-        calls.append(table)
+        calls.table.append(table)
         if apply is not None:
             return apply(table)
         return 0, ([f"已配 {len(ledger)} 个地址"] if ledger else ["已一致，无需改动"])
 
+    def record_ips(values):
+        calls.ips.append(list(values))
+        if apply_ips is not None:
+            return apply_ips(values)
+        return 0, [f"已配 {len(values)} 个地址"]
+
     monkeypatch.setattr(startup, "apply_up", record)
+    monkeypatch.setattr(startup, "apply_up_ips", record_ips)
     return calls
 
 
@@ -101,32 +112,65 @@ def _project(host: str, *, name: str = "tcp-5020", port: int = 5020) -> Project:
     return Project(channels=[TcpChannel(name=name, host=host, port=port)])
 
 
-def test_a_concrete_host_without_a_declaration_names_the_fix(tmp_path, monkeypatch):
-    """没有声明、但通道 host 写成了具体 IP：**不再一声不吭**（2026-10-19 现场反馈）。
+def test_a_concrete_host_without_a_declaration_is_put_on_the_dedicated_nic(
+        tmp_path, monkeypatch):
+    """没有声明、但通道 host 是具体 IP：启动时**把它配到专用网卡上**（2026-10-19 现场反馈）。
 
-    这不是"没声明网络"，而是把设备那一侧的地址塞进了通道自己的监听地址：本机不一定有它，
-    启动会以 `address is not configured on any local adapter` 失败；而那句报错里建议的
-    `net up --point-table` 在**没有声明**时走不通（它会回"点表旁边没有网络声明"）。所以这里
-    给一条真能执行的 `net up --ip <地址>`。
-
-    整条路径仍然**不读系统**（口径 1 的另一半）——`_forbid_system` 会当场炸。
+    原先这条路什么都没做（"没有声明"被当成"不关心网络"），于是 bind 必然失败——现场看到的就是
+    "0.0.0.0/127.0.0.1 能起、换个 IP 就不行，像没用虚拟网卡"。专用网卡本来就是干这件事的：
+    网络声明只是**地址的来源之一**，通道 host 是另一个来源（一路一个地址）。
     """
-    _forbid_system(monkeypatch)
+    called = _install(monkeypatch)
     table = tmp_path / "t.csv"
     table.write_text("x", encoding="utf-8")
     lines = startup.prepare(table, project=_project("10.99.99.99"))
-    assert len(lines) == 2, lines
+    assert called.ips == [["10.99.99.99"]], called.ips
+    assert lines[0].startswith("通道 tcp-5020 的 host 是具体地址 10.99.99.99:5020"), lines
+    assert lines[1] == "已配 1 个地址", lines
+
+
+def test_a_concrete_host_never_takes_other_addresses_away(tmp_path, monkeypatch):
+    """通道 host 那条路**只加不删**：声明才表达"这个工程要的完整集合"。
+
+    否则"换一个 IP 启动"会把之前配的地址收回——两个实例/两份点表同时用不同 IP 时，第二个会把
+    第一个正在用的地址拔掉（实测预览里真的出现过"待收回 10.136.107.240"）。
+    """
+    called = _install(monkeypatch,
+                      addresses=[Address("10.136.107.240", 24, 20, MANUAL)],
+                      ledger={OURS_GUID}, owned={"10.136.107.240"})
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    lines = startup.prepare(table, project=_project("10.99.99.99"), apply=False)
     joined = "\n".join(lines)
-    assert "10.99.99.99" in joined
-    assert "net up --ip 10.99.99.99" in joined, joined
-    assert str(table.with_name("t.net.json")) in joined, joined
+    assert called.ips == [] and called.table == []
+    assert "待添加 1 个：10.99.99.99" in joined, lines
+    assert "待收回" not in joined, f"通道 host 那条路不许收回别人的地址: {lines}"
+
+
+def test_a_concrete_host_preview_names_the_command(tmp_path, monkeypatch):
+    """只看不跑（`apply=False`）：一次提权都不发，但要说清该跑哪条命令（`--ip` 那条）。"""
+    called = _install(monkeypatch)
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    lines = startup.prepare(table, project=_project("10.99.99.99"), apply=False)
+    assert called.ips == [] and called.table == [], (called.ips, called.table)
+    assert any("net up --ip 10.99.99.99" in line for line in lines), lines
+
+
+def test_a_concrete_host_held_by_another_adapter_is_reported_not_added(tmp_path, monkeypatch):
+    """地址已经挂在**别的**网卡上：只报是谁占着，绝不去抢（与声明那条同一条边界）。"""
+    called = _install(monkeypatch, adapters=[OURS, WLAN],
+                      elsewhere=[Address("10.99.99.99", 24, 4, MANUAL)])
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    lines = startup.prepare(table, project=_project("10.99.99.99"))
+    assert called.ips == [], "明知加不上还去提权"
+    assert any("10.99.99.99" in line and "WLAN" in line for line in lines), lines
 
 
 def test_local_hosts_without_a_declaration_stay_silent(tmp_path, monkeypatch):
-    """`0.0.0.0` / `127.0.0.1` 这类本机地址：没有声明仍然一声不吭（口径 1 原样）。
-
-    这条与上一条是一对：提示只在"确实可能起不来"的形状下出现，否则每次启动都念一遍，
-    用户就会学会忽略它。
+    """`0.0.0.0` / `127.0.0.1` 这类本机地址：没有声明仍然一声不吭（口径 1 原样），
+    而且**一个系统读都不发**——通配/回环本来就只听本机，不需要往网卡上加任何地址。
     """
     _forbid_system(monkeypatch)
     table = tmp_path / "t.csv"
@@ -166,7 +210,7 @@ def test_ready_network_is_reported_and_nothing_is_applied(tmp_path, monkeypatch)
                       ledger={OURS_GUID}, owned={"10.0.0.1"})
     lines = startup.prepare(_declare(tmp_path))
     assert lines == [f"网络已就绪：{OURS.label}（1 个地址）"], lines
-    assert called == [], "已经一致还去动了系统"
+    assert called.table == [], "已经一致还去动了系统"
 
 
 def test_a_ready_network_can_be_previewed_without_touching_anything(tmp_path, monkeypatch):
@@ -174,7 +218,7 @@ def test_a_ready_network_can_be_previewed_without_touching_anything(tmp_path, mo
                       addresses=[Address("10.0.0.1", 24, 20, MANUAL)],
                       ledger={OURS_GUID}, owned={"10.0.0.1"})
     assert startup.prepare(_declare(tmp_path), apply=False)[0].startswith("网络已就绪")
-    assert called == []
+    assert called.table == []
 
 
 # ---------- 该动系统的时候 ----------
@@ -193,7 +237,7 @@ def test_missing_addresses_go_through_net_up(tmp_path, monkeypatch):
 def test_missing_adapter_is_built_through_net_up(tmp_path, monkeypatch):
     called = _install(monkeypatch, adapters=[WLAN], apply=lambda table: (0, []))
     lines = startup.prepare(_declare(tmp_path))
-    assert called, "没有专用网卡却没去建"
+    assert called.table, "没有专用网卡却没去建"
     assert lines == [f"专用网卡 {MANAGED_ADAPTER_NAME} 已就绪"], lines
 
 
@@ -201,14 +245,14 @@ def test_missing_loopback_driver_is_reported_without_elevating(tmp_path, monkeyp
     """没有 netloop.inf 就造不出网卡，先别弹 UAC：弹了也只是白弹一次。"""
     called = _install(monkeypatch, adapters=[WLAN], inf=False)
     lines = startup.prepare(_declare(tmp_path))
-    assert called == [] and "netloop.inf" in lines[0], lines
+    assert called.table == [] and "netloop.inf" in lines[0], lines
 
 
 def test_preview_says_exactly_what_to_run(tmp_path, monkeypatch):
     called = _install(monkeypatch, adapters=[WLAN])
     table = _declare(tmp_path)
     lines = startup.prepare(table, apply=False)
-    assert called == []
+    assert called.table == []
     assert any("net up --point-table" in line and str(table) in line for line in lines), lines
 
 
@@ -217,7 +261,7 @@ def test_an_address_held_by_another_adapter_is_reported_not_fought_over(tmp_path
     called = _install(monkeypatch, adapters=[OURS, WLAN],
                       elsewhere=[Address("10.0.0.1", 24, 4, MANUAL)])
     lines = startup.prepare(_declare(tmp_path))
-    assert called == [], "明知加不上还去提权"
+    assert called.table == [], "明知加不上还去提权"
     assert any("10.0.0.1" in line and "WLAN" in line for line in lines), lines
 
 
