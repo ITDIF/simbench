@@ -42,9 +42,10 @@ def check_udp_port_is_free(host: str, port: int, channel_name: str | None = None
             if code in _ADDRESS_NOT_AVAILABLE or exc.errno in _ADDRESS_NOT_AVAILABLE:
                 raise BackendStartError(
                     f"{who}cannot bind UDP {host}:{port}: this address is not configured "
-                    f"on any local adapter ({exc.strerror}); run "
-                    f"`python -m simbench net up --point-table <point table>` first, or fix "
-                    f"the host in the point table") from exc
+                    f"on any local adapter ({exc.strerror}); add it to a local adapter, or "
+                    f"apply the project's network declaration with "
+                    f"`python -m simbench net up --point-table <point table>`, or fix the "
+                    f"host in the point table") from exc
             raise BackendStartError(
                 f"{who}UDP port {host}:{port} is already in use "
                 f"({exc.strerror or exc}); another instance (or another program) holds it") \

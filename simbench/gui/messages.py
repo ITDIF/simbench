@@ -28,7 +28,8 @@ EXPLANATIONS: tuple[tuple[str, str], ...] = (
      "改了点表却看不到效果。"),
     ("is not configured on any local adapter",
      "这个地址在本机任何网卡上都不存在：点表里写的 host 没配上，或者网卡还没准备好。"
-     "先用 `net show` 看现状，再按点表旁边那份声明 `net up`。"),
+     "要么把它配到专用网卡（`net up --ip <这个地址>`），要么把 host 改回 0.0.0.0、"
+     "用点表旁边那份声明（`net init` 生成）让设备 IP 单独监听；`net show` 能看现状。"),
     ("cannot open serial port",
      "这个串口打不开：可能没插（USB-485 没识别到）、被别的程序占着（串口助手），或者波特率那"
      "一串参数与设备对不上。"),

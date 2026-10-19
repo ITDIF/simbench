@@ -6,9 +6,12 @@
 
 四条口径（每一条都对应一次现场判断）：
 
-1. **没有声明文件就一声不吭**。IP 是环境相关的（现场、同事机器各不同），"这个工程没声明
-   网络"是合法状态而不是错误；每次启动都念一遍只会让人学会忽略这行提示。声明文件**坏了**
-   （半截 JSON、端口写成字符串）则报一句原话——那是真写错了，但同样不拦启动。
+1. **没有声明文件时默认一声不吭**。IP 是环境相关的（现场、同事机器各不同），"这个工程没
+   声明网络"是合法状态而不是错误；每次启动都念一遍只会让人学会忽略这行提示。**例外**是
+   通道 host 写成了具体地址（不是 `0.0.0.0`/`127.0.0.1` 这类本机地址）：那等于把设备那一侧
+   的 IP 塞进了通道自己的监听地址，本机不一定有它——这时给一条不读系统的提示
+   （`_concrete_hosts_hint`）。声明文件**坏了**（半截 JSON、端口写成字符串）则报一句原话
+   ——那是真写错了，但同样不拦启动。
 2. **`SIMBENCH_NET_AUTO=0` 是总闸**。测试与 CI 靠它保证**绝不碰真网卡**：用例会装载
    `examples/` 下的点表，而现场那份点表旁边早晚会躺着一份 `.net.json`——没有这道闸，
    跑一次 pytest 就会真去改机器上的网卡地址。
@@ -42,6 +45,9 @@ _OFF = frozenset({"0", "no", "off", "false", "none"})
 
 # `net` 子命令每条输出都带这个前缀；这里回传前剥掉，调用方打自己那层前缀。
 _PREFIX = "[net] "
+
+# 这些 host 都表示"本机"或"所有本机地址"：不需要额外往网卡上加地址，也就不需要提示。
+_LOCAL_HOSTS = frozenset({"", "0.0.0.0", "::", "*", "localhost", "127.0.0.1", "::1"})
 
 
 def auto_enabled() -> bool:
@@ -83,6 +89,10 @@ def prepare(point_table, *, apply: bool = True, project=None) -> list[str]:
     declaration, desired, problem = _declared(point_table)
     if problem:
         return [problem]
+    if declaration is None:
+        # 没有声明本身是合法状态（口径 1），但"通道 host 写成了具体地址"不是：那等于把设备那
+        # 一侧的 IP 塞进了通道自己的监听地址。见 `_concrete_hosts_hint`。
+        return _concrete_hosts_hint(point_table, project)
     # 先按**通道类型**过滤（纯串口工程一个地址都不配），再判空：过滤完为空就与"声明里没有
     # 设备地址"同一条路——一声不吭，而且**连系统都不读**（下面 `_prepare` 那几次读网卡/
     # 账本调用一个都不发）。审查发现的那条就是漏了这个过滤：一份纯串口的点表旁边躺着旧
@@ -100,6 +110,45 @@ def prepare(point_table, *, apply: bool = True, project=None) -> list[str]:
         # 没预料到的异常（缺 DLL、PowerShell 被策略挡掉、账本文件权限）也只该损失这条提示，
         # 不该让整个工具起不来；真出问题时上面那句原话会把异常点名，不吞成静默。
         return [f"网络准备时出了意外（{exc}），已跳过；模拟照常启动"]
+
+
+def _concrete_hosts(project) -> list[tuple[str, str, object]]:
+    """项目里"把具体地址写进通道 host"的 TCP 通道（纯看模型，**不读系统**）。"""
+    if project is None:
+        return []
+    found = []
+    for channel in project.channels:
+        if channel_transport(channel) != "tcp":
+            continue
+        host = str(getattr(channel, "host", "") or "").strip()
+        if host.lower() not in _LOCAL_HOSTS:
+            found.append((channel.name, host, getattr(channel, "port", None)))
+    return found
+
+
+def _concrete_hosts_hint(point_table, project) -> list[str]:
+    """没有声明、却把具体 IP 写进了通道 host：给两条**能直接执行**的路。
+
+    为什么要破一次"没有声明就一声不吭"（口径 1，2026-10-19 现场反馈）：那条口径的前提是
+    通道 host 是 `0.0.0.0` / `127.0.0.1` 这种本机地址。写成具体的设备 IP 时，本机不一定有它，
+    启动会以 `address is not configured on any local adapter` 失败；而那句报错里建议的
+    `net up --point-table` 在**没有声明**时走不通（它会回"点表旁边没有网络声明"）。所以这里给
+    一条真能跑的：`net up --ip <地址>`（不带掩码时按 /24 算，见 `cli._parse_ip_spec`）。
+
+    **不读系统**（口径 1 的另一半）：地址到底在不在本机，留给真正 bind 时的报错去判；这条提示
+    只按模型里的形状说话，所以每次启动的成本仍然是一次模型遍历。
+    """
+    hosts = _concrete_hosts(project)
+    if not hosts:
+        return []
+    name, host, port = hosts[0]
+    more = f"（另有 {len(hosts) - 1} 路同样）" if len(hosts) > 1 else ""
+    return [
+        f"通道 {name} 的 host 是具体地址 {host}:{port}{more}，而点表旁边没有网络声明"
+        f"（{netspec.companion_path(point_table)}）。这个地址若不在本机，启动会失败。",
+        f"两种走法：① 把它配到专用网卡：python -m simbench net up --ip {host}"
+        f"（要管理员）；② 把通道 host 改回 0.0.0.0，再用 net init 生成声明、让设备 IP 单独监听。",
+    ]
 
 
 def status(point_table, project=None) -> list[str]:

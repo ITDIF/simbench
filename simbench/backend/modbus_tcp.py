@@ -85,9 +85,9 @@ def _not_our_address(channel_name, host: str, port: int, exc: OSError) -> PortIn
     who = f"channel {channel_name}: " if channel_name else ""
     return PortInUseError(
         f"{who}cannot listen on {host}:{port}: this address is not configured on any "
-        f"local adapter ({exc.strerror}); run `python -m simbench net up --point-table "
-        f"<point table>` to apply the point table's network declaration, or fix the host "
-        f"in the point table")
+        f"local adapter ({exc.strerror}); add it to a local adapter, or apply the project's "
+        f"network declaration with `python -m simbench net up --point-table <point table>`, "
+        f"or fix the host in the point table")
 
 
 def _bind_probe(host: str, port: int, channel_name) -> None:
@@ -330,9 +330,9 @@ class ModbusTcpBackend(BackendBase):
         return PortInUseError(
             f"channel {self.channel_name}: cannot listen on {host}:{port} "
             f"[{detail}] {exc.strerror}; either this address is not configured on any "
-            f"local adapter (run `python -m simbench net up --point-table <point table>` "
-            f"to apply the network declaration) or another process is already bound "
-            f"to this address and port")
+            f"local adapter (add it to one, or apply the project's network declaration with "
+            f"`python -m simbench net up --point-table <point table>`) or another process "
+            f"is already bound to this address and port")
 
     @property
     def endpoints(self) -> list[tuple[str, int]]:

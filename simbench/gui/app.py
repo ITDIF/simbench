@@ -57,6 +57,10 @@ def _prepare_network(window, point_table: str) -> None:
     lines = net_startup.prepare(point_table, project=window.session.project)
     for line in lines:
         print(f"[net] {line}", flush=True)
+        # 无控制台的 exe（`pythonw` / `simbench-gui.exe`）里 stdout 是 None，`print` 谁也看不见；
+        # 而这几行常常是"该去跑哪条命令"的唯一线索（例如通道 host 写成具体 IP、又没有声明时），
+        # 所以同时落到日志页——那里是窗口版现场唯一能翻的地方。
+        window._log(f"[net] {line}")
     if lines:
         window.status.showMessage(lines[0])
 

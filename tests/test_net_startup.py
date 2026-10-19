@@ -24,6 +24,7 @@ from simbench.net import startup
 from simbench.net.device import MANAGED_ADAPTER_NAME
 from simbench.net.errors import NetError
 from simbench.net.state import MANUAL, Adapter, Address
+from simbench.project.model import Project, TcpChannel
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
@@ -94,6 +95,44 @@ def test_no_declaration_is_silent(tmp_path, monkeypatch):
     table = tmp_path / "t.csv"
     table.write_text("x", encoding="utf-8")
     assert startup.prepare(table) == []
+
+
+def _project(host: str, *, name: str = "tcp-5020", port: int = 5020) -> Project:
+    return Project(channels=[TcpChannel(name=name, host=host, port=port)])
+
+
+def test_a_concrete_host_without_a_declaration_names_the_fix(tmp_path, monkeypatch):
+    """没有声明、但通道 host 写成了具体 IP：**不再一声不吭**（2026-10-19 现场反馈）。
+
+    这不是"没声明网络"，而是把设备那一侧的地址塞进了通道自己的监听地址：本机不一定有它，
+    启动会以 `address is not configured on any local adapter` 失败；而那句报错里建议的
+    `net up --point-table` 在**没有声明**时走不通（它会回"点表旁边没有网络声明"）。所以这里
+    给一条真能执行的 `net up --ip <地址>`。
+
+    整条路径仍然**不读系统**（口径 1 的另一半）——`_forbid_system` 会当场炸。
+    """
+    _forbid_system(monkeypatch)
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    lines = startup.prepare(table, project=_project("10.99.99.99"))
+    assert len(lines) == 2, lines
+    joined = "\n".join(lines)
+    assert "10.99.99.99" in joined
+    assert "net up --ip 10.99.99.99" in joined, joined
+    assert str(table.with_name("t.net.json")) in joined, joined
+
+
+def test_local_hosts_without_a_declaration_stay_silent(tmp_path, monkeypatch):
+    """`0.0.0.0` / `127.0.0.1` 这类本机地址：没有声明仍然一声不吭（口径 1 原样）。
+
+    这条与上一条是一对：提示只在"确实可能起不来"的形状下出现，否则每次启动都念一遍，
+    用户就会学会忽略它。
+    """
+    _forbid_system(monkeypatch)
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    for host in ("0.0.0.0", "127.0.0.1", "localhost", "::", ""):
+        assert startup.prepare(table, project=_project(host)) == [], host
 
 
 def test_the_switch_off_is_a_full_stop(tmp_path, monkeypatch):
