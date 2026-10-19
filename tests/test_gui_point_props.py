@@ -27,6 +27,9 @@ from simbench.engine.packets import PacketStore
 from simbench.engine.session import Session
 from simbench.gui.main_window import MainWindow
 from simbench.gui.point_props import PointPropertiesDialog
+from simbench.gui.point_table import ADDRESS_COLUMN as POINT_ADDRESS_COLUMN
+from simbench.gui.point_table import NAME_COLUMN
+from simbench.gui.point_table import VALUE_COLUMN as POINT_VALUE_COLUMN
 from simbench.project.model import DATATYPES, Device, Point, TcpChannel
 from simbench.project.validate import error_lines, validate_project
 from tests.conftest import free_port
@@ -36,8 +39,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
 KEY = ("tcp-5020", 11, "hr", 4, None)   # 身份五元组：最后那位是 S7 的位（Modbus 恒 None）
 NAME = "风机状态"
-VALUE_COLUMN = 6                          # gui/point_table.COLUMNS 里的"当前值"
-ADDRESS_COLUMN = 2                        # 同一张表里的"地址"
+VALUE_COLUMN = POINT_VALUE_COLUMN         # gui/point_table.COLUMNS 里的"当前值"
+ADDRESS_COLUMN = POINT_ADDRESS_COLUMN     # 同一张表里的"地址"
 
 
 @pytest.fixture
@@ -79,7 +82,7 @@ def real_point(project, key):
 
 def row_of(window, name: str) -> int:
     model = window.point_model
-    return next(r for r in range(model.rowCount()) if model.index(r, 0).data() == name)
+    return next(r for r in range(model.rowCount()) if model.index(r, NAME_COLUMN).data() == name)
 
 
 def start_owner(window, qapp):

@@ -27,7 +27,20 @@ from simbench.csv_io_entry import load_point_table
 from simbench.engine.point_source import FakeEngine, session_source
 from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Row, Session
-from simbench.gui.point_table import COLUMNS, PointTableModel, PointTableView, conventional
+from simbench.gui.point_table import (
+    ADDRESS_COLUMN,
+    AREA_COLUMN,
+    COLUMNS,
+    CONVENTION_COLUMN,
+    DEVICE_COLUMN,
+    NAME_COLUMN,
+    RAW_COLUMN,
+    READONLY_COLUMN,
+    VALUE_COLUMN,
+    PointTableModel,
+    PointTableView,
+    conventional,
+)
 from simbench.project.model import Project, TcpChannel
 from simbench.project.validate import validate_project
 from tests.conftest import free_port
@@ -70,7 +83,7 @@ def live_session():
 
 
 def row_of(model, name):
-    return next(r for r in range(model.rowCount()) if model.index(r, 0).data() == name)
+    return next(r for r in range(model.rowCount()) if model.index(r, NAME_COLUMN).data() == name)
 
 
 # ---------- 列与文案 ----------
@@ -95,11 +108,12 @@ def test_columns_are_the_agreed_order():
     # 第三列叫"点表地址"而不是"4x"：这一列打的值随区变（4x/3x/1x/0x），
     # S7 上还算不出来（`—`）——"4x"这个词只在 Modbus 的 hr 区成立。
     assert [c.header for c in COLUMNS] == [
-        "名称", "区", "地址", "点表地址", "类型", "字序", "当前值", "原始寄存器", "波形", "只读"]
+        "设备", "名称", "区", "地址", "点表地址", "类型", "字序", "当前值", "原始寄存器",
+        "波形", "只读"]
 
 
 def test_the_columns_are_sized_for_their_widest_content():
-    """十列的宽度按**各自最宽的内容**给（本机 Microsoft YaHei UI 9pt 实测量出来的）。
+    """十一列的宽度按**各自最宽的内容**给（本机 Microsoft YaHei UI 9pt 实测量出来的）。
 
     两条曾经真被截的形状是这次重排的理由：点位名 12 个中文字要 194px（列只有 150，会被
     Qt 截成 `…`），S7 的高 DB 号 `db4095` 要 51px（"区"只有 46，最后一位没了）。同时
@@ -110,8 +124,9 @@ def test_the_columns_are_sized_for_their_widest_content():
     得到一个部署环境里宽得离谱的表。
     """
     widths = {c.header: c.width for c in COLUMNS}
-    assert widths == {"名称": 250, "区": 56, "地址": 56, "点表地址": 72, "类型": 58,
-                      "字序": 60, "当前值": 132, "原始寄存器": 134, "波形": 72, "只读": 40}
+    assert widths == {"设备": 160, "名称": 250, "区": 56, "地址": 56, "点表地址": 72,
+                      "类型": 58, "字序": 60, "当前值": 132, "原始寄存器": 134,
+                      "波形": 72, "只读": 40}
     # 各列"最宽内容"的文字量级（前提，可读性比数字本身重要）：
     assert len("db4095") == 6                     # S7 的 DB 号上限 4095，区那一列要装得下
     assert len("72623859790382856") == 17         # 当前值最宽的那个 uint64
@@ -132,29 +147,51 @@ def test_conventional_rejects_an_area_that_is_not_in_the_model():
         conventional("xx", 0)
 
 
+def test_the_device_column_says_which_device_each_row_belongs_to(model):
+    """点表按设备分类：每一行都自带**设备名 + unit**（2026-10-19 用户口径）。
+
+    为什么 unit 也要在：一条 485 总线上同名设备并不罕见，Modbus 认的是 unit id；
+    只写设备名时两台"照明"会分不清。
+    """
+    assert model.index(row_of(model, "CO浓度"), DEVICE_COLUMN).data() == "COVI-1 (unit 11)"
+    assert model.index(row_of(model, "回路状态"), DEVICE_COLUMN).data() == \
+        "照明回路-1 (unit 12)"
+
+
+def test_attaching_one_device_shows_only_that_devices_points(model):
+    """设备树上点某台设备 = 表只留那一台的点；不给 unit 才是整条通道。"""
+    assert model.rowCount() == 9, "默认应当显示这一条通道的全部点位"
+    model.attach(model._source, "tcp-5020", unit=12)
+    assert [model.index(r, NAME_COLUMN).data() for r in range(model.rowCount())] == \
+        ["回路状态"]
+    assert model.unit() == 12
+    model.attach(model._source, "tcp-5020")
+    assert model.rowCount() == 9 and model.unit() is None
+
+
 def test_rows_show_value_and_raw_registers(model):
     r = row_of(model, "CO浓度")
-    assert model.index(r, 6).data() == "12.5"
-    assert model.index(r, 7).data() == "0000 4148"      # CDAB 上线形态，一眼可核
-    assert model.index(r, 3).data() == "4x00001"
+    assert model.index(r, VALUE_COLUMN).data() == "12.5"
+    assert model.index(r, RAW_COLUMN).data() == "0000 4148"      # CDAB 上线形态，一眼可核
+    assert model.index(r, CONVENTION_COLUMN).data() == "4x00001"
 
 
 def test_a_bit_point_renders_as_true_false_not_one_zero(model):
     """位区的当前值用 true/false：主站读的是线圈，界面上写 1/0 会被当成寄存器值。"""
     r = row_of(model, "启动命令")
-    assert model.index(r, 6).data() == "false"
-    assert model.index(r, 3).data() == "0x00001"
+    assert model.index(r, VALUE_COLUMN).data() == "false"
+    assert model.index(r, CONVENTION_COLUMN).data() == "0x00001"
 
 
 def test_readonly_points_are_marked_in_their_own_column(model):
     r = row_of(model, "CO浓度")
-    assert model.index(r, 9).data() == "是"
-    assert model.index(row_of(model, "风机状态"), 9).data() == ""
+    assert model.index(r, READONLY_COLUMN).data() == "是"
+    assert model.index(row_of(model, "风机状态"), READONLY_COLUMN).data() == ""
 
 
 def test_vertical_header_is_the_one_based_row_number(model):
     assert model.headerData(0, QtCore.Qt.Vertical) == "1"
-    assert model.headerData(2, QtCore.Qt.Horizontal) == "地址"
+    assert model.headerData(ADDRESS_COLUMN, QtCore.Qt.Horizontal) == "地址"
 
 
 # ---------- 带着错装载的行：算不出那一格，但整行必须还在 ----------
@@ -209,8 +246,9 @@ def test_the_good_row_of_a_dirty_table_still_renders_as_usual(dirty_table):
     自证，好行也跟着说不清自己了。
     """
     table, _project, _issues = dirty_table
-    assert [table.index(1, col).data() for col in (0, 1, 3, 6, 7)] == \
-        ["好点", "hr", "4x00002", "8", "0008"]
+    assert [table.index(1, col).data() for col in
+            (NAME_COLUMN, AREA_COLUMN, CONVENTION_COLUMN, VALUE_COLUMN,
+             RAW_COLUMN)] == ["好点", "hr", "4x00002", "8", "0008"]
 
 
 def test_showing_a_dirty_row_does_not_make_it_valid(dirty_table):
@@ -236,8 +274,8 @@ def test_only_the_value_column_is_editable(model):
 
 def test_editing_another_column_is_refused(model):
     r = row_of(model, "CO浓度")
-    assert model.setData(model.index(r, 0), "改过的名字") is False
-    assert model.index(r, 0).data() == "CO浓度"
+    assert model.setData(model.index(r, NAME_COLUMN), "改过的名字") is False
+    assert model.index(r, NAME_COLUMN).data() == "CO浓度"
 
 
 def test_every_column_stays_selectable_and_enabled(model):
@@ -252,31 +290,31 @@ def test_every_column_stays_selectable_and_enabled(model):
 
 def test_edit_writes_through_the_engine(model, engine):
     r = row_of(model, "风机状态")
-    assert model.setData(model.index(r, 6), "37") is True
-    assert model.index(r, 6).data() == "37"
+    assert model.setData(model.index(r, VALUE_COLUMN), "37") is True
+    assert model.index(r, VALUE_COLUMN).data() == "37"
     assert engine.writes == [("tcp-5020", 11, "hr", 4, "37", None)]
 
 
 def test_bad_edit_is_refused_and_keeps_the_old_text(model):
     r = row_of(model, "风机状态")
-    assert model.setData(model.index(r, 6), "abc") is False
-    assert model.index(r, 6).data() == "11"
+    assert model.setData(model.index(r, VALUE_COLUMN), "abc") is False
+    assert model.index(r, VALUE_COLUMN).data() == "11"
     assert "uint16 needs an integer" in model.last_error
     assert model.last_error.startswith("风机状态:")
 
 
 def test_error_message_names_the_point(model):
     r = row_of(model, "风机状态")
-    model.setData(model.index(r, 6), "999999")
+    model.setData(model.index(r, VALUE_COLUMN), "999999")
     assert "风机状态" in model.last_error          # 现场要一眼看出是哪一行
     assert "uint16 out of range" in model.last_error
 
 
 def test_a_successful_edit_clears_the_previous_error(model, engine):
     r = row_of(model, "风机状态")
-    model.setData(model.index(r, 6), "abc")
+    model.setData(model.index(r, VALUE_COLUMN), "abc")
     assert model.last_error
-    assert model.setData(model.index(r, 6), "37") is True
+    assert model.setData(model.index(r, VALUE_COLUMN), "37") is True
     assert model.last_error == ""
 
 
@@ -284,13 +322,13 @@ def test_noop_edit_does_not_emit_dataChanged(model):
     r = row_of(model, "风机状态")
     fired: list[int] = []
     model.dataChanged.connect(lambda tl, br, _roles=None: fired.append(tl.row()))
-    assert model.setData(model.index(r, 6), "11") is False
+    assert model.setData(model.index(r, VALUE_COLUMN), "11") is False
     assert fired == []
 
 
 def test_a_edit_with_surrounding_spaces_is_stripped_before_writing(model, engine):
     r = row_of(model, "风机状态")
-    assert model.setData(model.index(r, 6), "  37  ") is True
+    assert model.setData(model.index(r, VALUE_COLUMN), "  37  ") is True
     assert engine.writes == [("tcp-5020", 11, "hr", 4, "37", None)]
 
 
@@ -310,8 +348,8 @@ def test_refresh_touches_only_changed_rows(model, engine):
     assert changed == 1
     r = row_of(model, "风机状态")
     assert fired == [(r, r, 0, len(COLUMNS) - 1)]
-    assert model.index(r, 6).data() == "12"
-    assert model.index(r, 7).data() == "000C"
+    assert model.index(r, VALUE_COLUMN).data() == "12"
+    assert model.index(r, RAW_COLUMN).data() == "000C"
 
 
 def test_a_refresh_with_unchanged_rows_emits_nothing(model, engine):
@@ -405,15 +443,15 @@ def test_the_stale_and_wave_columns_do_not_share_a_value(qapp):
     stale_role = m.stale_role()
     # 叠加行：两个事实必须同时说得出，谁也不许顶掉谁
     assert m.index(0, wave).data() == "已停", "stale 把接管文案顶掉了"
-    assert m.data(m.index(0, 6), stale_role) is True, "接管把 stale 角色顶掉了"
-    assert m.index(0, 6).data() == "7", "初值回落的文字不许被两种状态改掉"
+    assert m.data(m.index(0, VALUE_COLUMN), stale_role) is True, "接管把 stale 角色顶掉了"
+    assert m.index(0, VALUE_COLUMN).data() == "7", "初值回落的文字不许被两种状态改掉"
     # 单态行各自只说自己那一半，互不越界
     assert m.index(1, wave).data() == "已停"
-    assert m.data(m.index(1, 6), stale_role) is False, "接管自己不算回读失败"
+    assert m.data(m.index(1, VALUE_COLUMN), stale_role) is False, "接管自己不算回读失败"
     assert m.index(2, wave).data() == "sine", "stale 不许去动波形列的文字"
-    assert m.data(m.index(2, 6), stale_role) is True
+    assert m.data(m.index(2, VALUE_COLUMN), stale_role) is True
     assert m.index(3, wave).data() == "sine"
-    assert m.data(m.index(3, 6), stale_role) is False
+    assert m.data(m.index(3, VALUE_COLUMN), stale_role) is False
 
 
 def test_the_fake_keeps_every_field_it_does_not_edit(engine):
@@ -437,9 +475,9 @@ def test_stale_rows_report_their_role(qapp):
     m = PointTableModel()
     m.attach(TwoRowSource([_row("可改的量", "1"), _row("没读到的量", "7", stale=True)]))
     stale = m.stale_role()
-    assert m.data(m.index(0, 6), stale) is False
-    assert m.data(m.index(1, 6), stale) is True
-    assert m.index(1, 6).data() == "7"
+    assert m.data(m.index(0, VALUE_COLUMN), stale) is False
+    assert m.data(m.index(1, VALUE_COLUMN), stale) is True
+    assert m.index(1, VALUE_COLUMN).data() == "7"
 
 
 def test_a_stale_change_alone_counts_as_a_changed_row(qapp):
@@ -481,8 +519,8 @@ def test_a_real_session_satisfies_the_same_protocol(qapp, live_session):
     m = PointTableModel()
     m.attach(session_source(live_session))
     assert m.rowCount() == 9
-    assert m.index(row_of(m, "CO浓度"), 7).data() == "0000 4148"
-    assert m.index(row_of(m, "CO浓度"), 6).data() == "12.5"
+    assert m.index(row_of(m, "CO浓度"), RAW_COLUMN).data() == "0000 4148"
+    assert m.index(row_of(m, "CO浓度"), VALUE_COLUMN).data() == "12.5"
 
 
 def test_the_fake_engine_refuses_with_the_same_words_as_the_session(engine, qapp,
@@ -587,7 +625,7 @@ def test_a_right_click_builds_the_menu_for_the_row_under_the_cursor(qapp, monkey
     model = view.model()
     # `visualRect` 是视口坐标，而 `contextMenuEvent` 拿到的是控件坐标：换算交给 Qt 自己，
     # 用例不许和实现约定同一个错误口径（两侧都按"未映射"写就会一起错）。
-    row_point = view.viewport().mapTo(view, view.visualRect(model.index(1, 0)).center())
+    row_point = view.viewport().mapTo(view, view.visualRect(model.index(1, NAME_COLUMN)).center())
     # 全局点 = 控件点 + 窗口在屏幕上的任意偏移：用例只需要两个坐标系分得开。
     global_point = row_point + QtCore.QPoint(520, 300)
     view.contextMenuEvent(_Click(row_point, global_point))

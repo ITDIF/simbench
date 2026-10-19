@@ -133,7 +133,7 @@ def test_the_raw_column_is_sized_for_the_widest_register_string(window):
     offscreen 那套兜底字体把每个字形按 1em 算（19 个字符量出来 247px），照它加宽会得到
     一个部署环境里宽得离谱的列。
     """
-    assert RAW_COLUMN == 7
+    assert RAW_COLUMN == 8
     assert COLUMNS[RAW_COLUMN].header == "原始寄存器"
     assert len("0000 0000 4148 4E28") == 19
     assert COLUMNS[RAW_COLUMN].width == 134

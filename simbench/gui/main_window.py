@@ -588,10 +588,19 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         self._log(f"[{line.level}] {line.text}")
 
     def _on_tree_selection(self, current, _previous) -> None:
+        """树上选了什么，表就显示什么：点通道 = 这一路全部；点设备 = 只看那一台。
+
+        原来只认"通道变了没有"——点设备行什么都不发生，而表是一条通道一整片平铺，
+        多台设备时看不出哪些点属于哪台（2026-10-19 用户口径"点表没有根据设备分类"）。
+        现在设备行也参与：`unit_of()` 给 unit id，表只留那一台的点（设备列也跟着能对上）。
+        """
         channel = self.tree.channel_of(current)
-        if not channel or channel == self.point_model.channel():
+        unit = self.tree.unit_of(current)
+        if not channel:
             return
-        self.point_model.attach(pumped_source(self.rows_pump), channel)
+        if channel == self.point_model.channel() and unit == self.point_model.unit():
+            return
+        self.point_model.attach(pumped_source(self.rows_pump), channel, unit)
         self._shown_error = ""
 
     def _log(self, text: str) -> None:

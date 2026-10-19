@@ -23,6 +23,7 @@ from simbench.gui.channel_form import ChannelForm
 from simbench.gui.device_tree import DeviceTree
 from simbench.gui.main_window import MainWindow
 from simbench.gui.new_project import AddChannelDialog, AddDeviceDialog, NewProjectDialog
+from simbench.gui.point_table import NAME_COLUMN
 from simbench.project import edit, json_io
 from simbench.project.model import Device, Point, TcpChannel
 from tests.conftest import free_port
@@ -42,11 +43,11 @@ def loaded(port=None):
 
 def row_of(window, name: str) -> int:
     model = window.point_model
-    return next(r for r in range(model.rowCount()) if model.index(r, 0).data() == name)
+    return next(r for r in range(model.rowCount()) if model.index(r, NAME_COLUMN).data() == name)
 
 
 def rows(window) -> list[str]:
-    return [window.point_model.index(r, 0).data()
+    return [window.point_model.index(r, NAME_COLUMN).data()
             for r in range(window.point_model.rowCount())]
 
 

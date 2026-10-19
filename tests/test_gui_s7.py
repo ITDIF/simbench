@@ -20,7 +20,7 @@ from simbench.events import PacketEvent
 from simbench.gui.channel_panel import STATUS_LABELS, ChannelPanel
 from simbench.gui.packet_view import PacketModel
 from simbench.gui.point_props import PointPropertiesDialog
-from simbench.gui.point_table import COLUMNS, _display
+from simbench.gui.point_table import COLUMNS, RAW_COLUMN, _display
 from simbench.project.model import Device, Point, Project, S7Channel, TcpChannel
 
 
@@ -137,7 +137,7 @@ def test_the_raw_column_prints_bytes_on_an_s7_row_and_registers_on_a_modbus_row(
     modbus_row = Row("tcp-5020", "COVI-1", 11, "温度", "hr", 0, "uint16", "ABCD",
                      "12", (0x000C,), False, "const", False, "waveform")
     assert _display(modbus_row, "原始寄存器") == "000C"
-    assert [c.header for c in COLUMNS][7] == "原始寄存器"      # 列头与列序不动
+    assert COLUMNS[RAW_COLUMN].header == "原始寄存器"      # 列头与列序不动
 
 
 # ---------- 报文窗 ----------

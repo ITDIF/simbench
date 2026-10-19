@@ -34,6 +34,10 @@ from simbench.events import ChannelState
 from simbench.gui import main_window as main_window_module
 from simbench.gui.dialogs import IssueDialog
 from simbench.gui.main_window import MainWindow
+from simbench.gui.point_table import ADDRESS_COLUMN as POINT_ADDRESS_COLUMN
+from simbench.gui.point_table import NAME_COLUMN
+from simbench.gui.point_table import VALUE_COLUMN as POINT_VALUE_COLUMN
+from simbench.gui.point_table import WAVE_COLUMN as POINT_WAVE_COLUMN
 from simbench.project.model import Device, Point, TcpChannel
 from simbench.project.validate import validate_project
 from tests.conftest import free_port
@@ -41,8 +45,8 @@ from tests.gui_support import gui_deps
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = str(ROOT / "examples" / "covi-tunnel.csv")
-VALUE_COLUMN = 6                       # gui/point_table.COLUMNS 里的"当前值"
-WAVE_COLUMN = 8                        # 同一张表里的"波形"：`已停` 与波形名都落在这一列
+VALUE_COLUMN = POINT_VALUE_COLUMN      # gui/point_table.COLUMNS 里的"当前值"
+WAVE_COLUMN = POINT_WAVE_COLUMN        # 同一张表里的"波形"：`已停` 与波形名都落在这一列
 
 
 def second_channel(port: int) -> TcpChannel:
@@ -62,7 +66,7 @@ def loaded(port: int | None = None):
 
 def row_of(window, name: str) -> int:
     model = window.point_model
-    return next(r for r in range(model.rowCount()) if model.index(r, 0).data() == name)
+    return next(r for r in range(model.rowCount()) if model.index(r, NAME_COLUMN).data() == name)
 
 
 def value_of(window, name: str) -> str:
@@ -465,6 +469,28 @@ def test_a_value_written_in_the_table_reaches_a_real_master(window, qapp):
         client.close()
 
 
+def test_picking_a_device_row_narrows_the_table_to_that_device(window, qapp):
+    """设备树上点某台设备：表只剩那一台的点；点通道行回到整条通道（2026-10-19）。"""
+    top = window.tree.topLevelItem(0)
+    top.setExpanded(True)
+    window.tree.setCurrentItem(top.child(1))          # 照明回路-1（unit 12）
+    qapp.processEvents()
+    assert window.point_model.unit() == 12
+    assert window.point_model.rowCount() == 1
+    assert window.point_model.index(0, NAME_COLUMN).data() == "回路状态"
+    assert window.point_model.index(0, 0).data() == "照明回路-1 (unit 12)"
+
+    window.tree.setCurrentItem(top.child(0))          # COVI-1（unit 11）
+    qapp.processEvents()
+    assert window.point_model.unit() == 11
+    assert window.point_model.rowCount() == 8
+
+    window.tree.setCurrentItem(top)                   # 通道行 = 全部设备
+    qapp.processEvents()
+    assert window.point_model.unit() is None
+    assert window.point_model.rowCount() == 9
+
+
 def test_a_master_write_lands_in_the_table_on_the_next_tick(window, qapp):
     """拉模型的正证：主站写完（ACK 已回、datastore 已更新），下一跳就该看见。
 
@@ -665,7 +691,7 @@ def test_a_structural_apply_from_the_menu_says_a_restart_is_needed(make_window, 
     message = window.status.currentMessage()
     assert "已改 1 处" in message and "重启通道后生效" in message, message
     window.point_model.refresh()
-    assert window.point_model.index(row_of(window, "风机状态"), 2).data() == "20"
+    assert window.point_model.index(row_of(window, "风机状态"), POINT_ADDRESS_COLUMN).data() == "20"
     window._tick()
     assert window.windowTitle().endswith("*")
 
@@ -680,7 +706,7 @@ def test_a_live_only_apply_from_the_menu_says_next_tick_not_restart(make_window,
     message = window.status.currentMessage()
     assert "下一拍" in message and "重启通道" not in message, message
     window.point_model.refresh()
-    assert window.point_model.index(row_of(window, "风机状态B"), 0).data() == "风机状态B"
+    assert window.point_model.index(row_of(window, "风机状态B"), NAME_COLUMN).data() == "风机状态B"
 
 
 def test_a_mixed_apply_names_both_effect_times(make_window, qapp, monkeypatch):
@@ -705,7 +731,7 @@ def test_a_refused_properties_apply_leaves_no_trace_in_the_window(make_window, q
     _props_dialog_factory(window, monkeypatch, lambda d: d.address_edit.setText("0"))
     window.point_table.row_menu_actions(row_of(window, "风机状态"))[1].trigger()
     window.point_model.refresh()
-    assert window.point_model.index(row_of(window, "风机状态"), 2).data() == "4"
+    assert window.point_model.index(row_of(window, "风机状态"), POINT_ADDRESS_COLUMN).data() == "4"
     assert "已改" not in window.status.currentMessage()
     assert not window.session.dirty
     window._tick()
@@ -751,7 +777,7 @@ def test_picking_a_channel_in_the_tree_switches_the_table(make_window, qapp):
     qapp.processEvents()
     assert window.point_model.channel() == "tcp-b"
     assert window.point_model.rowCount() == 1
-    assert window.point_model.index(0, 0).data() == "回路温度"
+    assert window.point_model.index(0, NAME_COLUMN).data() == "回路温度"
 
 
 # ---------- 多通道独立启停 ----------

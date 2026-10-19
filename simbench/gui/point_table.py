@@ -41,6 +41,11 @@ class Column:
 # S7 的高 DB 号 `db4095` 要 51px（"区"只有 46，最后一位没了）。同时 4x/类型/波形/只读四列
 # 一共虚占了 120px——把它们让给名字与区。
 COLUMNS: tuple[Column, ...] = (
+    # 160：`设备名 (unit 11)` 这一格——一条通道上常挂多台设备（现场一条 485 总线上十几个 unit），
+    # 原来表是"一条通道一整片平铺"，行里虽然带着设备名却**从来没显示**，操作员看不出哪些点
+    # 属于哪台设备（2026-10-19 用户口径）。设备列放最前面：分类先于点位。
+    # 12 个中文字 + ` (unit 11)` 大约 150px，留 10px 余量。
+    Column("设备", 160),
     # 250：装得下约 15 个中文字（12 个要 194px）。名字是操作员在表里找那一行的唯一线索，
     # 截断它比截断任何其它列都贵。
     Column("名称", 250),
@@ -64,9 +69,19 @@ COLUMNS: tuple[Column, ...] = (
     Column("只读", 40),          # 列头"只读"要 34px
 )
 
-VALUE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == VALUE_HEADER)
+# 列号只在这里算一次：界面代码与用例都按名字取，别在几十处写死 6 / 7 / 9——
+# 2026-10-19 加"设备"列时，正是那些写死的数字让半套用例一起红。
+DEVICE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "设备")
+NAME_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "名称")
+AREA_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "区")
 ADDRESS_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "地址")
+CONVENTION_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == CONVENTION_HEADER)
+DATATYPE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "类型")
+WORD_ORDER_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "字序")
+VALUE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == VALUE_HEADER)
 RAW_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == RAW_HEADER)
+WAVE_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "波形")
+READONLY_COLUMN = next(i for i, c in enumerate(COLUMNS) if c.header == "只读")
 STALE_ROLE = QtCore.Qt.UserRole + 1
 
 _CONVENTION = {"co": "0x", "di": "1x", "ir": "3x", "hr": "4x"}
@@ -99,6 +114,8 @@ class PointTableModel(QtCore.QAbstractTableModel):
         self._rows: list[Row] = []
         self._source: PointSource | None = None
         self._channel = ""
+        # 只看某一台设备时记它的 unit；None = 这一条通道上的全部设备（默认）
+        self._unit: int | None = None
         self.last_error = ""
 
     def stale_role(self) -> int:
@@ -107,6 +124,10 @@ class PointTableModel(QtCore.QAbstractTableModel):
 
     def channel(self) -> str:
         return self._channel
+
+    def unit(self) -> int | None:
+        """当前只显示哪台设备（unit）；`None` = 这一条通道的全部设备。"""
+        return self._unit
 
     def row_at(self, row: int) -> Row | None:
         """按行号取正在展示的 `Row`：视图的右键菜单要名字/归属/身份，但不自己抄一份行。
@@ -127,12 +148,20 @@ class PointTableModel(QtCore.QAbstractTableModel):
         """
         self._source = None
         self._channel = ""
+        self._unit = None
         self._rows = []
         self.beginResetModel()
         self.endResetModel()
 
-    def attach(self, source: PointSource, channel: str = "") -> None:
-        """换一个数据源。默认展示这个通道**全部**点位（口径 2：不给"跟随当前上下文"）。"""
+    def attach(self, source: PointSource, channel: str = "",
+               unit: int | None = None) -> None:
+        """换一个数据源。默认展示这个通道**全部**点位；给 `unit` 就只看那一台设备。
+
+        为什么要能按设备看（2026-10-19 用户口径"点表没有根据设备分类"）：一条通道上常挂
+        多台设备（一条 485 总线上十几个 unit 是常态），而表格原来是一条通道一整片平铺——
+        行里虽然带着设备名，界面上从来没显示过。现在设备列让"哪几个点属于哪台"一眼可见，
+        设备树上点某台设备则把表**收窄到那一台**（点通道行回到全部）。
+        """
         self._source = source
         project = getattr(source, "project", None)
         names = [ch.name for ch in getattr(project, "channels", [])]
@@ -140,7 +169,9 @@ class PointTableModel(QtCore.QAbstractTableModel):
             # 空工程不是"表格空着"，是没装载：让调用方听见，别让界面演一张合法的空白点表
             raise ValueError("the project has no channel")
         self._channel = channel or names[0]
-        self._rows = list(source.rows(self._channel))
+        self._unit = unit
+        self._rows = [row for row in source.rows(self._channel)
+                      if unit is None or row.unit_id == unit]
         self.beginResetModel()
         self.endResetModel()
 
@@ -217,7 +248,8 @@ class PointTableModel(QtCore.QAbstractTableModel):
         """重读数据源，只给真变了的行发 dataChanged。返回改动行数。"""
         if self._source is None:
             return 0
-        fresh = list(self._source.rows(self._channel))
+        fresh = [row for row in self._source.rows(self._channel)
+                 if self._unit is None or row.unit_id == self._unit]
         if len(fresh) != len(self._rows):
             # 只有条目数真变了才 reset：行数没变而内容变了，靠 dataChanged 就够
             self.beginResetModel()
@@ -319,6 +351,9 @@ def _display(row: Row, header: str) -> str:
     不猜前缀、也不替整行做主。判据与点位属性面板 `_update_convention` 同一个标记来源
     （这里 import 的是同一个模块，不是抄一份）。
     """
+    if header == "设备":
+        # unit 一起显示：Modbus 一条通道上 unit 才是"哪台设备"的键（同名设备也分得开）
+        return f"{row.device} (unit {row.unit_id})"
     if header == "名称":
         return row.name
     if header == "区":
