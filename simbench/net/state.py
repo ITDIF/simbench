@@ -26,7 +26,8 @@ _ENCODING_PRELUDE = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
 
 _ADAPTER_FIELDS = ("Name", "InterfaceDescription", "ifIndex",
                    "InterfaceGuid", "Status", "MacAddress", "PnPDeviceID")
-_ADDRESS_FIELDS = ("InterfaceIndex", "IPAddress", "PrefixLength", "PrefixOrigin")
+_ADDRESS_FIELDS = ("InterfaceIndex", "IPAddress", "PrefixLength", "PrefixOrigin",
+                   "AddressState")
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,9 @@ class Address:
     prefix_length: int
     if_index: int
     origin: int
+    # Windows 地址状态（Preferred / Tentative / Duplicate / Deprecated ...）。
+    # 旧调用方构造 Address 时不传，保持空串；诊断"地址在列表里但绑不上"时要靠它。
+    state: str = ""
 
     @property
     def manual(self) -> bool:
@@ -146,6 +150,7 @@ def parse_addresses(text: str) -> list[Address]:
                 prefix_length=int(item.get("PrefixLength")),
                 if_index=int(item.get("InterfaceIndex")),
                 origin=int(item.get("PrefixOrigin")),
+                state=str(item.get("AddressState") or ""),
             ))
         except (TypeError, ValueError) as exc:
             raise NetError(f"地址记录字段缺失：{item!r}") from exc

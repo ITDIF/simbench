@@ -41,6 +41,7 @@ WLAN = Adapter(name="WLAN", description="Realtek RTL8852BE WiFi 6", if_index=4,
 def _hook_on(monkeypatch):
     """本文件测的是挂钩本身，所以把 conftest 那个总闸打开；每条用例结束自动关回去。"""
     monkeypatch.setenv(startup.AUTO_ENV, "1")
+    startup.forget_verified()
 
 
 def _declare(tmp_path, devices=({"name": "风机-1", "ip": "10.0.0.1"},),
@@ -55,26 +56,27 @@ def _declare(tmp_path, devices=({"name": "风机-1", "ip": "10.0.0.1"},),
 
 
 def _install(monkeypatch, *, adapters=(OURS,), addresses=(), elsewhere=(),
-             ledger=(), owned=(), inf=True, apply=None, apply_ips=None):
+             ledger=(), owned=(), inf=True, apply=None, apply_ips=None,
+             bindable=False):
     """把系统那几处读口换成假数据，并记下 `net up` 被怎么调的。
 
     两种写法各记一处：`.table` 是 `--point-table`（声明那条），`.ips` 是 `--ip`（没有声明、
     地址来自通道 host 那条）。返回命名对象而不是 list：两条路的记录要能分开断言。
     """
     monkeypatch.setattr(startup, "read_adapters", lambda: list(adapters))
-    monkeypatch.setattr(startup, "read_addresses",
-                        lambda if_index: [a for a in addresses if a.if_index == if_index])
     monkeypatch.setattr(startup, "read_all_addresses",
                         lambda: list(addresses) + list(elsewhere))
     monkeypatch.setattr(startup, "Ledger", SimpleNamespace(load=lambda path=None: SimpleNamespace(
         owned_adapter_guids=lambda: set(ledger), owned=lambda guid: set(owned))))
+    monkeypatch.setattr(startup, "_binds_locally", lambda _host: bindable)
     monkeypatch.setattr(startup, "inf_available", lambda: inf)
     monkeypatch.setattr(startup, "loopback_inf_path",
                         lambda: pathlib.Path(r"C:\Windows\INF\netloop.inf"))
-    calls = SimpleNamespace(table=[], ips=[])
+    calls = SimpleNamespace(table=[], ips=[], extra=[])
 
-    def record(table):
+    def record(table, extra=()):
         calls.table.append(table)
+        calls.extra.append(list(extra))
         if apply is not None:
             return apply(table)
         return 0, ([f"已配 {len(ledger)} 个地址"] if ledger else ["已一致，无需改动"])
@@ -94,7 +96,7 @@ def _forbid_system(monkeypatch):
     """任何一次系统读都当场炸：用来证明"这条路真的没碰机器"。"""
     def boom(*args, **kwargs):
         raise AssertionError("这一步不许碰系统")
-    for name in ("read_adapters", "read_addresses", "read_all_addresses"):
+    for name in ("read_adapters", "read_all_addresses"):
         monkeypatch.setattr(startup, name, boom)
 
 
@@ -112,25 +114,38 @@ def _project(host: str, *, name: str = "tcp-5020", port: int = 5020) -> Project:
     return Project(channels=[TcpChannel(name=name, host=host, port=port)])
 
 
-def test_an_address_already_on_this_machine_is_checked_without_reading_the_system(
+def test_a_verified_address_is_checked_without_reading_the_system(
         tmp_path, monkeypatch):
-    """地址已在本机：**毫秒级 bind 一下就够了**——不读系统、不起 PowerShell、不提权。
+    """完整核对过专用网卡之后，重复启动只做 bind 探针，不再跑 PowerShell。"""
+    _install(monkeypatch, bindable=True,
+             addresses=[Address("10.99.99.99", 24, 20, MANUAL)],
+             ledger={OURS_GUID}, owned={"10.99.99.99"})
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    first = startup.prepare(table, project=_project("10.99.99.99"))
+    assert any("网络已就绪" in line for line in first), first
 
-    现场（2026-10-19）：界面上点「启动」每次都跑一遍 PowerShell 读网卡，窗口版会闪 cmd 并卡
-    1~3 秒，而绝大多数时候地址早就配好了。快路只用一次 bind 探针（端口 0），成本与"读一个
-    本地地址"同级，也不会弹任何窗口。
-    """
     _forbid_system(monkeypatch)                       # 任何一次系统读都当场炸
-    monkeypatch.setattr(startup, "_binds_locally", lambda host: True)
 
     def refuse(*_args):
-        raise AssertionError("地址已在本机，不该去提权/跑 net up")
+        raise AssertionError("地址已核对过，不该去提权/跑 net up")
 
     monkeypatch.setattr(startup, "apply_up_ips", refuse)
+    second = startup.prepare(table, project=_project("10.99.99.99"))
+    assert any("网络已就绪" in line for line in second), second
+
+
+def test_an_address_on_another_adapter_is_not_reported_as_ready(
+        tmp_path, monkeypatch):
+    """地址在 WLAN 上也能 bind，但那不等于"专用网卡已就绪"。"""
+    called = _install(monkeypatch, adapters=[OURS, WLAN], bindable=True,
+                      elsewhere=[Address("10.99.99.99", 24, 4, MANUAL)])
     table = tmp_path / "t.csv"
     table.write_text("x", encoding="utf-8")
     lines = startup.prepare(table, project=_project("10.99.99.99"))
-    assert len(lines) == 1 and "已在本机网卡上" in lines[0], lines
+    assert any("WLAN" in line for line in lines), lines
+    assert not any("已在本机网卡上" in line for line in lines), lines
+    assert called.ips == [], called.ips
 
 
 def test_a_concrete_host_without_a_declaration_is_put_on_the_dedicated_nic(
@@ -257,7 +272,7 @@ def test_a_broken_declaration_is_one_line_not_a_crash(tmp_path, monkeypatch):
 
 def test_ready_network_is_reported_and_nothing_is_applied(tmp_path, monkeypatch):
     """机器上别的网卡有一堆地址是常态，不能因此判成"对不上"、更不能去提权。"""
-    called = _install(monkeypatch,
+    called = _install(monkeypatch, bindable=True,
                       addresses=[Address("10.0.0.1", 24, 20, MANUAL)],
                       elsewhere=[Address("192.168.1.5", 24, 4, MANUAL)],
                       ledger={OURS_GUID}, owned={"10.0.0.1"})
@@ -267,7 +282,7 @@ def test_ready_network_is_reported_and_nothing_is_applied(tmp_path, monkeypatch)
 
 
 def test_a_ready_network_can_be_previewed_without_touching_anything(tmp_path, monkeypatch):
-    called = _install(monkeypatch,
+    called = _install(monkeypatch, bindable=True,
                       addresses=[Address("10.0.0.1", 24, 20, MANUAL)],
                       ledger={OURS_GUID}, owned={"10.0.0.1"})
     assert startup.prepare(_declare(tmp_path), apply=False)[0].startswith("网络已就绪")
@@ -460,6 +475,101 @@ def test_gui_entry_shows_the_network_line_in_the_status_bar(qapp, monkeypatch):
         session.shutdown()
 
 
+
+# ---------- 2026-10-19 第二批修复 ----------
+
+def test_a_declaration_does_not_hide_a_changed_concrete_host(tmp_path, monkeypatch):
+    """有 `.net.json` 时，通道 host 改了也必须参与配网。
+
+    声明是设备地址的来源，但通道 host 是模拟器真正的监听地址；两条来源取并集，
+    否则界面上改了 host、声明还是旧 IP，启动必然 bind 失败。
+    """
+    from simbench.project.model import Device, Point
+
+    table = _declare(tmp_path)
+    project = Project(channels=[TcpChannel(
+        "tcp-1", host="10.0.0.2", port=5020,
+        devices=[Device("风机-1", 11, [Point("x", "hr", 0, "uint16", initial="1")])])])
+    called = _install(monkeypatch, ledger={OURS_GUID},
+                      apply=lambda table: (0, ["已配 2 个地址"]))
+    lines = startup.prepare(table, project=project)
+    assert called.table == [table], called.table
+    assert called.extra == [["10.0.0.2"]], called.extra
+    assert any("通道 host 另需" in line for line in lines), lines
+
+
+def test_udp_and_s7_concrete_hosts_are_not_ignored():
+    """所有有 host:port 的传输都要收集，不只是 TCP。"""
+    from simbench.project.model import S7Channel
+
+    project = Project(channels=[
+        TcpChannel("udp-1", host="10.0.0.10", port=5020, type="udp"),
+        S7Channel("s7-1", host="10.0.0.11", port=102),
+        TcpChannel("tcp-1", host="0.0.0.0", port=5020),
+    ])
+    hosts = {(name, host) for name, host, _port, _transport in startup._concrete_hosts(project)}
+    assert hosts == {("udp-1", "10.0.0.10"), ("s7-1", "10.0.0.11")}, hosts
+    assert startup.required_addresses(None, project) == ["10.0.0.10", "10.0.0.11"]
+
+
+def test_a_hostname_is_reported_not_sent_to_net_up(tmp_path, monkeypatch):
+    """validate 允许主机名，但自动配网只认 IPv4；不能拿主机名去弹 UAC。"""
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    called = _install(monkeypatch)
+    lines = startup.prepare(table, project=_project("plc.local"))
+    assert called.table == [] and called.ips == [], (called.table, called.ips)
+    assert any("不是 IPv4 字面量" in line for line in lines), lines
+
+
+def test_repeated_prepare_uses_the_verified_fast_path(tmp_path, monkeypatch):
+    """一次完整核对成功后，重复点启动不再跑 PowerShell（只留便宜的 bind 探针）。"""
+    called = _install(monkeypatch, bindable=True,
+                      addresses=[Address("10.0.0.1", 24, 20, MANUAL)],
+                      ledger={OURS_GUID}, owned={"10.0.0.1"})
+    table = _declare(tmp_path)
+    first = startup.prepare(table)
+    assert first == [f"网络已就绪：{OURS.label}（1 个地址）"], first
+
+    def boom():
+        raise AssertionError("已核对过的地址不该再读系统")
+    monkeypatch.setattr(startup, "read_adapters", boom)
+    monkeypatch.setattr(startup, "read_all_addresses", boom)
+    second = startup.prepare(table)
+    assert second == [f"网络已就绪：{OURS.label}（1 个地址）"], second
+    assert called.table == []
+
+
+def test_clean_but_unbindable_is_not_reported_ready(tmp_path, monkeypatch):
+    """地址在 Get-NetIPAddress 里、但还不能 bind：不许报"已就绪"然后让启动失败。"""
+    called = _install(monkeypatch, bindable=False,
+                      addresses=[Address("10.0.0.1", 24, 20, MANUAL)],
+                      ledger={OURS_GUID}, owned={"10.0.0.1"})
+    lines = startup.prepare(_declare(tmp_path))
+    joined = "\n".join(lines)
+    assert "网络尚未就绪" in joined and "当前不能监听" in joined, lines
+    assert called.table == [], "地址已经齐了，不该再提权"
+
+
+def test_required_addresses_is_the_union_of_declaration_and_hosts(tmp_path):
+    from simbench.project.model import Device, Point
+
+    table = _declare(tmp_path)
+    project = Project(channels=[TcpChannel(
+        "tcp-1", host="10.0.0.2", port=5020,
+        devices=[Device("风机-1", 11, [Point("x", "hr", 0, "uint16", initial="1")])])])
+    assert startup.required_addresses(table, project) == ["10.0.0.1", "10.0.0.2"]
+
+
+def test_host_only_apply_keeps_stale_addresses(monkeypatch):
+    """`apply_up_ips` 必须带 `--keep-stale`：通道 host 不能收回别人的地址。"""
+    from simbench.net import cli as net_cli
+
+    seen = {}
+    monkeypatch.setattr(net_cli, "main", lambda argv: seen.update(argv=argv) or 0)
+    startup.apply_up_ips(["10.0.0.9"], wait=0)
+    assert seen["argv"] == ["up", "--ip", "10.0.0.9", "--keep-stale"], seen
+
 # ---------- `net device create` 的提权：两段式子命令 ----------
 
 def test_device_create_relaunches_with_both_subcommand_words(monkeypatch, tmp_path):
@@ -523,3 +633,106 @@ def test_check_reads_the_companion_declaration(tmp_path, monkeypatch, capsys):
                          "--ledger", str(tmp_path / "none.json")])
     assert code == 2, "有差异时 check 该回 2（脚本里当「需要处理」用）"
     assert "10.0.0.9" in capsys.readouterr().out
+
+def test_a_disabled_managed_adapter_is_still_sent_through_net_up(tmp_path, monkeypatch):
+    """地址齐了但网卡是 Disabled：仍要跑一次 net up（它会先启用专用网卡）。"""
+    disabled = Adapter(name=MANAGED_ADAPTER_NAME, description="Microsoft KM-TEST 环回适配器",
+                       if_index=20, guid=OURS_GUID, status="Disabled", mac="",
+                       pnp_device_id=r"ROOT\NET\0001")
+    called = _install(monkeypatch, adapters=[disabled], bindable=False,
+                      addresses=[Address("10.0.0.1", 24, 20, MANUAL)],
+                      ledger={OURS_GUID}, owned={"10.0.0.1"},
+                      apply=lambda table: (0, ["已启用专用网卡"]))
+    lines = startup.prepare(_declare(tmp_path))
+    assert called.table, "网卡禁用时没有走 net up"
+    assert any("已启用专用网卡" in line for line in lines), lines
+
+def test_status_previews_a_host_only_project(tmp_path, monkeypatch):
+    """没有声明但通道 host 是具体 IP：网络页也要能看到差异，而不是只说"没有声明"。"""
+    _install(monkeypatch)
+    table = tmp_path / "t.csv"
+    table.write_text("x", encoding="utf-8")
+    lines = startup.status(table, project=_project("10.99.99.99"))
+    joined = "\n".join(lines)
+    assert "按通道 host" in joined and "10.99.99.99" in joined, lines
+
+def test_a_declaration_without_matching_devices_does_not_hide_the_host(tmp_path, monkeypatch):
+    """声明在、但其中没有挂到 socket 通道的设备：只配通道 host，不把整份声明再灌一遍。"""
+    called = _install(monkeypatch)
+    project = Project(channels=[TcpChannel("tcp-1", host="10.0.0.9", port=5020)])
+    lines = startup.prepare(_declare(tmp_path), project=project)
+    assert called.ips == [["10.0.0.9"]], called.ips
+    assert called.table == [], called.table
+    assert any("10.0.0.9" in line for line in lines), lines
+
+def test_a_partial_apply_still_waits_for_the_addresses(monkeypatch):
+    """`net up` 回 2（部分成功）时也不能跳过 bind 等待：已经加上的地址同样要等它生效。"""
+    from simbench.net import cli as net_cli
+
+    monkeypatch.setattr(net_cli, "main", lambda argv: print("[net] 已配 1 个") or 2)
+    calls = {"n": 0}
+
+    def flips(_host):
+        calls["n"] += 1
+        return calls["n"] >= 2
+
+    monkeypatch.setattr(startup, "_binds_locally", flips)
+    code, lines = startup.apply_up_ips(["10.0.0.9"], wait=0.5)
+    assert code == 2
+    assert calls["n"] >= 2, calls
+    assert not any("还没生效" in line for line in lines), lines
+
+
+def test_gui_entry_shows_the_window_before_network_prepare(qapp, monkeypatch):
+    """双击带点表的工程时先把窗口显示出来，再跑 UAC/PowerShell。"""
+    from simbench.gui import app as app_module
+
+    order = []
+    real_show = app_module.MainWindow.show
+
+    def show(self):
+        order.append("show")
+        return real_show(self)
+
+    monkeypatch.setattr(app_module.MainWindow, "show", show)
+    monkeypatch.setattr(startup, "prepare", lambda *a, **k: order.append("net") or [])
+    _app, window, session = app_module.build_app([CSV])
+    try:
+        assert order[:2] == ["show", "net"], order
+    finally:
+        window.timer.stop()
+        window.deleteLater()
+        session.shutdown()
+
+def test_net_run_does_not_swallow_other_threads_output(monkeypatch, capsys):
+    """回归：`_run_net` 只能截获本线程的输出，不能像 redirect_stdout 那样吞掉别的线程。"""
+    import sys
+    import threading
+
+    from simbench.net import cli
+
+    other_done = threading.Event()
+    release = threading.Event()
+
+    def fake_main(argv):
+        print("[net] from-worker")
+        # 在 net 子命令还没结束时，另一个线程照常往 stdout 写
+        def other():
+            print("OTHER-THREAD-LINE", flush=True)
+            other_done.set()
+        t = threading.Thread(target=other)
+        t.start()
+        t.join(5)
+        release.set()
+        return 0
+
+    monkeypatch.setattr(cli, "main", fake_main)
+    code, lines = startup._run_net(["show"])
+    assert code == 0
+    assert lines == ["from-worker"]
+    assert other_done.is_set()
+    # 另一个线程的输出必须落到真正的 stdout，而不是被吞进 net 的缓冲
+    assert "OTHER-THREAD-LINE" in capsys.readouterr().out
+    # 结束之后本线程也恢复直通
+    print("AFTER")
+    assert "AFTER" in capsys.readouterr().out

@@ -1025,3 +1025,46 @@ def test_the_window_shuts_its_session_down_only_once(window, monkeypatch):
     window.close()
     window.close()
     assert calls == [1], calls
+
+def test_a_second_start_click_is_ignored_while_the_first_is_waiting(make_window, monkeypatch):
+    """模态框出现前的 250ms 内也可能排进第二次点击；不能叠出两次启动。"""
+    import time
+
+    window = make_window()
+    calls = []
+
+    def slow_start():
+        calls.append(1)
+        time.sleep(0.1)
+        return []
+
+    monkeypatch.setattr(window.session, "start_all", slow_start)
+    QtCore.QTimer.singleShot(10, window._start_all)
+    window._start_all()
+    assert calls == [1], calls
+
+def test_start_all_reports_an_unbindable_address_before_starting(make_window, monkeypatch):
+    """网络层说"配置完了"不等于现在能监听；启动前最后一道门要留下具体原因。"""
+    window = make_window()
+    monkeypatch.setattr(main_window_module.net_startup, "prepare",
+                        lambda *a, **k: [])
+    monkeypatch.setattr(main_window_module.net_startup, "required_addresses",
+                        lambda *a, **k: ["10.9.9.9"])
+    monkeypatch.setattr(main_window_module.net_startup, "wait_until_bindable",
+                        lambda *a, **k: ["10.9.9.9"])
+    monkeypatch.setattr(main_window_module.net_startup, "describe_unbindable",
+                        lambda addresses: ["网卡当前是 Disabled"])
+    monkeypatch.setattr(window.session, "start_all", lambda: [])
+    window._start_all()
+    text = window.log_view.toPlainText()
+    assert "启动前检查" in text and "网卡当前是 Disabled" in text, text
+
+def test_start_all_result_is_not_overwritten_by_the_network_line(make_window, monkeypatch):
+    window = make_window()
+    monkeypatch.setattr(main_window_module.net_startup, "prepare",
+                        lambda *a, **k: ["网络已就绪：模拟网卡（1 个地址）"])
+    monkeypatch.setattr(main_window_module.net_startup, "required_addresses",
+                        lambda *a, **k: [])
+    monkeypatch.setattr(window.session, "start_all", lambda: [])
+    window._start_all()
+    assert window.status.currentMessage() == "全部启动完成", window.status.currentMessage()

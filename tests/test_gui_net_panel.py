@@ -27,8 +27,8 @@ def net(monkeypatch):
     calls = {"status": [], "apply": []}
     monkeypatch.setattr(net_panel_module.net_startup, "status",
                         lambda source, project: calls["status"].append(source) or ["（桩）"])
-    monkeypatch.setattr(net_panel_module.net_startup, "apply_up",
-                        lambda source: calls["apply"].append(source) or (0, ["已应用"]))
+    monkeypatch.setattr(net_panel_module.net_startup, "apply_for_start",
+                        lambda source, project: calls["apply"].append(source) or (0, ["已应用"]))
     return calls
 
 
@@ -68,7 +68,8 @@ def test_apply_runs_net_up_and_tells_the_status_bar(net, panel):
 
 
 def test_apply_reports_a_quiet_success(monkeypatch, net, panel):
-    monkeypatch.setattr(net_panel_module.net_startup, "apply_up", lambda source: (0, []))
+    monkeypatch.setattr(net_panel_module.net_startup, "apply_for_start",
+                        lambda source, project: (0, []))
     panel.session.load(panel.session.project, source="p.csv")
     said = []
     panel.notice.connect(said.append)

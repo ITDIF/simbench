@@ -40,13 +40,15 @@ def busy(text: str, window: QtWidgets.QWidget | None = None) -> Iterator[None]:
     status = getattr(target, "status", None) if target is not None else None
     previous = status.currentMessage() if status is not None else ""
     QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
-    if status is not None:
-        status.showMessage(text)
-    # 先刷一次界面，否则光标/文案要等阻塞结束才出现（那就等于没有动画）。
-    app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
     try:
+        if status is not None:
+            status.showMessage(text)
+        # 先刷一次界面，否则光标/文案要等阻塞结束才出现（那就等于没有动画）。
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         yield
     finally:
+        # processEvents 本身也可能抛（某个槽函数出错），所以 setOverrideCursor 之后
+        # 的所有动作都必须在 try 里，保证光标一定还原。
         QtWidgets.QApplication.restoreOverrideCursor()
         if status is not None and status.currentMessage() == text:
             status.showMessage(previous)

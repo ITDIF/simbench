@@ -9,9 +9,9 @@
 - **文字进只读文本框**，不进会自动换行的标签：标签一换行就改高度，布局恒等那几条断言
   立刻红（用户口径 3/4）；
 - **刷新只读**：走 `net/startup.status()`，一条系统调用都不写，随便点；
-- **应用要提权**，走 `net up` 那条路（缺权限时弹一次 UAC）。它会**挡住界面**到 UAC 结束
-  ——比丢进后台线程好：那样子进程的输出没人接，用户只看到一个突然出现的弹框，成功失败
-  都不知道。收回地址（`net clean`）不放在这里：那是要人逐条确认的动作，留在命令行。
+- **应用要提权**，走 `net up` 那条路（缺权限时弹一次 UAC）。它和启动动作一样放到后台，
+  界面用模态进度框挡住输入但仍能重绘；收回地址（`net clean`）不放在这里：那是要人逐条
+  确认的动作，留在命令行。
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from PySide6 import QtCore, QtWidgets
 
 from ..net import startup as net_startup
 from . import theme
+from .background import run_waiting
 
 
 class NetPanel(QtWidgets.QWidget):
@@ -46,6 +47,7 @@ class NetPanel(QtWidgets.QWidget):
         layout.addLayout(buttons)
         self.refresh_button.clicked.connect(self.refresh)
         self.apply_button.clicked.connect(self.apply)
+        self._operation_busy = False
         # 起手**不读系统**：读一次网卡现状是几次 PowerShell（秒级），而多数人根本不会打开
         # 这一页。先在页里说明白，切进来或点刷新时再去读（`MainWindow._on_tab_changed`）。
         self.view.setPlainText("还没有读过系统：点「刷新」，或切到本页时自动读一次。")
@@ -53,9 +55,18 @@ class NetPanel(QtWidgets.QWidget):
     def _say(self, lines) -> None:
         self.view.setPlainText("\n".join(lines))
 
+    def _read_status(self) -> list[str]:
+        return net_startup.status(self.session.source, self.session.project)
+
     def refresh(self) -> None:
         """只读对账，写进文本框。总闸关着也照样看（口径见 `net/startup.status`）。"""
-        self._say(net_startup.status(self.session.source, self.session.project))
+        if self._operation_busy:
+            return
+        self._operation_busy = True
+        try:
+            self._say(run_waiting(self.window(), "正在读取网络…", self._read_status))
+        finally:
+            self._operation_busy = False
 
     def apply(self) -> None:
         """"应用"= 跑一次 `net up`：建专用网卡（没有就建）+ 把缺的地址配上。"""
@@ -63,14 +74,21 @@ class NetPanel(QtWidgets.QWidget):
         if not source:
             self.notice.emit("没有工程路径：先打开或保存一份点表，网络才知道按哪份声明配")
             return
-        self.notice.emit("正在准备网络（若弹出 UAC，请确认）…")
-        # 先把上面那句话画出来再阻塞：否则 UAC 弹出来时界面还是上一帧，看着像卡死
-        QtWidgets.QApplication.processEvents()
-        code, lines = net_startup.apply_up(source)
-        self.refresh()
-        if lines:
-            self.notice.emit(lines[-1])
-        elif code:
-            self.notice.emit("网络没配好，原因见网络页")
-        else:
-            self.notice.emit("网络已一致，无需改动")
+        if self._operation_busy:
+            return
+        self._operation_busy = True
+        try:
+            self.notice.emit("正在准备网络（若弹出 UAC，请确认）…")
+            code, lines = run_waiting(
+                self.window(), "正在准备网络…",
+                lambda: net_startup.apply_for_start(source, self.session.project))
+            # 应用之后按新现状刷新。不能调 self.refresh()：那会被 _operation_busy 挡掉。
+            self._say(run_waiting(self.window(), "正在读取网络…", self._read_status))
+            if lines:
+                self.notice.emit(lines[-1])
+            elif code:
+                self.notice.emit("网络没配好，原因见网络页")
+            else:
+                self.notice.emit("网络已一致，无需改动")
+        finally:
+            self._operation_busy = False

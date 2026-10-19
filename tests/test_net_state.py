@@ -86,6 +86,15 @@ def test_prefix_origin_numbers_map_to_manual_and_system():
     assert len(addresses) - len(manual) == 2
 
 
+def test_address_state_is_kept_for_diagnostics():
+    """地址在列表里但绑不上时，Tentative/Duplicate 是唯一能解释原因的系统信息。"""
+    addresses = parse_addresses(json.dumps([
+        {"InterfaceIndex": 15, "IPAddress": "10.136.107.3",
+         "PrefixLength": 24, "PrefixOrigin": MANUAL, "AddressState": "Tentative"},
+    ]))
+    assert addresses[0].state == "Tentative"
+
+
 def test_broken_json_and_missing_fields_are_human_errors():
     with pytest.raises(NetError, match="不是合法 JSON"):
         parse_adapters("{not json")

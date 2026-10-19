@@ -36,6 +36,7 @@ from ..engine.session import Session
 from ..net import startup as net_startup
 from ..project.validate import error_lines
 from . import theme
+from .background import run_waiting
 from .main_window import MainWindow
 
 
@@ -54,7 +55,9 @@ def _prepare_network(window, point_table: str) -> None:
     """
     # 把工程一起交下去：自动配网要按**通道类型**过滤（纯串口工程不配设备 IP，见
     # `net/startup._tcp_endpoints`），不传的话那条判据只能看见声明文件。
-    lines = net_startup.prepare(point_table, project=window.session.project)
+    lines = run_waiting(
+        window, "正在准备网络…",
+        lambda: net_startup.prepare(point_table, project=window.session.project))
     for line in lines:
         print(f"[net] {line}", flush=True)
         # 无控制台的 exe（`pythonw` / `simbench-gui.exe`）里 stdout 是 None，`print` 谁也看不见；
@@ -93,6 +96,9 @@ def build_app(argv: list[str] | None = None):
         window.use_project(project, args[0], notes)
         if error_lines(issues):
             window.status.showMessage(f"{len(error_lines(issues))} 个错误，启动已被阻止")
-        _prepare_network(window, args[0])
+    # 先把窗口显示出来，再做网络准备：UAC/PowerShell 再慢，用户也看得见"程序已经开了"，
+    # 而不是双击后几秒钟什么都没出现。
     window.show()
+    if args:
+        _prepare_network(window, args[0])
     return app, window, session

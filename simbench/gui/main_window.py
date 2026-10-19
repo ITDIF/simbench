@@ -36,6 +36,7 @@ from ..engine.rows_pump import RowsPump
 from ..net import startup as net_startup
 from ..project.validate import error_lines, validate_project
 from . import i18n, icons, messages, theme
+from .background import run_waiting
 from .bridge import EngineBridge
 from .busy import busy
 from .channel_panel import ChannelPanel
@@ -108,7 +109,7 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         self.log_tab = self._build_log_tab(self.log_view)
         # 核对页（主站模式）：只读别人的设备，自己一个端口都不监听（E1）
         self.verify_panel = VerifyPanel(session)
-        self.channels = ChannelPanel(session, before_start=self._prepare_network_before_start)
+        self.channels = ChannelPanel(session, before_start=self._network_prepare_for_start)
         self.net_panel = NetPanel(session)
         self.tabs: QtWidgets.QTabWidget
         self.splitter: QtWidgets.QSplitter
@@ -121,6 +122,9 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         self._dirty_shown = False
         self._shown_error = ""
         self._confirming = False
+        # 同一时间只允许一个后台启动/停止/网络动作；模态进度框出现前的 250ms 内
+        # 也可能有第二次点击排进事件队列，这个闸门把它挡掉。
+        self._operation_busy = False
         self._next_collect = time.monotonic() + _GC_EVERY_S
 
         self.setCentralWidget(self._build_layout())
@@ -441,59 +445,109 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
 
     # ---------- 动作 ----------
 
-    def _prepare_network_before_start(self) -> None:
-        """启动前把"通道 host 是具体 IP"的那些地址配到专用网卡上（2026-10-19 现场反馈）。
+    def _network_prepare(self) -> list[str]:
+        """纯网络准备：只读工程/声明并调用网络层，**不碰 widget**。
 
-        为什么在这里：`gui/app.build_app` 只在**带点表参数开界面**时跑一次启动挂钩；而现场常常
-        是先开界面、再打开点表、再在通道行里改 host——那条路原先一次网络准备都没有，点"启动"
-        只会得到 bind 失败（看到的就是"换了个 IP 起不来"）。
-
-        只对具体 IP 的 host 动系统（`0.0.0.0` / `127.0.0.1` 走不到这一步，一次系统读都不发）；
-        没有声明时用 `net up --ip`，有声明时仍走声明那条。网络这一步**永远不拦启动**：它自己的
-        异常已经全在 `net/startup.py` 里收成几行话，这里只把它们写进日志与状态栏。
+        它可能在主线程被 `run_waiting` 的工作线程调用；主窗只负责把返回的几行
+        搬到日志/状态栏。这样网络层可以安全地在后台跑 UAC、PowerShell 和 bind 等待。
         """
         source = self.session.source
-        lines = (net_startup.prepare(source, project=self.session.project)
-                 if source else net_startup.prepare_project(self.session.project))
+        return (net_startup.prepare(source, project=self.session.project)
+                if source else net_startup.prepare_project(self.session.project))
+
+    def _network_prepare_for_start(self) -> list[str]:
+        """启动前的网络准备 + 最终 bind 门（纯动作，不碰 widget）。
+
+        声明/通道 host 都可能刚配好但还没生效。这里在启动前再确认一次；仍然不能监听时
+        把具体原因写进返回行，再照常启动（网络失败不拦启动，但不再静默）。
+        """
+        lines = self._network_prepare()
+        required = net_startup.required_addresses(self.session.source, self.session.project)
+        if required:
+            pending = net_startup.wait_until_bindable(required, timeout=2.0)
+            if pending:
+                lines = [*lines, "启动前检查：以下地址仍不能监听",
+                         *net_startup.describe_unbindable(pending)]
+        return lines
+
+    def _show_network_lines(self, lines: list[str], *, status: bool = False) -> None:
         for line in lines:
             self._log(f"[net] {line}")
-        if lines:
+        if status and lines:
             self.status.showMessage(_one_line(lines[0]), _NOTICE_MS)
 
     def _start_all(self) -> None:
-        with busy("正在启动通道…"):
-            self._prepare_network_before_start()
-            self._start_all_now()
-
-    def _start_all_now(self) -> None:
+        """全部启动：网络准备 + 引擎启动都在后台，返回时两件事都已完成。"""
+        if self._operation_busy:
+            return
+        self._operation_busy = True
         try:
-            failures = self.session.start_all()
+            def work():
+                lines = self._network_prepare_for_start()
+                try:
+                    failures = self._start_all_now()
+                except Exception as exc:            # noqa: BLE001
+                    return lines, [], exc
+                return lines, failures, None
+
+            lines, failures, error = run_waiting(self, "正在启动通道…", work)
+            self._show_network_lines(lines or [])
+            self._finish_start(failures, error)
         except Exception as exc:                    # noqa: BLE001
-            # 槽函数里抛出去等于在 Qt 事件循环里炸，表现成"点了没反应"。这里不吞：
-            # 异常类名和消息整段进日志，状态栏给一句能读的。
             self._log(f"[error] 全部启动异常：{type(exc).__name__}: {exc}")
+            self.status.showMessage("全部启动异常，原因见日志页", _NOTICE_MS)
+        finally:
+            self._operation_busy = False
+
+    def _start_all_now(self) -> list[str]:
+        return self.session.start_all()
+
+    def _finish_start(self, failures: list[str], error: Exception | None) -> None:
+        if error is not None:
+            self._log(f"[error] 全部启动异常：{type(error).__name__}: {error}")
             self.status.showMessage("全部启动异常，原因见日志页", _NOTICE_MS)
             return
         for message in failures:
             # 只在树上变个红符号是不够的：操作员要看见"为什么"，一次报全和 CLI 同口径
             self._log(f"[error] {message}")
             self.status.showMessage(_one_line(message), _NOTICE_MS)
+        if not failures:
+            self.status.showMessage("全部启动完成", _NOTICE_MS)
 
     def _stop_all(self) -> None:
-        with busy("正在停止通道…"):
-            self._stop_all_now()
-
-    def _stop_all_now(self) -> None:
+        """全部停止：启停动作同样放到后台，窗口在等待期间保持响应。"""
+        if self._operation_busy:
+            return
+        self._operation_busy = True
         try:
-            failures = self.session.stop_all()
+            def work():
+                try:
+                    return self._stop_all_now(), None
+                except Exception as exc:            # noqa: BLE001
+                    return [], exc
+
+            failures, error = run_waiting(self, "正在停止通道…", work)
+            self._finish_stop(failures, error)
         except Exception as exc:                    # noqa: BLE001
             self._log(f"[error] 全部停止异常：{type(exc).__name__}: {exc}")
+            self.status.showMessage("全部停止异常，原因见日志页", _NOTICE_MS)
+        finally:
+            self._operation_busy = False
+
+    def _stop_all_now(self) -> list[str]:
+        return self.session.stop_all()
+
+    def _finish_stop(self, failures: list[str], error: Exception | None) -> None:
+        if error is not None:
+            self._log(f"[error] 全部停止异常：{type(error).__name__}: {error}")
             self.status.showMessage("全部停止异常，原因见日志页", _NOTICE_MS)
             return
         for message in failures:
             # 关不掉的通道要说得出名字和原因：只把那一格标红，操作员看不出端口还占着
             self._log(f"[error] {message}")
             self.status.showMessage(_one_line(message), _NOTICE_MS)
+        if not failures:
+            self.status.showMessage("全部停止完成", _NOTICE_MS)
 
     def _check(self) -> None:
         # 已定口径：这里不许写 `self.session.project and validate(...)` 那种无意义表达式

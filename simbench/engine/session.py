@@ -264,8 +264,9 @@ class Session(ReadMixin, WriteMixin):
 
     def start_channel(self, name: str) -> None:
         runtime, channel = self._require(name)
-        if runtime.running:
-            return
+        with self._lock:
+            if runtime.running:
+                return
         # 启动门槛：一次报全，不过就不起。挤牙膏式"改一个错报一个错"在现场是纯损耗，
         # 而"带着错点表起来"更糟——主站读到的是一个半成品设备，没人会怀疑模拟器。
         issues = validate_project(self._project)
@@ -299,11 +300,13 @@ class Session(ReadMixin, WriteMixin):
             runtime.last_error = str(exc)
             self._publish(ChannelState(name, "error", str(exc)))
             raise
-        runtime.backend = backend
-        runtime.running = True
-        runtime.detail = _detail(backend)
-        runtime.last_error = ""
-        self._publish(ChannelState(name, "running", runtime.detail))
+        with self._lock:
+            runtime.backend = backend
+            runtime.running = True
+            runtime.detail = _detail(backend)
+            runtime.last_error = ""
+            detail = runtime.detail
+        self._publish(ChannelState(name, "running", detail))
 
     def stop_channel(self, name: str) -> None:
         runtime, _ = self._require(name)
@@ -449,19 +452,22 @@ class Session(ReadMixin, WriteMixin):
         只剩重启进程一条路；留着句柄，他再点一次"停止"还能真的关掉。
         """
         if runtime.backend is None:
-            runtime.running = False
-            runtime.detail = ""
+            with self._lock:
+                runtime.running = False
+                runtime.detail = ""
             return True
         try:
             self._runner.call(lambda: runtime.backend.stop(), _STOP_TIMEOUT,
                               f"stop channel {runtime.name}")
         except Exception as exc:                # noqa: BLE001
-            runtime.last_error = str(exc)
+            with self._lock:
+                runtime.last_error = str(exc)
             return False
-        runtime.backend = None
-        runtime.running = False
-        runtime.detail = ""
-        runtime.last_error = ""
+        with self._lock:
+            runtime.backend = None
+            runtime.running = False
+            runtime.detail = ""
+            runtime.last_error = ""
         return True
 
     def _rebuild_index_locked(self) -> None:

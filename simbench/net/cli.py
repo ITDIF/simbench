@@ -557,6 +557,7 @@ def _cmd_up(args) -> int:
                                              "net_file": args.net_file,
                                              "point_table": getattr(args, "point_table", None),
                                              "adapter_name": getattr(args, "adapter_name", MANAGED_ADAPTER_NAME),
+                                             "keep_stale": getattr(args, "keep_stale", False),
                                              "ledger": args.ledger})
         for line in payload.get("lines", []):
             print(f"[net] {line}")
@@ -572,14 +573,27 @@ def _cmd_up(args) -> int:
         if adapter is None:
             raise NetError("网卡创建后没有找到它；请用 `net device show` 看现场")
 
+    if not adapter.up:
+        # 网卡禁用/断开时地址可能加得上去，却永远不能监听。这是专用网卡，启用它是安全的。
+        lines.append(f"{adapter.name} 当前状态是 {adapter.status}，先启用它")
+        try:
+            run_powershell(f"Enable-NetAdapter -InterfaceIndex {adapter.if_index} "
+                           f"-Confirm:$false")
+            refreshed = find_managed_adapter(read_adapters(), ledger.owned_adapter_guids())
+            if refreshed is not None:
+                adapter = refreshed
+        except NetError as exc:
+            lines.append(f"启用网卡失败：{exc}")
+
     wanted = dict(desired)
     names = {a.if_index: a.name for a in read_adapters()}
     owners = {addr.ip: names.get(addr.if_index, f"ifIndex {addr.if_index}")
               for addr in read_all_addresses() if addr.if_index != adapter.if_index}
     blocked = sorted(foreign_owners(desired, owners))
 
+    owned = set() if getattr(args, "keep_stale", False) else ledger.owned(adapter.guid)
     plan = plan_addresses(adapter.label, desired,
-                          read_addresses(adapter.if_index), ledger.owned(adapter.guid))
+                          read_addresses(adapter.if_index), owned)
     # 已被别的网卡占用的不许去试：试了必然失败，还会报出两句互相矛盾的话
     to_add = [ip for ip in plan.to_add if ip not in owners]
     if to_add:
@@ -686,6 +700,8 @@ def main(argv: list[str]) -> int:
                            help="点表；用旁边的 x.net.json 作为地址来源")
         child.add_argument("--dry-run", action="store_true",
                            help="只说要做什么，不改系统")
+        child.add_argument("--keep-stale", action="store_true",
+                           help="只加地址，不收回账本里旧的地址（通道 host 那条路）")
         child.add_argument("--result", default=None, help=argparse.SUPPRESS)
         child.add_argument("--elevated", action="store_true", help=argparse.SUPPRESS)
         child.add_argument("--job", default=None, help=argparse.SUPPRESS)
@@ -703,6 +719,7 @@ def main(argv: list[str]) -> int:
         args.ip_file = job.get("ip_file", getattr(args, "ip_file", None))
         args.net_file = job.get("net_file", getattr(args, "net_file", None))
         args.point_table = job.get("point_table", getattr(args, "point_table", None))
+        args.keep_stale = job.get("keep_stale", getattr(args, "keep_stale", False))
         args.adapter_name = job.get("adapter_name", getattr(args, "adapter_name", ""))
         args.device_instance = job.get("device_instance",
                                        getattr(args, "device_instance", ""))

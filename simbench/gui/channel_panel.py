@@ -26,7 +26,7 @@ from PySide6 import QtGui, QtWidgets
 from ..events import ChannelState
 from ..project.model import channel_transport, format_frame, is_serial, parse_frame
 from . import theme
-from .busy import busy
+from .background import run_waiting
 from .channel_state import STATUS_LABELS
 
 # 四态的文案共用一个定宽槽（88px）：主题把正文字号提到 10pt 之后 offscreen 实测最长的
@@ -80,6 +80,7 @@ class ChannelPanel(QtWidgets.QWidget):
         # 中间一大片空白（截图照出来的）。有了它，行内容左对齐、余量在行尾。
         self._grid.setColumnStretch(7, 1)
         self.last_error = ""
+        self._operation_busy = False
 
     # ---------- 结构 ----------
 
@@ -307,40 +308,70 @@ class ChannelPanel(QtWidgets.QWidget):
                           status)
 
     def _start(self, channel: str) -> None:
-        with busy(f"正在启动 {channel}…"):
-            if self._before_start is not None:
-                self._before_start()
-            self._start_now(channel)
+        if self._operation_busy:
+            return
+        self._operation_busy = True
+        try:
+            def work():
+                lines = self._before_start() if self._before_start is not None else []
+                try:
+                    self._start_now(channel)
+                except Exception as exc:            # noqa: BLE001 —— 原样交回主线程
+                    return lines or [], exc
+                return lines or [], None
+
+            lines, error = run_waiting(self.window(), f"正在启动 {channel}…", work)
+            for line in lines:
+                self._session.publish_log("info", f"[net] {line}")
+            if isinstance(error, KeyError):
+                raise error                         # 通道名不在会话里：调用方的 bug
+            if error is not None:
+                self._fail(channel, error)
+                return
+            self.last_error = ""
+            self.set_status(channel, "running")
+        except KeyError:
+            raise
+        except Exception as exc:                    # noqa: BLE001
+            self._fail(channel, exc)
+        finally:
+            self._operation_busy = False
 
     def _start_now(self, channel: str) -> None:
-        try:
-            self._session.start_channel(channel)
-        except KeyError:
-            raise                       # 通道名不在会话里：这是调用方的 bug，不许吞
-        except Exception as exc:        # noqa: BLE001
-            # 类型写错（ValueError）、端口被占（PortInUseError）都落在这里：面板上变红字、
-            # 留下原因、再记一条日志。槽函数里抛出去等于在 Qt 事件循环里炸，表现成"点了没反应"。
-            self.last_error = f"{channel}: {exc}"
-            self._session.publish_log("error", self.last_error)
-            self.set_status(channel, "error")
-            return
-        self.last_error = ""
-        self.set_status(channel, "running")
+        self._session.start_channel(channel)
 
     def _stop(self, channel: str) -> None:
-        with busy(f"正在停止 {channel}…"):
-            self._stop_now(channel)
+        if self._operation_busy:
+            return
+        self._operation_busy = True
+        try:
+            def work():
+                try:
+                    self._stop_now(channel)
+                except Exception as exc:            # noqa: BLE001
+                    return exc
+                return None
+
+            error = run_waiting(self.window(), f"正在停止 {channel}…", work)
+            if error is not None:
+                self._fail(channel, error)
+                return
+            self.last_error = ""
+            self.set_status(channel, "stopped")
+        except Exception as exc:                    # noqa: BLE001
+            self._fail(channel, exc)
+        finally:
+            self._operation_busy = False
 
     def _stop_now(self, channel: str) -> None:
-        try:
-            self._session.stop_channel(channel)
-        except Exception as exc:        # noqa: BLE001
-            self.last_error = f"{channel}: {exc}"
-            self._session.publish_log("error", self.last_error)
-            self.set_status(channel, "error")
-            return
-        self.last_error = ""
-        self.set_status(channel, "stopped")
+        self._session.stop_channel(channel)
+
+    def _fail(self, channel: str, exc: Exception) -> None:
+        # 类型写错（ValueError）、端口被占（PortInUseError）都落在这里：面板上变红字、
+        # 留下原因、再记一条日志。槽函数里抛出去等于在 Qt 事件循环里炸。
+        self.last_error = f"{channel}: {exc}"
+        self._session.publish_log("error", self.last_error)
+        self.set_status(channel, "error")
 
     def _set_enabled(self, channel: str, running: bool) -> None:
         row = self._rows[channel]
