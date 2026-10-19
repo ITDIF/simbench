@@ -87,6 +87,16 @@ def format_for(path) -> Format:
     return found
 
 
+def kind_of(path) -> str | None:
+    """按后缀回格式类别（"table" 点表 / "project" 工程）；不认识回 None。
+
+    菜单里的"工程 / 点表"分组只靠这一条判据：后缀表是唯一登记处，这里不再抄一张
+    .json 清单——以后加第四种格式，分组自动跟着对。
+    """
+    found = _BY_SUFFIX.get(pathlib.Path(path).suffix.lower())
+    return None if found is None else found.kind
+
+
 def read_project(path, *, ports=None, address_offset: int = 0) -> tuple[Project, list[str]]:
     """读一份点表/工程，回 `(Project, notes)`。"""
     return format_for(path).read(pathlib.Path(path), ports=ports,

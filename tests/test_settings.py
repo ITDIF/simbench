@@ -32,12 +32,14 @@ def test_a_missing_file_is_just_the_defaults(tmp_path):
 def test_a_round_trip_keeps_every_field(tmp_path):
     target = tmp_path / "settings.json"
     saved = Settings(theme="dark", geometry="0a0b", window_state="0c0d",
-                     last_dir=r"D:\点表", recent=["a.csv", "b.xlsx"])
+                     last_dir=r"D:\点表", recent=["a.csv", "b.xlsx"],
+                     recent_offsets={"a.csv": -40001})
     assert saved.save(target)
     back = Settings.load(target)
     assert (back.theme, back.geometry, back.window_state, back.last_dir) == \
         ("dark", "0a0b", "0c0d", r"D:\点表")
     assert back.recent == ["a.csv", "b.xlsx"]
+    assert back.recent_offsets == {"a.csv": -40001}
 
 
 def test_a_corrupt_file_is_kept_aside_and_startup_continues(tmp_path):
@@ -64,15 +66,39 @@ def test_saving_is_atomic(tmp_path):
     assert list(tmp_path.glob("*.tmp")) == []
 
 
-def test_recent_is_deduped_newest_first_and_capped(tmp_path):
+def test_recent_is_deduped_newest_first(tmp_path):
+    """第二次打开同一个文件要把它**提到最前**，不是留两份。"""
     saved = Settings()
-    # a、b、a、c、d、e、f：第二次打开 a 要把它**提到最前**（不是留两份），
-    # 于是 b 最先被挤出 5 条之外
-    for name in ["a", "b", "a", "c", "d", "e", "f"]:
+    for name in ["a", "b", "a", "c"]:
         saved.add_recent(tmp_path / name)
-    assert [pathlib.Path(p).name for p in saved.recent] == ["f", "e", "d", "c", "a"]
+    assert [pathlib.Path(p).name for p in saved.recent] == ["c", "a", "b"]
+
+
+def test_recent_is_capped_and_offsets_are_pruned_with_it(tmp_path):
+    """历史只留最近 MAX_RECENT 条；被挤出去的路径，它的偏移也一起删。"""
+    saved = Settings()
+    for index in range(MAX_RECENT + 3):
+        saved.add_recent(tmp_path / f"{index}.csv", offset=index)
     assert len(saved.recent) == MAX_RECENT
-    assert saved.recent[0] == str(tmp_path / "f"), "最新那个不在最前面"
+    assert len(saved.recent_offsets) == MAX_RECENT
+    assert saved.recent[0] == str(tmp_path / f"{MAX_RECENT + 2}.csv"), \
+        "最新那个不在最前面"
+    assert set(saved.recent_offsets) == set(saved.recent)
+
+
+def test_the_import_offset_is_remembered_for_quick_reopen(tmp_path):
+    """40001 风格的点表：从历史里再打开时要按导入时那个偏移读。"""
+    table = tmp_path / "points.csv"
+    saved = Settings()
+    saved.add_recent(table, offset=-40001)
+    assert saved.recent_offset(table) == -40001
+    assert saved.recent_offset(tmp_path / "other.csv") == 0
+
+
+def test_clear_recent_drops_paths_and_offsets(tmp_path):
+    saved = Settings(recent=["a.csv"], recent_offsets={"a.csv": 5})
+    saved.clear_recent()
+    assert saved.recent == [] and saved.recent_offsets == {}
 
 
 def test_recent_ignores_empty_paths():

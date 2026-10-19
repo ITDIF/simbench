@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pathlib
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..project import formats
 from . import icons, theme
 from .dialogs import (
     ProjectFileError,
@@ -79,28 +82,68 @@ class MenuMixin:
         menu.insertAction(self.act_import, self.act_recent.menuAction())
 
     def _rebuild_recent_menu(self) -> None:
-        """现建"最近打开"里那几条（只列**还在**的文件，一个都不在时置灰一条说明）。"""
+        """现建"最近打开"：按 **工程 / 点表** 两组列出，只保留**还在**的文件。
+
+        分组判据来自 project.formats.kind_of()（后缀表的唯一登记处），这里不另抄一份
+        扩展名清单——以后加第四种格式，分组自动跟着对。两个分组**始终都在**（没有条目
+        时给一条置灰的"暂无"），菜单的结构不随用过什么而变。
+
+        菜单每次弹出前现建：开着的时候文件可能被删了/换了；existing_recent() 会把
+        不在了的过滤掉，_open_recent 打不开时也会把死条目摘掉。
+        """
         self.act_recent.clear()
+        self._recent_submenus = []
         if self.settings is None:
-            action = self.act_recent.addAction("（这次没有记住任何文件）")
-            action.setEnabled(False)
+            _disabled(self.act_recent, "（这次没有记住任何文件）")
             return
         paths = self.settings.existing_recent()
         if not paths:
-            action = self.act_recent.addAction("（还没有打开过文件）")
-            action.setEnabled(False)
+            _disabled(self.act_recent, "（还没有打开过文件）")
             return
-        for text in paths:
-            action = self.act_recent.addAction(text)
-            action.triggered.connect(
-                lambda _checked=False, target=text: self._open_recent(target))
+        groups: dict[str, list[str]] = {"project": [], "table": []}
+        for path in paths:
+            kind = formats.kind_of(path)
+            if kind in groups:              # 不认识的格式不往菜单里放（点开也会被拒）
+                groups[kind].append(path)
+        names = [pathlib.Path(path).name for path in paths]
+        # 显式持有子菜单的 Python 引用：QMenu.addMenu() 返回的包装对象一旦被回收，
+        # PySide6 会连带把 C++ 那边的 QMenu 删掉（实测 show() 之后 action.menu()
+        # 立刻变成已删除对象）。引用挂着，菜单才活到下一次 clear()。
+        for title, kind in (("工程", "project"), ("点表", "table")):
+            submenu = QtWidgets.QMenu(title, self.act_recent)
+            self.act_recent.addMenu(submenu)
+            self._recent_submenus.append(submenu)
+            if not groups[kind]:
+                _disabled(submenu, "（暂无）")
+                continue
+            for path in groups[kind]:
+                action = submenu.addAction(_recent_label(path, names))
+                action.setToolTip(path)      # 全路径放悬停提示，菜单文字只留文件名+目录
+                action.triggered.connect(
+                    lambda _checked=False, target=path: self._open_recent(target))
+        self.act_recent.addSeparator()
+        clear = self.act_recent.addAction("清空历史")
+        clear.triggered.connect(self._clear_recent)
+
+    def _clear_recent(self) -> None:
+        """清空历史：路径与导入偏移一起清，并立刻落盘。"""
+        if self.settings is None:
+            return
+        self.settings.clear_recent()
+        self.settings.save()
+        self.status.showMessage("已清空最近打开记录", _NOTICE_MS)
 
     def _open_recent(self, path: str) -> None:
-        """从"最近打开"里打开一份（与"打开工程"同一条路：先问未保存改动）。"""
+        """从"最近打开"里打开一份（与"打开工程"同一条路：先问未保存改动）。
+
+        点表按**导入时那个地址偏移**重读（settings.recent_offset）：否则一份 40001
+        风格的表会按 0 偏移读回来，地址静默变掉。
+        """
         if not self._confirm_discard():
             return
+        offset = self.settings.recent_offset(path) if self.settings is not None else 0
         try:
-            project, notes = read_point_table(path)
+            project, notes = read_point_table(path, offset)
         except ProjectFileError as exc:
             self._log(f"[refused] 打不开 {path}：{exc}")
             self.status.showMessage("这个文件打不开，原因见日志页", _NOTICE_MS)
@@ -108,7 +151,8 @@ class MenuMixin:
             self.settings.recent = [p for p in self.settings.recent if p != path]
             self._remember_settings()
             return
-        self.use_project(project, path, notes=notes)
+        # 把偏移原样传回去：use_project 会重写这条历史，不传就把偏移覆盖成 0 了
+        self.use_project(project, path, notes=notes, recent_offset=offset)
 
     def _toggle_theme(self, _checked: bool = False) -> None:
         """浅色/深色切换。只换颜色——几何一个像素都不动（见 `test_gui_theme.py`）。
@@ -127,3 +171,17 @@ class MenuMixin:
             self.channels.set_status(channel, state)
         self.status.showMessage(
             "已切到深色主题" if mode == "dark" else "已切到浅色主题", _NOTICE_MS)
+
+
+def _recent_label(path: str, names: list[str]) -> str:
+    """菜单里的条目文字：文件名；重名时补上所在目录（全路径仍在 tooltip 里）。"""
+    target = pathlib.Path(path)
+    if names.count(target.name) > 1:
+        return f"{target.name}  —  {target.parent}"
+    return target.name
+
+
+def _disabled(menu, text: str) -> None:
+    """往菜单里放一条"现在没有东西"的置灰说明。"""
+    action = menu.addAction(text)
+    action.setEnabled(False)

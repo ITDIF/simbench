@@ -76,23 +76,107 @@ def test_a_window_without_settings_is_untouched(qapp, engine_runner):
         teardown(window, qapp)
 
 
+def recent_group(window, title: str):
+    """"最近打开"里某一组（"工程" / "点表"）的子菜单。"""
+    action = next(a for a in window.act_recent.actions() if a.text() == title)
+    return action.menu()
+
+
 def test_the_opened_file_lands_in_the_recent_menu(qapp, engine_runner, tmp_path):
-    """打开过的东西要进"最近打开"；点一下能真打开它。"""
+    """打开过的东西要进"最近打开"（按工程/点表分组）；点一下能真打开它。"""
     settings = Settings(path=tmp_path / "settings.json")
     window = make_window(qapp, engine_runner, settings)
     try:
         assert settings.recent and settings.recent[0] == CSV
+        assert Settings.load(settings.path).recent[0] == CSV, "历史必须立刻落盘"
 
         window._rebuild_recent_menu()
-        texts = [a.text() for a in window.act_recent.actions()]
-        assert texts == [CSV], texts
+        tables = recent_group(window, "点表")
+        assert [a.text() for a in tables.actions()] == [pathlib.Path(CSV).name]
 
         window.session.load(load_point_table(CSV)[0])     # 换成"别的工程"再点回来
         window.session.clear_dirty()
-        window.act_recent.actions()[0].trigger()
+        tables.actions()[0].trigger()
         qapp.processEvents()
         assert window._path == pathlib.Path(CSV)
         assert window.session.project.channels[0].name == "tcp-5020"
+    finally:
+        teardown(window, qapp)
+
+
+def test_the_recent_menu_puts_projects_and_tables_in_separate_groups(
+        qapp, engine_runner, tmp_path):
+    """历史里"工程"与"点表"分开列：菜单结构固定（没有条目时显示一条置灰的"暂无"）。"""
+    proj = tmp_path / "proj.json"
+    table = tmp_path / "points.csv"
+    proj.write_text("{}", encoding="utf-8")
+    table.write_text("x", encoding="utf-8")
+    settings = Settings(path=tmp_path / "settings.json",
+                        recent=[str(table), str(proj)])
+    window = make_window(qapp, engine_runner, settings, path=None)
+    try:
+        window._rebuild_recent_menu()
+        assert [a.text() for a in recent_group(window, "工程").actions()] == ["proj.json"]
+        assert [a.text() for a in recent_group(window, "点表").actions()] == ["points.csv"]
+        assert recent_group(window, "工程").actions()[0].toolTip() == str(proj)
+    finally:
+        teardown(window, qapp)
+
+
+def test_saving_a_new_project_also_lands_in_the_recent_menu(
+        qapp, engine_runner, tmp_path, monkeypatch):
+    """刚存过的工程也进历史：下一次开软件不用再翻目录去找。"""
+    settings = Settings(path=tmp_path / "settings.json")
+    window = make_window(qapp, engine_runner, settings, path=None)
+    target = tmp_path / "saved.json"
+    monkeypatch.setattr(window.deps, "save_project_as", lambda *a, **k: str(target))
+    try:
+        window._save_project(ask=True)
+        assert str(target) in settings.recent
+        assert Settings.load(settings.path).recent[0] == str(target)
+    finally:
+        teardown(window, qapp)
+
+
+def test_a_recent_point_table_reopens_with_the_import_offset(
+        qapp, engine_runner, tmp_path, monkeypatch):
+    """历史里的点表要按导入时那个偏移重读，否则地址会静默变掉。"""
+    table = tmp_path / "points.csv"
+    table.write_text("x", encoding="utf-8")
+    settings = Settings(path=tmp_path / "settings.json", recent=[str(table)],
+                        recent_offsets={str(table): -40001})
+    window = make_window(qapp, engine_runner, settings, path=None)
+    seen: list[tuple[str, int]] = []
+
+    def fake(path, offset=0):
+        seen.append((path, offset))
+        return window.session.project, []
+
+    monkeypatch.setattr("simbench.gui.window_menus.read_point_table", fake)
+    try:
+        window.session.clear_dirty()
+        window._open_recent(str(table))
+        assert seen == [(str(table), -40001)]
+        assert settings.recent_offset(table) == -40001, "重开一次就把偏移覆盖掉了"
+    finally:
+        teardown(window, qapp)
+
+
+def test_clear_history_empties_the_recent_menu(qapp, engine_runner, tmp_path):
+    """"清空历史"把路径和偏移一起清掉，菜单回到"还没有打开过文件"。"""
+    table = tmp_path / "points.csv"
+    table.write_text("x", encoding="utf-8")
+    settings = Settings(path=tmp_path / "settings.json",
+                        recent=[str(table)], recent_offsets={str(table): 3})
+    window = make_window(qapp, engine_runner, settings, path=None)
+    try:
+        window._rebuild_recent_menu()
+        clear = next(a for a in window.act_recent.actions() if a.text() == "清空历史")
+        clear.trigger()
+        assert settings.recent == [] and settings.recent_offsets == {}
+        window._rebuild_recent_menu()
+        actions = window.act_recent.actions()
+        assert len(actions) == 1 and actions[0].isEnabled() is False
     finally:
         teardown(window, qapp)
 

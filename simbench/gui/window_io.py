@@ -38,7 +38,8 @@ class IoMixin:
             self._show_issues([_parse_issue(exc.path, exc.detail)])
             return
         self._remember_dir(path)
-        self.use_project(project, path, notes=notes)
+        # 偏移跟着这条历史记录一起存：从"最近打开"再点开同一份表时按同一个偏移读
+        self.use_project(project, path, notes=notes, recent_offset=offset)
 
     def _open_project(self) -> None:
         if not self._confirm_discard():
@@ -74,6 +75,11 @@ class IoMixin:
         if path:
             self._path = pathlib.Path(path)
             self._remember_dir(path)
+            if self.settings is not None:
+                # 刚存过的工程也进历史：下一次开软件不用再翻目录去找（落盘后的地址
+                # 已经是 0-based 裸地址，再打开按 0 偏移读正好）
+                self.settings.add_recent(path)
+                self.settings.save()
             self.session.clear_dirty()             # 落盘成功了才配清 `*`
         self._refresh_title()
         return path

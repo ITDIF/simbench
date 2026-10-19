@@ -342,7 +342,8 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
 
     # ---------- 工程 ----------
 
-    def use_project(self, project, path=None, notes=(), announce=True) -> list:
+    def use_project(self, project, path=None, notes=(), announce=True,
+                    recent_offset: int | None = None) -> list:
         """换一份工程并把五个视图一起对上。返回校验清单（有 error 也照样装）。
 
         `announce=False` 给**改动**那条路用（新建/增删之后刷新视图）：那一步本来就不该
@@ -370,8 +371,11 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         self.store.clear()
         self._path = pathlib.Path(path) if path else None
         if path and self.settings is not None:
-            # 记进"最近打开"（去重 + 置顶 + 只留最近 5 个）
-            self.settings.add_recent(path)
+            # 记进"最近打开"（去重 + 置顶 + 截断），并立刻落盘：强杀/崩溃时历史也不丢。
+            # 导入点表的地址偏移跟着这条记录一起存（工程文件用不上，传 0）。
+            self.settings.add_recent(
+                path, offset=0 if recent_offset is None else recent_offset)
+            self.settings.save()
         self._states = dict.fromkeys(names, "stopped")
         self._dirty_shown = self.session.dirty
         self._shown_error = ""
