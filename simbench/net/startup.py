@@ -174,7 +174,7 @@ def _prepare_concrete_hosts(point_table, project, apply: bool) -> list[str]:
             f"配到专用网卡上（模拟器要在这个地址上监听）"]
     desired = [(address, _DEFAULT_PREFIX) for address in addresses]
     try:
-        lines = _prepare(Path(point_table), desired, apply,
+        lines = _prepare(Path(point_table) if point_table else None, desired, apply,
                          run=lambda: apply_up_ips(addresses),
                          command=_command_ips(addresses),
                          remove_stale=False)
@@ -183,6 +183,21 @@ def _prepare_concrete_hosts(point_table, project, apply: bool) -> list[str]:
     except Exception as exc:               # noqa: BLE001 —— 与上面同一条口径：网络不许拦启动
         return [*lead, f"网络准备时出了意外（{exc}），已跳过；模拟照常启动"]
     return lead + lines
+
+
+def prepare_project(project, *, apply: bool = True) -> list[str]:
+    """主窗"启动"那条路：**没有点表文件**也能把通道 host 配到专用网卡上。
+
+    与 `prepare` 的差别只有一处：点表可能还没存盘（新建工程、或者只是改了通道 host），没有路径
+    可交给 `net up --point-table`。地址来源本来就只剩通道 host，所以直接走那条路（`net up --ip`）。
+
+    为什么需要这个入口（2026-10-19 现场反馈）：`gui/app.build_app` 只在**带点表参数开界面**时
+    跑一次启动挂钩；现场常常是先开界面、再打开点表、再在通道行里改 host——那条路原先一次网络
+    准备都没有，点"启动"只会得到 bind 失败。
+    """
+    if not auto_enabled():
+        return []
+    return _prepare_concrete_hosts(None, project, apply)
 
 
 def status(point_table, project=None) -> list[str]:
@@ -267,7 +282,7 @@ def _unmatched_line(declaration, project) -> list[str]:
             "——名字要跟点表里的设备名一模一样"]
 
 
-def _prepare(point_table: Path, desired: list[tuple[str, int]], apply: bool,
+def _prepare(point_table: Path | None, desired: list[tuple[str, int]], apply: bool,
              *, run=None, command: str | None = None,
              remove_stale: bool = True) -> list[str]:
     """只读对账 + 按需提权。`run`/`command` 让"地址从哪来"可换（声明 / 通道 host）。

@@ -61,9 +61,13 @@ class ChannelRow:
 
 
 class ChannelPanel(QtWidgets.QWidget):
-    def __init__(self, session, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, session, parent: QtWidgets.QWidget | None = None,
+                 *, before_start=None) -> None:
         super().__init__(parent)
         self._session = session
+        # 启动前的钩子（主窗注入）：把这一路要监听的"具体 IP"配到专用网卡上。
+        # 面板自己不认识 net 那一层——它只负责"点启动时先问一句"（2026-10-19）。
+        self._before_start = before_start
         self._rows: dict[str, ChannelRow] = {}
         # 白面卡片：底色与边框由主题给，这里只把 WA_StyledBackground 打开——裸 QWidget
         # 不开这个属性，QSS 的 background 一个字都不会画（见 theme.make_card）。
@@ -302,6 +306,8 @@ class ChannelPanel(QtWidgets.QWidget):
                           status)
 
     def _start(self, channel: str) -> None:
+        if self._before_start is not None:
+            self._before_start()
         try:
             self._session.start_channel(channel)
         except KeyError:

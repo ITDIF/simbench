@@ -33,6 +33,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..engine.point_source import pumped_source
 from ..engine.rows_pump import RowsPump
+from ..net import startup as net_startup
 from ..project.validate import error_lines, validate_project
 from . import i18n, icons, messages, theme
 from .bridge import EngineBridge
@@ -106,7 +107,7 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         self.log_tab = self._build_log_tab(self.log_view)
         # 核对页（主站模式）：只读别人的设备，自己一个端口都不监听（E1）
         self.verify_panel = VerifyPanel(session)
-        self.channels = ChannelPanel(session)
+        self.channels = ChannelPanel(session, before_start=self._prepare_network_before_start)
         self.net_panel = NetPanel(session)
         self.tabs: QtWidgets.QTabWidget
         self.splitter: QtWidgets.QSplitter
@@ -435,7 +436,27 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
 
     # ---------- 动作 ----------
 
+    def _prepare_network_before_start(self) -> None:
+        """启动前把"通道 host 是具体 IP"的那些地址配到专用网卡上（2026-10-19 现场反馈）。
+
+        为什么在这里：`gui/app.build_app` 只在**带点表参数开界面**时跑一次启动挂钩；而现场常常
+        是先开界面、再打开点表、再在通道行里改 host——那条路原先一次网络准备都没有，点"启动"
+        只会得到 bind 失败（看到的就是"换了个 IP 起不来"）。
+
+        只对具体 IP 的 host 动系统（`0.0.0.0` / `127.0.0.1` 走不到这一步，一次系统读都不发）；
+        没有声明时用 `net up --ip`，有声明时仍走声明那条。网络这一步**永远不拦启动**：它自己的
+        异常已经全在 `net/startup.py` 里收成几行话，这里只把它们写进日志与状态栏。
+        """
+        source = self.session.source
+        lines = (net_startup.prepare(source, project=self.session.project)
+                 if source else net_startup.prepare_project(self.session.project))
+        for line in lines:
+            self._log(f"[net] {line}")
+        if lines:
+            self.status.showMessage(_one_line(lines[0]), _NOTICE_MS)
+
     def _start_all(self) -> None:
+        self._prepare_network_before_start()
         try:
             failures = self.session.start_all()
         except Exception as exc:                    # noqa: BLE001

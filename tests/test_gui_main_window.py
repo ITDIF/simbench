@@ -256,6 +256,22 @@ def test_the_window_installs_the_chinese_standard_buttons(make_window, monkeypat
     assert calls == [1], "主窗构造期没装中文翻译：弹窗上的 OK/Cancel 会退回英文"
 
 
+def test_start_all_prepares_the_network_first(make_window, monkeypatch):
+    """工具栏"全部启动"先跑一次网络准备（把通道 host 配到专用网卡上），再启动（2026-10-19）。
+
+    为什么值得单独钉：GUI 原先只在"带点表参数开界面"时跑一次启动挂钩；先开界面、再打开点表、
+    再改 host 的那条路一次都没跑——点"启动"只会得到 bind 失败。顺序必须是"先网络、后启动"。
+    """
+    window = make_window()
+    order: list[str] = []
+    monkeypatch.setattr(main_window_module.net_startup, "prepare",
+                        lambda *a, **k: order.append("net") or [])
+    monkeypatch.setattr(window.session, "start_all",
+                        lambda: order.append("start") or [])
+    window._start_all()
+    assert order == ["net", "start"], order
+
+
 def test_saving_without_a_path_asks_and_remembers_the_path(window, tmp_path, monkeypatch):
     """没有路径（新建的工程）时保存要问一次，并把选中的路径记下来。"""
     target = str(tmp_path / "saved.json")

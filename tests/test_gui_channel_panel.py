@@ -136,6 +136,22 @@ def test_the_row_packs_its_widgets_to_the_left(built):
             f"{row.channel}: 第一格被推到右半边了，说明宽度还是全落在通道名那一格上")
 
 
+def test_start_asks_the_network_hook_first(qapp, project, engine, monkeypatch):
+    """点"启动"之前**先问一次主窗注入的网络钩子**（2026-10-19 现场反馈）。
+
+    面板自己不认识 net 那一层：它只负责"启动前问一句"——主窗在那个钩子里把通道 host（具体 IP）
+    配到专用网卡上。顺序必须是"先钩子、后 start_channel"：反过来的话 bind 已经在钩子之前失败了。
+    """
+    order: list[str] = []
+    engine.load(project)
+    panel = ChannelPanel(engine, before_start=lambda: order.append("net"))
+    panel.rebuild(engine.project)
+    monkeypatch.setattr(engine, "start_channel",
+                        lambda name: order.append(f"start:{name}"))
+    panel._start("tcp-2")
+    assert order == ["net", "start:tcp-2"], order
+
+
 def test_start_is_per_channel(built):
     panel, session, qapp = built
     rows = by_channel(panel)
