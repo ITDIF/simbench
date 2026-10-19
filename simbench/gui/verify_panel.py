@@ -25,6 +25,7 @@ from ..master.modbus import MasterLink
 from ..master.scan import scan_units, verify_points
 from ..project.model import channel_transport as _transport_of
 from ..project.model import is_s7
+from .dialogs import FILE_DIALOG_OPTION
 
 # 列的宽度按"最宽内容 + 余量"量出来（真字体 9pt 下量过一遍；与点位表那一套同形）
 COLUMNS = (("名称", 150), ("区", 56), ("地址", 56), ("期望", 110), ("读到", 110),
@@ -171,7 +172,8 @@ class VerifyPanel(QtWidgets.QWidget):
             return
         suggested = "核对报告.xlsx"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出核对报告", suggested, "Excel (*.xlsx);;CSV (*.csv);;所有文件 (*)")
+            self, "导出核对报告", suggested, "Excel (*.xlsx);;CSV (*.csv);;所有文件 (*)",
+            options=FILE_DIALOG_OPTION)
         if not path:
             return
         try:

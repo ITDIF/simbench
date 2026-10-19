@@ -805,7 +805,7 @@ def test_export_asks_for_a_path_and_suggests_the_projects_own_name(window, monke
     window._path = tmp_path / "proj.json"
     asked: list[str] = []
 
-    def fake(parent, title, suggested, filters):
+    def fake(parent, title, suggested, filters, options=None):
         asked.append(suggested)
         return (str(tmp_path / "proj.csv"), "CSV (*.csv)")
 
@@ -843,7 +843,7 @@ def test_export_without_a_path_asks_where_to_put_it(window, monkeypatch, tmp_pat
     target = tmp_path / "fresh.csv"
     asked: list[str] = []
 
-    def fake(parent, title, suggested, filters):
+    def fake(parent, title, suggested, filters, options=None):
         asked.append(suggested)
         return (str(target), "CSV (*.csv)")
 

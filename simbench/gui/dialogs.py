@@ -21,6 +21,12 @@ from PySide6 import QtWidgets
 
 from ..project import formats
 
+# 文件对话框统一走 **Qt 控件版**（DontUseNativeDialog）：Windows 原生文件对话框的按钮
+# 文字跟操作系统语言走（英文系统就是 Open / Save / Cancel），Qt 的翻译器（gui/i18n.py）
+# 和主题（gui/theme.py）都盖不到它——这正是 2026-10-16 那批"弹窗按钮说中文"漏掉的最后一
+# 处。控件版则同时吃翻译与 QSS，按钮是 打开/保存/取消，颜色也跟界面一致。
+FILE_DIALOG_OPTION = QtWidgets.QFileDialog.DontUseNativeDialog
+
 
 class ProjectFileError(ValueError):
     """文件读不懂，而且知道是哪个文件：主窗据此出清单，消息里必须带文件名。
@@ -73,7 +79,8 @@ def import_table(parent=None, start_dir: str = ""):
     每次都从默认目录找起是每天要重复十几次的事。
     """
     path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "导入点表", start_dir or "",
-                                                    formats.table_filter())
+                                                    formats.table_filter(),
+                                                    options=FILE_DIALOG_OPTION)
     return path or None
 
 
@@ -110,7 +117,8 @@ def open_project(parent=None, start_dir: str = ""):
     """
     path, _ = QtWidgets.QFileDialog.getOpenFileName(parent, "打开点表 / 工程",
                                                     start_dir or "",
-                                                    formats.open_filter())
+                                                    formats.open_filter(),
+                                                    options=FILE_DIALOG_OPTION)
     if not path:
         return None, None
     try:
@@ -128,7 +136,8 @@ def export_table_path(parent=None, suggested: str = "") -> str | None:
     而点表正是这个工具跟现场交换数据的方式。原来这里直接拒绝，现在先问一次。
     """
     path, _ = QtWidgets.QFileDialog.getSaveFileName(parent, "导出点表", suggested,
-                                                    formats.table_filter())
+                                                    formats.table_filter(),
+                                                    options=FILE_DIALOG_OPTION)
     return path or None
 
 
@@ -149,7 +158,8 @@ def save_project_to(project, path) -> pathlib.Path:
 def save_project_as(parent, project, suggested: str = ""):
     """返回落盘路径或 None（用户取消）。路径回传给主窗记住。"""
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
-        parent, "保存点表 / 工程", suggested, formats.save_filter())
+        parent, "保存点表 / 工程", suggested, formats.save_filter(),
+        options=FILE_DIALOG_OPTION)
     if not path:
         return None
     try:

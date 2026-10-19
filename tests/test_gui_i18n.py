@@ -46,6 +46,25 @@ def test_installing_twice_changes_nothing(qapp):
     assert save_discard_cancel() == before
 
 
+def test_the_file_dialog_uses_the_qt_widget_version(qapp):
+    """文件对话框的按钮也要说中文：原生 Windows 对话框跟操作系统语言走，Qt 翻译器盖不到。
+
+    所以调用点（gui/dialogs.py）统一带 DontUseNativeDialog——改成控件版之后，
+    这份翻译器与主题才够得着，按钮是「打开/取消」而不是「Open/Cancel」。
+    """
+    from simbench.gui import dialogs
+
+    assert QtWidgets.QFileDialog.DontUseNativeDialog == dialogs.FILE_DIALOG_OPTION
+    assert i18n.install_chinese_ui(qapp) is True
+    dialog = QtWidgets.QFileDialog(None, "打开点表")
+    dialog.setOption(dialogs.FILE_DIALOG_OPTION, True)
+    dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptOpen)
+    texts = {button.text() for button in dialog.findChildren(QtWidgets.QPushButton)
+             if button.text()}
+    assert any(text.startswith("打开") for text in texts), texts
+    assert any(text.startswith("取消") for text in texts), texts
+
+
 def test_a_missing_translation_file_only_means_english_buttons(monkeypatch, tmp_path, qapp):
     """翻译文件不在（裁剪过的 Qt、有人删了 translations 目录）：回 `False`，**不抛**。
 

@@ -138,7 +138,7 @@ def test_the_dialogs_start_from_the_last_used_folder(tmp_path, qapp, engine_runn
     window = make_window(qapp, engine_runner, settings)
     seen: list[str] = []
 
-    def fake(parent, title, suggested, filters):
+    def fake(parent, title, suggested, filters, options=None):
         seen.append(suggested)
         return ("", "")
 

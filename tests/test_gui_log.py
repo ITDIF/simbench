@@ -95,7 +95,7 @@ def test_the_log_pane_can_be_saved_to_a_file(qapp, engine_runner, tmp_path, monk
     target = tmp_path / "exported.txt"
     asked: list[str] = []
 
-    def fake(parent, title, suggested, filters):
+    def fake(parent, title, suggested, filters, options=None):
         asked.append(suggested)
         return (str(target), "文本文件 (*.txt)")
 

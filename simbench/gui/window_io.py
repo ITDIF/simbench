@@ -12,6 +12,7 @@ from ..project.csv_io import port_from_name
 from ..project.fsio import write_text_atomic
 from ..project.model import channel_transport
 from .dialogs import (
+    FILE_DIALOG_OPTION,
     ProjectFileError,
     export_table_path,
     read_point_table,
@@ -116,7 +117,8 @@ class IoMixin:
         """把日志窗里的文本另存成一份文件（回执给现场"把这段发我"用）。"""
         suggested = f"simbench-log-{dt.date.today().isoformat()}.txt"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "另存日志", suggested, "文本文件 (*.txt);;所有文件 (*)")
+            self, "另存日志", suggested, "文本文件 (*.txt);;所有文件 (*)",
+            options=FILE_DIALOG_OPTION)
         if not path:
             return
         try:
