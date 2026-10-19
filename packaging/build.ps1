@@ -44,9 +44,9 @@ $out = Join-Path $root "dist\simbench"
 if (Test-Path $out) {
     $demo = Join-Path $out "examples"
     New-Item -ItemType Directory -Force -Path $demo | Out-Null
-    Copy-Item -Path (Join-Path $root "examples\covi-tunnel.csv") -Destination $demo -Force
-    # 虚拟设备示例（Modbus Poll 那一份入口）：与演示点表并列放在 exe 旁边
-    Copy-Item -Path (Join-Path $root "examples\virtual-device.csv") -Destination $demo -Force
+    # **收 examples/ 下所有点表**，不写死名单：2026-10-19 加了 Modbus Poll 用的两份测试表，
+    # 写死的话每加一份都要记得改这里，而漏了不会报错、只会让人以为"exe 里没带"。
+    Copy-Item -Path (Join-Path $root "examples\*.csv") -Destination $demo -Force
 }
 
 Write-Host "onedir:  dist\simbench\simbench.exe / dist\simbench\simbench-gui.exe"
