@@ -37,6 +37,7 @@ from ..net import startup as net_startup
 from ..project.validate import error_lines, validate_project
 from . import i18n, icons, messages, theme
 from .bridge import EngineBridge
+from .busy import busy
 from .channel_panel import ChannelPanel
 from .channel_state import STATUS_ORDER, STATUS_WORD
 from .deps import WindowDeps
@@ -460,7 +461,11 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
             self.status.showMessage(_one_line(lines[0]), _NOTICE_MS)
 
     def _start_all(self) -> None:
-        self._prepare_network_before_start()
+        with busy("正在启动通道…"):
+            self._prepare_network_before_start()
+            self._start_all_now()
+
+    def _start_all_now(self) -> None:
         try:
             failures = self.session.start_all()
         except Exception as exc:                    # noqa: BLE001
@@ -475,6 +480,10 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
             self.status.showMessage(_one_line(message), _NOTICE_MS)
 
     def _stop_all(self) -> None:
+        with busy("正在停止通道…"):
+            self._stop_all_now()
+
+    def _stop_all_now(self) -> None:
         try:
             failures = self.session.stop_all()
         except Exception as exc:                    # noqa: BLE001
@@ -605,8 +614,9 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         或"用例要断言引擎此刻的真值"时不能等下一个节拍。**只有明确知道要等的人**才调它——
         心跳那条路不许调（那正是把界面拖回"跟引擎同节拍"的老样子）。
         """
-        self.rows_pump.fetch_now()
-        return self.point_model.refresh()
+        with busy("正在读取当前值…"):
+            self.rows_pump.fetch_now()
+            return self.point_model.refresh()
 
 
     def _summary(self) -> str:

@@ -26,6 +26,7 @@ from PySide6 import QtGui, QtWidgets
 from ..events import ChannelState
 from ..project.model import channel_transport, format_frame, is_serial, parse_frame
 from . import theme
+from .busy import busy
 from .channel_state import STATUS_LABELS
 
 # 四态的文案共用一个定宽槽（88px）：主题把正文字号提到 10pt 之后 offscreen 实测最长的
@@ -306,15 +307,19 @@ class ChannelPanel(QtWidgets.QWidget):
                           status)
 
     def _start(self, channel: str) -> None:
-        if self._before_start is not None:
-            self._before_start()
+        with busy(f"正在启动 {channel}…"):
+            if self._before_start is not None:
+                self._before_start()
+            self._start_now(channel)
+
+    def _start_now(self, channel: str) -> None:
         try:
             self._session.start_channel(channel)
         except KeyError:
-            raise                       # 通道名都不存在：不是用户输入错误，炸出来给人看
+            raise                       # 通道名不在会话里：这是调用方的 bug，不许吞
         except Exception as exc:        # noqa: BLE001
-            # 点表有错（ValueError）和端口被占（PortInUseError）都到这里：界面那一格变红、
-            # 留下原因、并发一条日志。槽函数里抛出去等于 Qt 事件循环里炸，界面看着像卡死。
+            # 类型写错（ValueError）、端口被占（PortInUseError）都落在这里：面板上变红字、
+            # 留下原因、再记一条日志。槽函数里抛出去等于在 Qt 事件循环里炸，表现成"点了没反应"。
             self.last_error = f"{channel}: {exc}"
             self._session.publish_log("error", self.last_error)
             self.set_status(channel, "error")
@@ -323,6 +328,10 @@ class ChannelPanel(QtWidgets.QWidget):
         self.set_status(channel, "running")
 
     def _stop(self, channel: str) -> None:
+        with busy(f"正在停止 {channel}…"):
+            self._stop_now(channel)
+
+    def _stop_now(self, channel: str) -> None:
         try:
             self._session.stop_channel(channel)
         except Exception as exc:        # noqa: BLE001

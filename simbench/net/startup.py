@@ -30,6 +30,7 @@ import contextlib
 import io
 import os
 import socket
+import time
 from pathlib import Path
 
 from ..project.model import channel_transport
@@ -51,6 +52,11 @@ _PREFIX = "[net] "
 # 这些 host 都表示"本机"或"所有本机地址"：不需要额外往网卡上加地址，也就不需要提示。
 _LOCAL_HOSTS = frozenset({"", "0.0.0.0", "::", "*", "localhost", "127.0.0.1", "::1"})
 
+# `net up` 成功之后最多等多久让系统把地址真正挂上（`New-NetIPAddress` 返回 ≠ 立刻能 bind）。
+# 2026-10-19 现场：新 IP 第一次点「启动」bind 会报"address is not configured"，第二次才好——就是
+# 这个窗口。实测通常几百毫秒内就能 bind，5 秒只是上限。
+_APPLY_WAIT = 5.0
+
 # 没有声明、只能从通道 host 取地址时的掩码位数。与 `cli._parse_ip_spec` 同一个默认（现场惯例 /24）：
 # 这里不猜掩码，只是把"裸 IP"变成 `net up --ip` 能吃的样子。
 _DEFAULT_PREFIX = 24
@@ -59,6 +65,30 @@ _DEFAULT_PREFIX = 24
 def auto_enabled() -> bool:
     """启动挂钩开着吗。测试与 CI 用 `SIMBENCH_NET_AUTO=0` 关掉。"""
     return os.environ.get(AUTO_ENV, "").strip().lower() not in _OFF
+
+
+def _wait_until_bindable(addresses: list[str], timeout: float = _APPLY_WAIT) -> list[str]:
+    """等系统把刚配上的地址真正生效；返回**还没生效**的那几个（超时也为空时表示都好了）。
+
+    判据就是 `_binds_locally`（bind 一次）。为什么要等：`New-NetIPAddress` 返回之后，地址到
+    真正可以 bind 之间有个很短的空档；不等就会"第一次点启动失败、第二次成功"（现场实测）。
+    """
+    pending = list(addresses)
+    deadline = time.monotonic() + timeout
+    while pending and time.monotonic() < deadline:
+        pending = [address for address in pending if not _binds_locally(address)]
+        if pending:
+            time.sleep(0.05)
+    return pending
+
+
+def _after_apply(lines: list[str], addresses: list[str],
+                 timeout: float = _APPLY_WAIT) -> list[str]:
+    """`net up` 成功之后补一句：地址还没生效就说出来，别让操作员以为已经好了。"""
+    pending = _wait_until_bindable(addresses, timeout)
+    if pending:
+        return [*lines, f"地址已配置但还没生效（{', '.join(pending)}）；稍等一下再点一次「启动」"]
+    return lines
 
 
 def apply_up(point_table) -> tuple[int, list[str]]:
@@ -76,10 +106,14 @@ def apply_up(point_table) -> tuple[int, list[str]]:
     with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
         code = net_main(["up", "--point-table", str(point_table)])
     lines = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
-    return code, [_strip(line) for line in lines]
+    lines = [_strip(line) for line in lines]
+    if code == 0:
+        _decl, desired, _problem = _declared(point_table)
+        lines = _after_apply(lines, [ip for ip, _prefix in desired])
+    return code, lines
 
 
-def apply_up_ips(addresses: list[str]) -> tuple[int, list[str]]:
+def apply_up_ips(addresses: list[str], *, wait: float = _APPLY_WAIT) -> tuple[int, list[str]]:
     """跑一次 `net up --ip ...`（点表旁边**没有**网络声明时用）。与 `apply_up` 同形。
 
     为什么需要第二条：`apply_up` 走的是 `net up --point-table`，而它在没有声明时会直接报
@@ -95,7 +129,10 @@ def apply_up_ips(addresses: list[str]) -> tuple[int, list[str]]:
     with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
         code = net_main(argv)
     lines = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
-    return code, [_strip(line) for line in lines]
+    lines = [_strip(line) for line in lines]
+    if code == 0:
+        lines = _after_apply(lines, addresses, wait)
+    return code, lines
 
 
 def _strip(line: str) -> str:

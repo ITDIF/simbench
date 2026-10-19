@@ -272,6 +272,26 @@ def test_start_all_prepares_the_network_first(make_window, monkeypatch):
     assert order == ["net", "start"], order
 
 
+def test_start_all_shows_a_wait_cursor_while_the_engine_starts(make_window, monkeypatch):
+    """启动期间要有等待光标（2026-10-19：整个项目凡是要等的都要有反馈）。
+
+    启动一次可能要等到引擎回话（最多 10s）。没有反馈时操作员会连点两下——两次启动叠在一起，
+    第一发就白等了。这里钉住"进 `start_all` 时等待光标在、出来一定还原"。
+    """
+    window = make_window()
+    seen: dict = {}
+
+    def slow_start():
+        cursor = QtWidgets.QApplication.overrideCursor()
+        seen["shape"] = None if cursor is None else cursor.shape()
+        return []
+
+    monkeypatch.setattr(window.session, "start_all", slow_start)
+    window._start_all()
+    assert seen["shape"] == QtCore.Qt.CursorShape.WaitCursor, seen
+    assert QtWidgets.QApplication.overrideCursor() is None, "等待光标没还原"
+
+
 def test_saving_without_a_path_asks_and_remembers_the_path(window, tmp_path, monkeypatch):
     """没有路径（新建的工程）时保存要问一次，并把选中的路径记下来。"""
     target = str(tmp_path / "saved.json")

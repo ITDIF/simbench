@@ -11,6 +11,7 @@ from ..project import formats
 from ..project.csv_io import port_from_name
 from ..project.fsio import write_text_atomic
 from ..project.model import channel_transport
+from .busy import busy
 from .dialogs import (
     FILE_DIALOG_OPTION,
     ProjectFileError,
@@ -33,7 +34,8 @@ class IoMixin:
             return
         offset = self.deps.choose_offset(self)
         try:
-            project, notes = read_point_table(path, offset)
+            with busy("正在读取点表…"):
+                project, notes = read_point_table(path, offset)
         except ProjectFileError as exc:
             self._show_issues([_parse_issue(exc.path, exc.detail)])
             return
@@ -63,7 +65,8 @@ class IoMixin:
         """
         try:
             if self._path is not None and not ask:
-                path = str(save_project_to(self.session.project, self._path))
+                with busy("正在保存…"):
+                    path = str(save_project_to(self.session.project, self._path))
                 self.status.showMessage(f"已保存 {self._path.name}", _NOTICE_MS)
             else:
                 path = self.deps.save_project_as(self, self.session.project,
@@ -100,7 +103,8 @@ class IoMixin:
             return
         target = pathlib.Path(chosen)
         try:
-            formats.write_project(self.session.project, target)
+            with busy("正在导出点表…"):
+                formats.write_project(self.session.project, target)
         except (OSError, ValueError) as exc:
             # ValueError 是"这份工程点表表示不了"（一个点位都没有）：那也是一句人话，
             # 不是 traceback——从 Qt 槽里逃出去的表现是"点了没反应"。

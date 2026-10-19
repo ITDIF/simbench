@@ -200,6 +200,38 @@ def test_local_hosts_without_a_declaration_stay_silent(tmp_path, monkeypatch):
         assert startup.prepare(table, project=_project(host)) == [], host
 
 
+def test_apply_waits_until_the_new_address_is_bindable(monkeypatch):
+    """`net up` 返回 ≠ 地址立刻能 bind（2026-10-19 现场：新 IP 第一次点启动失败、第二次才好）。
+
+    这条钉住"应用之后要再等它变成可 bind"：前两次探针说不在、第三次才在，函数必须等满三次才回。
+    """
+    from simbench.net import cli as net_cli
+
+    monkeypatch.setattr(net_cli, "main", lambda argv: 0)
+    calls = {"n": 0}
+
+    def flips(_host: str) -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    monkeypatch.setattr(startup, "_binds_locally", flips)
+    code, lines = startup.apply_up_ips(["10.0.0.9"])
+    assert code == 0
+    assert calls["n"] >= 3, calls
+    assert not any("还没生效" in line for line in lines), lines
+
+
+def test_apply_says_so_when_the_address_never_becomes_bindable(monkeypatch):
+    """一直等不到（驱动/系统不认）：**说出来**，别让操作员以为已经好了。"""
+    from simbench.net import cli as net_cli
+
+    monkeypatch.setattr(net_cli, "main", lambda argv: 0)
+    monkeypatch.setattr(startup, "_binds_locally", lambda _host: False)
+    code, lines = startup.apply_up_ips(["10.0.0.9"], wait=0.15)
+    assert code == 0
+    assert any("还没生效" in line for line in lines), lines
+
+
 def test_the_switch_off_is_a_full_stop(tmp_path, monkeypatch):
     """总闸关掉时连系统状态都不读：这是"跑测试绝不动真网卡"那条保证的落点。"""
     monkeypatch.setenv(startup.AUTO_ENV, "0")
