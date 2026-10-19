@@ -257,7 +257,7 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout(box)
         row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(self.address_edit)
-        row.addWidget(QtWidgets.QLabel("惯例"))
+        row.addWidget(QtWidgets.QLabel("点表地址"))
         row.addWidget(self.convention_label)
         self._tracked.append(self.address_edit)
         self._tracked.append(self.convention_label)
@@ -310,7 +310,6 @@ class PointPropertiesDialog(QtWidgets.QDialog):
             self._tracked.append(button)
         self.buttons = box
         return box
-
 
     def _accept_if_applied(self) -> None:
         if self.apply():

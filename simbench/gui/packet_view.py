@@ -74,9 +74,12 @@ class PacketModel(QtCore.QAbstractTableModel):
         return str(section + 1)
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
-        if not index.isValid() or role != QtCore.Qt.DisplayRole:
+        if not index.isValid() or index.row() >= len(self._rows):
             return None
-        if index.row() >= len(self._rows):
+        if role == QtCore.Qt.TextAlignmentRole:
+            # 与点位表同一条口径：表头与数据都居中（2026-10-19 用户现场口径）
+            return int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+        if role != QtCore.Qt.DisplayRole:
             return None
         event = self._rows[index.row()]
         return (f"{event.mono:.3f}", event.direction.upper(), event.channel,
@@ -158,6 +161,8 @@ class PacketPanel(QtWidgets.QWidget):
         # 连 Qt 自己的子控件一起钉住。
         self.table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setDefaultAlignment(
+            QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
         self.table.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
         self.filter_combo = None                      # 明确不用下拉框（口径 1）

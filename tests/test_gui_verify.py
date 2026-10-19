@@ -12,7 +12,7 @@ import socket
 import time
 
 import pytest
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from simbench.backend import make_backend
 from simbench.csv_io_entry import load_point_table
@@ -162,3 +162,19 @@ def test_the_page_refuses_when_there_is_no_modbus_channel(rig, qapp):
     qapp.processEvents()
     assert "没有可用的 Modbus 通道" in window.verify_panel.status_text()
     assert "主站模式需要一条 Modbus 通道" in window.log_view.toPlainText()
+
+
+def test_the_result_table_is_centred(qapp):
+    """核对结果表的数据与表头也居中（与点表/报文表同一口径）。"""
+    from simbench.gui.verify_panel import VerifyPanel
+    from simbench.master.scan import VerifyRow
+
+    panel = VerifyPanel(None)
+    panel._show_rows([VerifyRow("tcp-1", "D1", 11, "温度", "hr", 0,
+                                "uint16", "25", "25", "ok")])
+    want = int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+    assert [panel.model.index(0, column).data(QtCore.Qt.TextAlignmentRole)
+            for column in range(panel.model.columnCount())] == \
+        [want] * panel.model.columnCount()
+    assert int(panel.table.horizontalHeader().defaultAlignment()) == want
+    panel.deleteLater()

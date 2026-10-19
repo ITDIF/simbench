@@ -23,9 +23,10 @@ from ..project.model import S7_TYPES
 
 VALUE_HEADER = "当前值"
 RAW_HEADER = "原始寄存器"
-# 惯例地址那一列的列头：这一列的值本身就是带前缀的写法（`4x00001`），列头说"惯例"比说"4x"
-# 准确——区是 co/di/ir 时前缀是 0x/1x/3x，S7 上根本算不出来（显示 `—`）。
-CONVENTION_HEADER = "惯例"
+# 点表地址那一列的列头：这一列打的是**厂商点表上的惯例写法**（40001 那一套），
+# 区是 co/di/ir 时前缀是 0x/1x/3x，S7 上根本算不出来（显示 —）。列头叫"点表地址"
+# 比"惯例"直白：现场拿它去和厂商点表对号。
+CONVENTION_HEADER = "点表地址"
 
 
 @dataclass(frozen=True)
@@ -46,10 +47,10 @@ COLUMNS: tuple[Column, ...] = (
     # 56：`db4095` 要 51px（S7 的 DB 号上限 4095，四位数字 + `db`）。
     Column("区", 56),
     Column("地址", 56),
-    # 这一列打的是**现场惯例写法**（4x/3x/1x/0x 随区变），所以列头是"惯例"不是"4x"——后者
-    # 只在 Modbus 的 hr 区成立，混装工程里就是错的；值自己带前缀，不用列头替它说。
-    # 62：`4x65535` 要 56px。
-    Column(CONVENTION_HEADER, 62),
+    # 这一列打的是**现场惯例写法**（4x/3x/1x/0x 随区变），列头叫"点表地址"而不是"4x"——
+    # 后者只在 Modbus 的 hr 区成立，混装工程里就是错的；值自己带前缀，不用列头替它说。
+    # 72：列头"点表地址"4 个中文字要 52px + 表头左右 padding 16px；`4x65535` 要 48+8px。
+    Column(CONVENTION_HEADER, 72),
     Column("类型", 58),          # `float32`/`string`/`dword` 要 48px
     Column("字序", 60),          # `CDAB` 要 41px
     # 132：17 位数字（累计电量那个 uint64）要 128px——这一列是操作员拿去和点表核对的数，
@@ -169,7 +170,7 @@ class PointTableModel(QtCore.QAbstractTableModel):
             return _display(row, spec.header)
         if role == QtCore.Qt.TextAlignmentRole:
             # **表头与数据都居中**（2026-10-17 用户口径）。表头本来就是居中的（实测
-            # `defaultAlignment` = AlignHCenter|AlignVCenter），而数据原来是"地址/惯例两列
+            # `defaultAlignment` = AlignHCenter|AlignVCenter），而数据原来是"地址/点表地址两列
             # 右对齐、其余走 Qt 默认左对齐"——表头与数据各行其是，看着不齐。
             # 居中不改任何几何：列宽是定宽的（见 COLUMNS 的注释），对齐只影响文字在格子里的位置。
             return int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
@@ -313,7 +314,7 @@ def _display(row: Row, header: str) -> str:
     一格都要把整行算一遍——10 列 × 可见行 × 10Hz 的字典构造 + 字符串拼接。现在只算被问到的
     那一格，**语义与兜底一个都没变**（既有那两条"脏表也要每格都读得出来"的用例照旧）。
 
-    `4x`（惯例）是一行里唯一**算出来**的格子，也是唯一可能算不出来的：带着错装载的行
+    `4x`（点表地址）是一行里唯一**算出来**的格子，也是唯一可能算不出来的：带着错装载的行
     （区名写成 `holding`）会让 `conventional` 抛。它只影响自己这一格——给 `—` 标记，
     不猜前缀、也不替整行做主。判据与点位属性面板 `_update_convention` 同一个标记来源
     （这里 import 的是同一个模块，不是抄一份）。

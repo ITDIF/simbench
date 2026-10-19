@@ -78,7 +78,7 @@ def row_of(model, name):
 def test_every_column_is_centred_like_the_header(model):
     """表头与数据**都居中**（2026-10-17 用户口径："数据没有居中"）。
 
-    改之前是"地址/惯例两列右对齐、其余走 Qt 默认左对齐"，而表头本来就是居中的（实测
+    改之前是"地址/点表地址两列右对齐、其余走 Qt 默认左对齐"，而表头本来就是居中的（实测
     `defaultAlignment` = AlignHCenter|AlignVCenter）——表头与数据各占一边，看着不齐。
     这条把两边钉在同一个值上：哪天有人只改一边，这里就红。
     """
@@ -92,10 +92,10 @@ def test_every_column_is_centred_like_the_header(model):
 
 
 def test_columns_are_the_agreed_order():
-    # 第三列是"惯例"不是"4x"（2026-10-14 改名）：这一列打的值随区变（4x/3x/1x/0x），
+    # 第三列叫"点表地址"而不是"4x"：这一列打的值随区变（4x/3x/1x/0x），
     # S7 上还算不出来（`—`）——"4x"这个词只在 Modbus 的 hr 区成立。
     assert [c.header for c in COLUMNS] == [
-        "名称", "区", "地址", "惯例", "类型", "字序", "当前值", "原始寄存器", "波形", "只读"]
+        "名称", "区", "地址", "点表地址", "类型", "字序", "当前值", "原始寄存器", "波形", "只读"]
 
 
 def test_the_columns_are_sized_for_their_widest_content():
@@ -110,7 +110,7 @@ def test_the_columns_are_sized_for_their_widest_content():
     得到一个部署环境里宽得离谱的表。
     """
     widths = {c.header: c.width for c in COLUMNS}
-    assert widths == {"名称": 250, "区": 56, "地址": 56, "惯例": 62, "类型": 58,
+    assert widths == {"名称": 250, "区": 56, "地址": 56, "点表地址": 72, "类型": 58,
                       "字序": 60, "当前值": 132, "原始寄存器": 134, "波形": 72, "只读": 40}
     # 各列"最宽内容"的文字量级（前提，可读性比数字本身重要）：
     assert len("db4095") == 6                     # S7 的 DB 号上限 4095，区那一列要装得下
@@ -196,7 +196,7 @@ def test_a_row_with_an_unknown_area_still_renders_every_column(dirty_table):
     assert len(shown) == len(COLUMNS)
     assert all(v is not None for v in shown.values()), \
         "兜成 None 也是空白行：Qt 画不出来的现场症状和抛异常一模一样"
-    assert shown["惯例"] == "—", "未知区名算不出惯例地址：给标记，不许留空也不许猜一个前缀"
+    assert shown["点表地址"] == "—", "未知区名算不出惯例地址：给标记，不许留空也不许猜一个前缀"
     assert shown["名称"] == "坏点", "整行的其他格子本来就是好的，别一起吞掉"
     assert shown["区"] == "holding", "脏区名原样显示：显示成 hr 就是把点表里的错洗白了"
     assert shown["当前值"] == "7" and shown["只读"] == ""

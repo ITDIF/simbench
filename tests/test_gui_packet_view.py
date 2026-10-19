@@ -437,3 +437,15 @@ def test_the_panel_survives_a_store_that_notifies_after_it_is_hidden(qapp, store
     w.show()
     qapp.processEvents()
     assert w.row_count() == 2
+
+
+def test_the_packet_table_is_centred_like_the_point_table(panel, store):
+    """报文表的数据与表头都居中（2026-10-19 用户现场口径）。"""
+    store.add(evt())
+    panel.refresh_view()
+    want = int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+    model = panel.table.model()
+    assert model.rowCount() == 1
+    assert [model.index(0, column).data(QtCore.Qt.TextAlignmentRole)
+            for column in range(model.columnCount())] == [want] * model.columnCount()
+    assert int(panel.table.horizontalHeader().defaultAlignment()) == want

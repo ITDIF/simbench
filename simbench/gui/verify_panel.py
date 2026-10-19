@@ -79,6 +79,8 @@ class VerifyPanel(QtWidgets.QWidget):
         self.table.setWordWrap(False)
         self.table.setAlternatingRowColors(True)
         self.table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
+        self.table.horizontalHeader().setDefaultAlignment(
+            QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
         for index, (_name, width) in enumerate(COLUMNS):
             self.table.setColumnWidth(index, width)
         self.table.setToolTip("这一页只读别人的设备；导出的报告在「导出报告」里")
@@ -244,6 +246,7 @@ class VerifyPanel(QtWidgets.QWidget):
                 report.STATUS_LABELS.get(row.status, row.status), row.detail)]
             for item in items:
                 item.setEditable(False)
+                item.setTextAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
             self.model.appendRow(items)
 
 
