@@ -170,6 +170,48 @@ def test_the_panel_says_the_change_needs_a_channel_restart(qapp, window):
     assert "重启通道" in dialog.notice.text(), dialog.notice.text()
 
 
+def test_the_buttons_follow_the_platform_order_and_sit_on_the_right(qapp, window):
+    """底部三个按钮：顺序**由平台给**、整组靠右（2026-10-19 现场反馈）。
+
+    原来手写的那一排是"应用 | 确定 | 取消"在整行里均匀铺开：主按钮（确定）既不在边上、也不在
+    习惯的位置上，看着像一排并列的功能按钮，而不是"这个对话框怎么结束"。现在交给
+    `QDialogButtonBox`（与本软件的新建工程 / 另存为 / 错误清单那几个弹窗同一套）：
+    Windows 上是 **确定 · 取消 · 应用**，整组贴着右边。
+
+    顺序不与"Windows 的字面量"比，而是与**当前平台上同一个 QDialogButtonBox 给出的顺序**比：
+    这样它钉的是"我们没自己另排一套"，而不是"只在那台机器上绿"。
+    """
+    dialog = PointPropertiesDialog(window, window.session.project, KEY)
+    dialog.resize(460, 520)
+    dialog.show()
+    qapp.processEvents()
+
+    box = dialog.buttons
+    assert isinstance(box, QtWidgets.QDialogButtonBox)
+    roles = (QtWidgets.QDialogButtonBox.Ok, QtWidgets.QDialogButtonBox.Cancel,
+             QtWidgets.QDialogButtonBox.Apply)
+    for role in roles:
+        button = box.button(role)
+        assert button is not None and button.width() == 64, (role, button)
+
+    reference = QtWidgets.QDialogButtonBox(
+        QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        | QtWidgets.QDialogButtonBox.Apply)
+    reference.resize(320, 40)
+    reference.show()
+    qapp.processEvents()
+
+    def order_of(widget):
+        return [role for _x, role in sorted((widget.button(role).x(), role)
+                                            for role in roles)]
+
+    assert order_of(box) == order_of(reference), "我们自己另排了一套按钮顺序"
+    # 整组靠右：最右那个按钮与按钮区的右边只差一点边距（不是均匀铺开）
+    rightmost = max(box.button(role).geometry().right() for role in roles)
+    assert box.width() - rightmost <= 8, (box.width(), rightmost)
+    assert min(box.button(role).x() for role in roles) > 0
+
+
 def test_the_panel_geometry_is_identical_across_every_state(qapp, window):
     """切区/切类型会让字序、波形参数那些控件的可用性变，但一个矩形都不许挪。"""
     dialog = PointPropertiesDialog(window, window.session.project, KEY)

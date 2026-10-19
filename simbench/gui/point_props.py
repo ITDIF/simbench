@@ -186,7 +186,7 @@ class PointPropertiesDialog(QtWidgets.QDialog):
             grid.addWidget(widget, index, 1)
         grid.addWidget(self.notice, len(rows), 0, 1, 2)
         grid.addWidget(self.error_view, len(rows) + 1, 0, 1, 2)
-        grid.addLayout(self._buttons(), len(rows) + 2, 0, 1, 2)
+        grid.addWidget(self._buttons(), len(rows) + 2, 0, 1, 2)
 
     def _radios(self, names, columns: int = 0,
                 on_select: Callable[[str], None] | None = None) -> dict:
@@ -286,18 +286,31 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self.bit_edit.setEnabled(enabled)
         self.bit_hint.setEnabled(enabled)
 
-    def _buttons(self) -> QtWidgets.QHBoxLayout:
-        row = QtWidgets.QHBoxLayout()
-        apply_button = self._fixed(QtWidgets.QPushButton("应用"), 64)
-        ok_button = self._fixed(QtWidgets.QPushButton("确定"), 64)
-        cancel_button = self._fixed(QtWidgets.QPushButton("取消"), 64)
-        apply_button.clicked.connect(lambda _=False: self.apply())
-        ok_button.clicked.connect(self._accept_if_applied)
-        cancel_button.clicked.connect(self.reject)
-        for button in (apply_button, ok_button, cancel_button):
-            row.addWidget(button)
+    def _buttons(self) -> QtWidgets.QDialogButtonBox:
+        """底部三个按钮：**跟着系统的按钮顺序与对齐**（Windows 上是 确定 · 取消 · 应用，整组靠右）。
+
+        为什么不再手写一排：原来那版是"应用 | 确定 | 取消"三个定宽按钮在整行里**均匀铺开**，
+        看着像一排并列的功能按钮，而不是"这个对话框怎么结束"——主按钮（确定）既不在边上、
+        也不在习惯的位置上。Windows/Qt 的惯例是 **确定 · 取消 · 应用** 且整组靠右；本软件里
+        新建工程、另存为、错误清单那些弹窗用的都是 `QDialogButtonBox`，两处不一致时，同一个
+        软件里就会出现两套"哪个是主按钮"的读法（2026-10-19 现场反馈）。
+
+        定宽槽照旧（每个 64px，进 `_tracked`）：几何恒等断言照样盯着它们；按钮文字由 Qt 的
+        `zh_CN` 翻译器给（`gui/i18n.py`），这里不再自己写死"确定/取消"。
+        """
+        box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+            | QtWidgets.QDialogButtonBox.Apply, self)
+        box.accepted.connect(self._accept_if_applied)
+        box.rejected.connect(self.reject)
+        box.button(QtWidgets.QDialogButtonBox.Apply).clicked.connect(
+            lambda _checked=False: self.apply())
+        for button in box.buttons():
+            self._fixed(button, 64)
             self._tracked.append(button)
-        return row
+        self.buttons = box
+        return box
+
 
     def _accept_if_applied(self) -> None:
         if self.apply():
