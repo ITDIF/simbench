@@ -34,10 +34,15 @@ class MqttSession:
     """paho 客户端的最小包装：连接/订阅/发布/关闭，回调只把消息转给后端。"""
 
     def __init__(self, host: str, port: int, on_message, *,
-                 client_id: str = "", keepalive: int = 30) -> None:
+                 client_id: str = "", keepalive: int = 30,
+                 on_state=None) -> None:
         self.host = host
         self.port = int(port)
         self._on_message = on_message
+        # `on_state(connected, detail)`：断线/重连给后端留一条日志；默认不关心。
+        self._on_state = on_state
+        self._topics: list[tuple[str, int]] = []
+        self._closing = False
         self._connected = threading.Event()
         self._subscribed = threading.Event()
         self._sub_mid = None
@@ -55,6 +60,8 @@ class MqttSession:
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_mqtt_message
         self._client.on_subscribe = self._on_subscribe
+        # 断线后自动重连（1s 起、30s 封顶）；`loop_start` 跑的就是带重连的 loop_forever。
+        self._client.reconnect_delay_set(min_delay=1, max_delay=30)
         self._client.connect_async(self.host, self.port, keepalive=self._keepalive)
         self._client.loop_start()
         if not self._connected.wait(timeout):
@@ -68,10 +75,21 @@ class MqttSession:
         code = getattr(reason_code, "value", reason_code)
         if code not in (0, None):
             self._error = f"MQTT broker {self.host}:{self.port} 拒绝连接：{reason_code}"
+            self._connected.set()
+            return
+        self._error = ""
         self._connected.set()
+        if self._on_state is not None:
+            self._on_state(True, "connected")
+        # 重连后 broker 不记得旧订阅（clean session），把启动时订过的 topic 再订一遍。
+        # 这里在 paho 的网络线程上，用非阻塞的 subscribe，不能调带 SUBACK 等待的那个版本。
+        for topic, qos in self._topics:
+            self._client.subscribe(topic, qos=qos)
 
-    def _on_disconnect(self, _client, _userdata, _flags, _reason_code, _properties=None):
+    def _on_disconnect(self, _client, _userdata, _flags, reason_code, _properties=None):
         self._connected.clear()
+        if self._on_state is not None and not self._closing:
+            self._on_state(False, str(reason_code))
 
     def _on_subscribe(self, _client, _userdata, mid, _reason_codes, _properties=None):
         # 只认当前这一次订阅的 mid：上一轮的 SUBACK 晚到不能把这一轮提前放行。
@@ -95,14 +113,18 @@ class MqttSession:
         self._sub_mid = mid
         if not self._subscribed.wait(3.0):
             raise BackendStartError(f"订阅 {topic} 超时（没收到 SUBACK）")
+        self._topics.append((topic, qos))
 
     def publish(self, topic: str, payload: str, qos: int = 1,
                 retain: bool = True) -> None:
+        if not self._connected.is_set():
+            raise ConnectionError(f"MQTT broker {self.host}:{self.port} 未连接（正在重连）")
         info = self._client.publish(topic, payload, qos=qos, retain=retain)
         if qos > 0:
             info.wait_for_publish(timeout=3.0)
 
     def close(self) -> None:
+        self._closing = True
         client, self._client = self._client, None
         self._connected.clear()
         if client is not None:
@@ -137,7 +159,8 @@ class MqttBackend(BackendBase):
     def _create_server(self, _devices):
         self._index_points()
         return self._session_factory(self.channel.host, int(self.channel.port),
-                                     self._on_message)
+                                     self._on_message,
+                                     on_state=self._on_connection_state)
 
     def _start_server(self, server):
         # 连接/订阅是阻塞调用：放进线程里跑，别把引擎 loop 冻住（同 `_probe` 那条口径）。
@@ -238,6 +261,17 @@ class MqttBackend(BackendBase):
                 return device.name
         return str(unit)
 
+    def _on_connection_state(self, connected: bool, detail: str) -> None:
+        now = time.monotonic()
+        if connected:
+            self._emit("info", "mqtt_connected", (),
+                       f"{self.channel_name}: MQTT 已连接 "
+                       f"{self.channel.host}:{self.channel.port}", now)
+        else:
+            self._emit("warning", "mqtt_disconnected", (),
+                       f"{self.channel_name}: MQTT 连接断开（{detail}），"
+                       f"正在自动重连 {self.channel.host}:{self.channel.port}", now)
+
     def _on_message(self, topic: str, payload) -> None:
         """paho 网络线程 -> 引擎 loop。状态只许在 loop 上改。"""
         loop = self._loop
@@ -262,7 +296,13 @@ class MqttBackend(BackendBase):
             return
         self._sources.own(self.channel_name, unit, pt.area, pt.address,
                           count=max(1, pt.span), who="mqtt")
-        self._write_point(unit, pt, value)
+        try:
+            self._write_point(unit, pt, value)
+        except ConnectionError as exc:
+            self._emit("warning", "mqtt_publish", (unit, pt.area, pt.address),
+                       f"{self.channel_name}: 收到 {topic} 但回发失败：{exc}",
+                       time.monotonic())
+            return
         self._trace("rx", (payload if isinstance(payload, (bytes, bytearray))
                           else str(payload).encode("utf-8")), unit, f"SET {topic}")
 

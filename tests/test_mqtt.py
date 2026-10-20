@@ -30,8 +30,9 @@ def channel(prefix="simbench", qos=1) -> MqttChannel:
 class FakeSession:
     """假 broker 会话：记录订阅/发布，`deliver` 把消息交给后端回调。"""
 
-    def __init__(self, host, port, on_message):
+    def __init__(self, host, port, on_message, on_state=None):
         self.host, self.port, self.on_message = host, port, on_message
+        self.on_state = on_state
         self.connected = False
         self.subscribed: list[tuple[str, int]] = []
         self.published: list[tuple[str, str, int, bool]] = []
@@ -123,6 +124,20 @@ def test_backend_publishes_initial_values_and_receives_set_messages():
     finally:
         asyncio.run(backend.stop())
     assert session.closed
+
+
+def test_disconnect_and_reconnect_are_logged():
+    logs: list[tuple[str, str]] = []
+    backend = MqttBackend(channel(), session_factory=FakeSession,
+                          log_sink=lambda level, text: logs.append((level, text)))
+    asyncio.run(backend.start())
+    try:
+        backend._server.on_state(False, "keepalive timeout")
+        backend._server.on_state(True, "connected")
+        text = "\n".join(line for _level, line in logs)
+        assert "断开" in text and "已连接" in text, logs
+    finally:
+        asyncio.run(backend.stop())
 
 
 def test_readback_feeds_the_point_table():
