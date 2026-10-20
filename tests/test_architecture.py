@@ -18,7 +18,7 @@ import simbench
 # 只许出现在 backend/：pymodbus 与 pyserial 是 Modbus 两条路的原生依赖，snap7 是 S7 的。
 # snap7 进这张表是 S7 里程碑 Task 8 的收尾项——它本来只在 backend/s7_server.py 里 import，
 # 但不写进守卫就等于"靠人记得住"，而下一个想在 gui 里直接摸 DLL 的人不会被拦。
-LIBRARY_ONLY = ("pymodbus", "serial", "snap7")
+LIBRARY_ONLY = ("pymodbus", "serial", "snap7", "paho")
 GUI_ONLY = ("PySide6", "PyQt5")              # 只许出现在 gui/（M2 才落地）
 BACKEND = "backend"
 # 主站模式（2026-10-14 E1）也是"与协议库打交道的那一层"：它不是后端（不监听任何端口），

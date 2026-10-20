@@ -1,0 +1,10 @@
+channel,device,unit_id,name,area,address,datatype,word_order,initial,waveform,wave_param,readonly
+mqtt-1@mqtt:127.0.0.1:1883,温湿度-1,1,hr00-温度-℃,hr,0,float32,ABCD,23.5,const,,false
+mqtt-1@mqtt:127.0.0.1:1883,温湿度-1,1,hr02-湿度-%RH,hr,2,float32,ABCD,58.2,const,,false
+mqtt-1@mqtt:127.0.0.1:1883,温湿度-1,1,hr04-采样计数,hr,4,uint32,ABCD,1000,const,,false
+mqtt-1@mqtt:127.0.0.1:1883,温湿度-1,1,di0-高温报警,di,0,bool,ABCD,false,const,,true
+mqtt-1@mqtt:127.0.0.1:1883,水泵-1,2,hr00-运行状态,hr,0,uint16,ABCD,1,const,,false
+mqtt-1@mqtt:127.0.0.1:1883,水泵-1,2,hr01-转速-rpm,hr,1,uint16,ABCD,1450,ramp,from=1200;to=1800;speed=0.5,false
+mqtt-1@mqtt:127.0.0.1:1883,水泵-1,2,hr02-电流-A,hr,2,float32,ABCD,18.4,sine,base=18;amp=2;period=20,false
+mqtt-1@mqtt:127.0.0.1:1883,水泵-1,2,co0-启动,co,0,bool,ABCD,false,const,,false
+mqtt-1@mqtt:127.0.0.1:1883,水泵-1,2,di0-运行反馈,di,0,bool,ABCD,true,const,,true

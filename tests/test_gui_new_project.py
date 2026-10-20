@@ -704,7 +704,7 @@ def test_only_the_new_project_dialog_offers_a_blank_start(qapp):
     assert sorted(add.form._buttons) == sorted(edit.TRANSPORTS)
     assert "blank" not in add.form._buttons
     new = NewProjectDialog()
-    assert sorted(new.form._buttons) == ["blank", "rtu", "s7", "tcp"]
+    assert sorted(new.form._buttons) == ["blank", "mqtt", "rtu", "s7", "tcp"]
 
 
 def test_switching_projects_says_which_running_channel_it_stopped(

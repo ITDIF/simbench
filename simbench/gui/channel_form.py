@@ -41,7 +41,7 @@ _HINT_WIDTH = 328
 # 帧类型那件事**不占格子**：它由点的是哪个按钮决定（RTU 还是 ASCII），写进通道的 `framing`。
 _KIND_LABELS = (("blank", "空白工程"), ("tcp", "TCP"), ("udp", "UDP"),
                 ("rtutcp", "TCP 上的 RTU"), ("rtu", "串口 RTU"),
-                ("ascii", "串口 ASCII"), ("s7", "S7"))
+                ("ascii", "串口 ASCII"), ("s7", "S7"), ("mqtt", "MQTT"))
 _LABELS = {
     "blank": ("", "", ""),
     "tcp": ("监听地址", "端口", ""),
@@ -50,6 +50,7 @@ _LABELS = {
     "rtu": ("串口名", "波特率", "帧格式"),
     "ascii": ("串口名", "波特率", "帧格式"),
     "s7": ("监听地址", "端口", "机架/槽位"),
+    "mqtt": ("broker", "端口", "QoS"),
 }
 _HINTS = {
     "blank": "空工程：落地后在设备树上右键添加通道",
@@ -59,6 +60,7 @@ _HINTS = {
     "rtu": "串口名要自己填：本工具不替现场猜 COM 口",
     "ascii": "串口 ASCII：同样是串口，帧是可打印十六进制",
     "s7": "S7 惯例端口 102；机架 0 槽位 1",
+    "mqtt": "MQTT：连 broker，默认 1883",
 }
 _FIRST_TIPS = {
     "blank": "",
@@ -68,14 +70,17 @@ _FIRST_TIPS = {
     "rtu": "串口名（例：COM3）——必须填，且不许含空格",
     "ascii": "串口名（例：COM3）——必须填，且不许含空格",
     "s7": "监听地址（例：0.0.0.0）；不许含 ':' 或 '/'",
+    "mqtt": "broker 地址（例：127.0.0.1）",
 }
 _SECOND_TIPS = {"blank": "", "tcp": "监听端口（例：5020）", "udp": "监听端口（例：5020）",
                 "rtutcp": "监听端口（例：5020）", "rtu": "波特率（例：9600）",
-                "ascii": "波特率（例：9600）", "s7": "S7 惯例端口 102"}
+                "ascii": "波特率（例：9600）", "s7": "S7 惯例端口 102",
+                "mqtt": "broker 端口（例：1883）"}
 _THIRD_TIPS = {"blank": "", "tcp": "", "udp": "", "rtutcp": "",
                "rtu": "帧格式：数据位/校验/停止位（例：8E1）",
                "ascii": "帧格式：数据位/校验/停止位（例：8E1）",
-               "s7": "机架/槽位（例：0/1；客户端连上来时报的那两个数）"}
+               "s7": "机架/槽位（例：0/1；客户端连上来时报的那两个数）",
+               "mqtt": "QoS 0/1/2（默认 1）"}
 
 
 def form_values(kind: str, channel) -> dict:
@@ -87,6 +92,9 @@ def form_values(kind: str, channel) -> dict:
     if kind == "s7":
         return {"name": channel.name, "first": channel.host, "second": str(channel.port),
                 "third": f"{channel.rack}/{channel.slot}"}
+    if kind == "mqtt":
+        return {"name": channel.name, "first": channel.host, "second": str(channel.port),
+                "third": str(channel.qos)}
     return {"name": channel.name, "first": channel.host, "second": str(channel.port),
             "third": ""}
 
@@ -107,7 +115,8 @@ class ChannelForm(QtWidgets.QWidget):
     """`kinds` 决定单选按钮有哪几个；`provider(kind) -> dict` 给每种的起手值（可换）。"""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None,
-                 kinds=("tcp", "rtu", "s7"), start: str = "tcp", provider=None) -> None:
+                 kinds=("tcp", "rtu", "s7", "mqtt"), start: str = "tcp",
+                 provider=None) -> None:
         super().__init__(parent)
         self._kinds = tuple(kinds)
         self._provider = provider or (lambda kind: starting_values(kind))
@@ -233,6 +242,9 @@ class ChannelForm(QtWidgets.QWidget):
         third = self.third_edit.text().strip()
         if kind == "tcp":
             return {"name": name, "host": first, "port": self._int(second, "port")}
+        if kind == "mqtt":
+            return {"name": name, "host": first, "port": self._int(second, "port"),
+                    "qos": self._int(third or "1", "qos")}
         if kind == "s7":
             parts = third.split("/")
             if len(parts) != 2 or not all(part.strip().isdigit() for part in parts):

@@ -89,7 +89,8 @@ class NewProjectDialog(_EditDialog):
         # 对话框不该为了算一个默认值去真占端口。
         self._probe = probe or ports.is_free
         column = QtWidgets.QVBoxLayout(self.form_area)
-        self.form = ChannelForm(self.form_area, kinds=("blank", "tcp", "rtu", "s7"),
+        self.form = ChannelForm(self.form_area,
+                                kinds=("blank", "tcp", "rtu", "s7", "mqtt"),
                                 start=edit.BLANK,
                                 provider=lambda kind: starting_values(
                                     kind, probe=self._probe))

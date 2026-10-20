@@ -12,6 +12,7 @@ from .model import (
     S7_DEFAULTS,
     SERIAL_DEFAULTS,
     Device,
+    MqttChannel,
     Point,
     Project,
     S7Channel,
@@ -180,6 +181,10 @@ def _channel_to_dict(channel) -> dict:
         return {"name": channel.name, "type": "s7", "host": channel.host,
                 "port": channel.port, "rack": channel.rack, "slot": channel.slot,
                 "devices": devices}
+    if transport == "mqtt":
+        return {"name": channel.name, "type": "mqtt", "host": channel.host,
+                "port": channel.port, "topic_prefix": channel.topic_prefix,
+                "qos": channel.qos, "devices": devices}
     if is_serial(transport):
         # `type` 就是传输名（`rtu` / `ascii`），**不另写 `framing` 键**：一个事实一个位置。
         # 好处是老工程与 spec §5 的示例逐字节不变（它们没有这个键）。
@@ -199,6 +204,15 @@ def _channel_from_dict(raw: dict, index: int):
         return _serial_channel_from_dict(raw, index)
     if raw.get("type") == "s7":
         return _s7_channel_from_dict(raw, index)
+    if raw.get("type") == "mqtt":
+        name = raw.get("name")
+        return MqttChannel(
+            name=name,
+            host=raw.get("host", "127.0.0.1"),
+            port=_require_int(raw.get("port", 1883), "port", f"channel {brief(name)}"),
+            topic_prefix=str(raw.get("topic_prefix", "simbench")),
+            qos=_require_int(raw.get("qos", 1), "qos", f"channel {brief(name)}"),
+            devices=_devices_from_dict(raw, name))
     _require_keys(raw, TcpChannel, f"channel #{index}")
     name = raw["name"]
     return TcpChannel(

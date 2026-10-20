@@ -259,6 +259,8 @@ class EditMixin:
         else:
             self.point_model.detach()
         self._states = states
+        # 点表结构变了：核对结论/异常角标都过期，清掉并刷新目标通道列表。
+        self.verify_panel.reset()
         for name, state in states.items():
             # rebuild 之后控件是新的：状态要重新贴一遍，否则在跑的那一路会显示成"停止"
             self.tree.set_status(name, state)

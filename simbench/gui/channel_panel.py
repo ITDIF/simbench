@@ -52,6 +52,7 @@ class ChannelRow:
     channel: str
     serial: bool                  # 串口通道：那一行的三格换含义（串口名/波特率/帧格式）
     s7: bool                      # S7 通道：第三格是 rack/slot（前两格仍是 host/port）
+    mqtt: bool                    # MQTT 通道：前两格是 broker host/port，第三格是 QoS
     name_label: QtWidgets.QLabel
     host_edit: QtWidgets.QLineEdit
     port_edit: QtWidgets.QLineEdit
@@ -209,6 +210,8 @@ class ChannelPanel(QtWidgets.QWidget):
             return self._apply_serial_edits(row, target, channel)
         if row.s7:
             return self._apply_s7_edits(row, target, channel)
+        if row.mqtt:
+            return self._apply_mqtt_edits(row, target, channel)
         return self._apply_tcp_edits(row, target, channel)
 
     def _apply_tcp_edits(self, row: ChannelRow, target, channel: str) -> int | None:
@@ -254,6 +257,25 @@ class ChannelPanel(QtWidgets.QWidget):
 
         changes = {"port": port, "baudrate": baudrate, **frame}
         return self._commit(channel, target, changes, restore, result=baudrate)
+
+    def _apply_mqtt_edits(self, row: ChannelRow, target, channel: str) -> int | None:
+        """MQTT 行：broker 地址格 + 端口格 + QoS 格（0/1/2）。"""
+        host = row.host_edit.text().strip()
+        text = row.port_edit.text().strip()
+        text_qos = row.frame_edit.text().strip()
+        try:
+            port = int(text)
+            qos = int(text_qos)
+        except ValueError:
+            return self._refuse(f"{channel}: port/QoS {text!r}/{text_qos!r} is not a number")
+
+        def restore(old) -> None:
+            row.host_edit.setText(old["host"])
+            row.port_edit.setText(str(old["port"]))
+            row.frame_edit.setText(str(old["qos"]))
+
+        return self._commit(channel, target, {"host": host, "port": port, "qos": qos},
+                            restore, result=port)
 
     def _apply_s7_edits(self, row: ChannelRow, target, channel: str) -> int | None:
         """S7 行：地址格 + 端口格 + `rack/slot` 格（`0/1` 这种写法）。
@@ -324,15 +346,19 @@ class ChannelPanel(QtWidgets.QWidget):
         transport = channel_transport(ch)
         serial = is_serial(transport)
         s7 = transport == "s7"
+        mqtt = transport == "mqtt"
         name = QtWidgets.QLabel(ch.name)
         name.setMinimumWidth(72)
         host = QtWidgets.QLineEdit(ch.port if serial else ch.host)
         host.setFixedWidth(_HOST_WIDTH)
-        host.setToolTip("串口名（例：COM3）" if serial else "监听地址（例：0.0.0.0）")
+        host.setToolTip("串口名（例：COM3）" if serial else
+                        "broker 地址（例：127.0.0.1）" if mqtt else
+                        "监听地址（例：0.0.0.0）")
         port = QtWidgets.QLineEdit(str(ch.baudrate) if serial else str(ch.port))
         port.setFixedWidth(_PORT_WIDTH)
-        port.setToolTip("波特率（例：9600）" if serial
-                        else "监听端口（例：5020；S7 惯例 102）")
+        port.setToolTip("波特率（例：9600）" if serial else
+                        "broker 端口（例：1883）" if mqtt else
+                        "监听端口（例：5020；S7 惯例 102）")
         # 第三格：串口是帧格式、**S7 是 rack/slot**（`0/1`）、TCP 留空并置灰。
         # 三个传输共用同一列，是为了不动 TCP 行已经钉住的几何（口径 4/5）。
         if serial:
@@ -341,6 +367,9 @@ class ChannelPanel(QtWidgets.QWidget):
         elif s7:
             third = f"{ch.rack}/{ch.slot}"
             third_tip = "机架/槽位（例：0/1；客户端连上来时报的那两个数）"
+        elif mqtt:
+            third = str(ch.qos)
+            third_tip = "QoS：0（最多一次）/ 1（至少一次）/ 2（恰好一次）"
         else:
             third = ""
             # 空着的那一格也留一句话：光看一个灰空框，操作员只会怀疑"这里是不是坏了"。
@@ -349,7 +378,7 @@ class ChannelPanel(QtWidgets.QWidget):
         frame = QtWidgets.QLineEdit(third)
         frame.setFixedWidth(_FRAME_WIDTH)
         frame.setToolTip(third_tip)
-        frame.setEnabled(serial or s7)
+        frame.setEnabled(serial or s7 or mqtt)
         # 端口框刻意**不装** QIntValidator：范围判定只有 validate 那一份，输入框里
         # 悄悄吞掉键击是"没反馈的拒绝"，用户只会觉得点不动。改完就验、验不过就退回去
         # 并说一句人话，比默默拦键好读。
@@ -366,8 +395,8 @@ class ChannelPanel(QtWidgets.QWidget):
         frame.editingFinished.connect(lambda n=ch.name: self.apply_edits(n))
         for column, widget in enumerate((name, host, port, frame, start, stop, status)):
             self._grid.addWidget(widget, index, column)
-        return ChannelRow(ch.name, serial, s7, name, host, port, frame, start, stop,
-                          status)
+        return ChannelRow(ch.name, serial, s7, mqtt, name, host, port, frame, start,
+                          stop, status)
 
     def _start(self, channel: str) -> None:
         if self._operation_busy:
@@ -442,7 +471,7 @@ class ChannelPanel(QtWidgets.QWidget):
         row.host_edit.setEnabled(not running)        # 跑着改地址 = 改的不是正在跑的那个
         row.port_edit.setEnabled(not running)
         # 第三格：TCP 行恒置灰（这一格对它没有意义），串口/S7 行跟着"在跑"置灰
-        row.frame_edit.setEnabled((row.serial or row.s7) and not running)
+        row.frame_edit.setEnabled((row.serial or row.s7 or row.mqtt) and not running)
 
     def _errors(self) -> list[str]:
         """当前拦住启动的那几条。判定住在 `validate_project`，面板一份都不抄。"""

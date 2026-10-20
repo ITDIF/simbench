@@ -16,6 +16,7 @@ from .model import (
     WAVEFORMS,
     WORD_ABCD,
     WORD_ORDERS,
+    MqttChannel,
     S7Channel,
     SerialChannel,
     area_is_bit,
@@ -29,6 +30,7 @@ from .model import (
     s7_span_bytes,
     word_orders_allowed,
 )
+from .mqtt_topic import value_topic
 
 # 串口通道的合法集（M5 口径 4）。白名单而不是范围：现场能用的波特率就这几个，写 9500
 # 这种"看着也像数"的值进来，真跑起来是收发全乱、报文窗里一片 CRC 错，比当场报错难查得多。
@@ -106,6 +108,8 @@ def validate_project(project) -> list[Issue]:
             serial_key = _serial(ch, issues, name)
         elif isinstance(ch, S7Channel):
             host_ok, port_ok = _s7(ch, issues, name)
+        elif isinstance(ch, MqttChannel):
+            host_ok, port_ok = _mqtt(ch, issues, name)
         elif is_socket(transport):
             # tcp / udp / rtutcp 共用同一套 host:port 判定（它们就是同一个形状，
             # 只差帧怎么切——那是后端的事，不是点表的事）
@@ -117,7 +121,9 @@ def validate_project(project) -> list[Issue]:
         # 同 host+port 的两个通道要等启动第二阶段才炸 bind，Windows 只回一句 10048、
         # 不带通道名，现场看不出是点表配置错：静态查得出的冲突就静态报完（裁决 R）。
         # 脏 port 与脏 host 上面两条已各自说完，键也构造不出来，一起跳过（裁决 O/T）。
-        if port_ok and host_ok:
+        # MQTT 连的是 broker，多个通道共用同一个 host:port 是正常用法，不能按
+        # "监听端口重复"报错（那种检查只对真正 bind 的 tcp/udp/rtutcp/s7 有意义）。
+        if port_ok and host_ok and not isinstance(ch, MqttChannel):
             key = (ch.host, ch.port)
             if key in bound:
                 issues.append(Issue("error", "port_duplicated", name,
@@ -189,6 +195,42 @@ def _s7(ch, issues: list[Issue], where: str) -> tuple[bool, bool]:
         issues.append(Issue("error", "s7_slot", where,
                             f"slot {brief(ch.slot)} must be in "
                             f"{S7_SLOTS[0]}..{S7_SLOTS[-1]}"))
+    return host_ok, port_ok
+
+
+def _mqtt(ch, issues: list[Issue], where: str) -> tuple[bool, bool]:
+    """MQTT 通道：broker host/port、QoS、topic 前缀，以及"两个点抢同一个 topic"。"""
+    port_ok = _is_int(ch.port) and 1 <= ch.port <= 65535
+    host_ok = isinstance(ch.host, str) and bool(ch.host.strip())
+    if not host_ok:
+        issues.append(Issue("error", "host", where,
+                            f"host must be a non-empty string, got {brief(ch.host)}"))
+    elif "/" in ch.host or any(char.isspace() for char in ch.host):
+        # 这两个字符会把 CSV 的 `name@mqtt:host:port` 拆坏；host 本身不判 IP 语法。
+        host_ok = False
+        issues.append(Issue("error", "host", where,
+                            f"MQTT host {brief(ch.host)} must not contain '/' or whitespace"))
+    if not port_ok:
+        issues.append(Issue("error", "port", where,
+                            f"port {brief(ch.port)} must be in 1..65535"))
+    if ch.qos not in (0, 1, 2):
+        issues.append(Issue("error", "mqtt_qos", where,
+                            f"QoS {brief(ch.qos)} must be 0, 1 or 2"))
+    if (not isinstance(ch.topic_prefix, str) or not ch.topic_prefix.strip()
+            or any(char in ch.topic_prefix for char in "+#")):
+        issues.append(Issue("error", "mqtt_topic_prefix", where,
+                            f"topic prefix {brief(ch.topic_prefix)} must be non-empty "
+                            f"and must not contain '+' or '#'"))
+    seen: dict[str, str] = {}
+    for dev in ch.devices:
+        for pt in dev.points:
+            topic = value_topic(ch.topic_prefix, ch.name, dev.name, pt.area, pt.address)
+            if topic in seen:
+                issues.append(Issue("error", "mqtt_topic", where,
+                                    f"topic {brief(topic)} is used by both "
+                                    f"{brief(seen[topic])} and {brief(pt.name)}"))
+            else:
+                seen[topic] = pt.name
     return host_ok, port_ok
 
 

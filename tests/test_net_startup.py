@@ -706,7 +706,6 @@ def test_gui_entry_shows_the_window_before_network_prepare(qapp, monkeypatch):
 
 def test_net_run_does_not_swallow_other_threads_output(monkeypatch, capsys):
     """回归：`_run_net` 只能截获本线程的输出，不能像 redirect_stdout 那样吞掉别的线程。"""
-    import sys
     import threading
 
     from simbench.net import cli

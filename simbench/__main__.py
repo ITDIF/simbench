@@ -16,7 +16,7 @@ import sys
 from .__about__ import __version__
 from .backend import BackendBase, BackendStartError, UnsupportedTransportError, make_backend
 from .csv_io_entry import load_point_table
-from .project.model import Channel, channel_transport, s7_summary, serial_summary
+from .project.model import Channel, channel_transport, is_mqtt, s7_summary, serial_summary
 from .project.validate import error_lines, validate_project
 
 
@@ -192,11 +192,12 @@ def _run_master(args, project) -> int:
     """
     from .master import report
     from .master.modbus import MasterLink
+    from .master.mqtt import MqttMasterLink
     from .master.scan import scan_units, verify_points
 
     channel = _master_channel(project)
     if channel is None:
-        print("[error] [master] 这份点表里没有可用的 Modbus 通道"
+        print("[error] [master] 这份点表里没有可用的 Modbus / MQTT 通道"
               "（S7 的主站模式还没做）", file=sys.stderr)
         return 2
     try:
@@ -205,7 +206,11 @@ def _run_master(args, project) -> int:
         print(f"[error] [master] {exc}", file=sys.stderr)
         return 2
     try:
-        link = MasterLink.for_channel(channel, host=args.host, port=args.port)
+        if is_mqtt(channel_transport(channel)):
+            link = MqttMasterLink.for_channel(
+                channel, timeout=1.0, host=args.host, port=args.port)
+        else:
+            link = MasterLink.for_channel(channel, host=args.host, port=args.port)
     except ValueError as exc:
         print(f"[error] [master] {exc}", file=sys.stderr)
         return 2
@@ -298,7 +303,9 @@ async def _serve(channels: list[tuple[Channel, list[tuple[str, int]]]],
         # 主站连的是**设备那一侧**的地址，只报 0.0.0.0:5020 等于没告诉他该连哪），串口是那一串
         # 串口参数（`COM3 19200 8E1`）。两种说法分头写在两处迟早对不上，所以只有一处。
         where = backend.describe()
-        verb = "listening on" if channel_transport(channel) == "tcp" else "serving on"
+        transport = channel_transport(channel)
+        verb = ("listening on" if transport == "tcp"
+                else "connected to" if transport == "mqtt" else "serving on")
         print(f"[simbench] {channel.name}: {verb} {where} "
               f"unit ids {_units(channel)}", flush=True)
         started.append((channel, backend))

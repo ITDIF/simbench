@@ -28,6 +28,7 @@ from .model import (
     UINT16,
     WORD_ABCD,
     Device,
+    MqttChannel,
     Point,
     Project,
     S7Channel,
@@ -46,7 +47,7 @@ from .validate import error_lines, validate_project
 # 两处各写一份字符串迟早对不上，界面上"选了 TCP 却去建串口"就这么来的。
 # 能"从零建一条"的传输（顺序就是界面上按钮的顺序）：socket 三种、串口两种、S7。
 # `MODBUS_TRANSPORTS` 那份清单在 `model.py`（它同时给 validate/后端工厂用）。
-TRANSPORTS = ("tcp", "udp", "rtutcp", "rtu", "ascii", "s7")
+TRANSPORTS = ("tcp", "udp", "rtutcp", "rtu", "ascii", "s7", "mqtt")
 BLANK = "blank"                     # "新建工程"里的空白起步（不是一种传输，别混进 TRANSPORTS）
 
 # TCP 默认端口从 5020 起：502 要管理员权限、首次监听还要放行防火墙（spec §13），
@@ -93,7 +94,7 @@ def next_channel_name(project, transport: str, probe=None) -> str:
         # 端口是 5021 的话，导出的 CSV 与人对名字的期待都会对不上。
         port = next_port(project, DEFAULT_TCP_PORT, probe)
         return f"tcp-{port}"
-    stem = "rtu" if transport == "rtu" else "s7"
+    stem = {"rtu": "rtu", "ascii": "ascii", "s7": "s7", "mqtt": "mqtt"}.get(transport, transport)
     serial = 1
     while f"{stem}-{serial}" in used:
         serial += 1
@@ -270,6 +271,14 @@ def default_channel(project, transport: str, name: str | None = None, probe=None
                              bytesize=overrides.get("bytesize", SERIAL_DEFAULTS["bytesize"]),
                              stopbits=overrides.get("stopbits", SERIAL_DEFAULTS["stopbits"]),
                              timeout=overrides.get("timeout", SERIAL_DEFAULTS["timeout"]))
+    if transport == "mqtt":
+        # MQTT 连 broker：默认 127.0.0.1:1883、前缀 simbench、QoS 1。
+        # 多条 MQTT 通道可以共用同一个 broker，所以端口不递增。
+        return MqttChannel(name=name,
+                           host=overrides.get("host", "127.0.0.1"),
+                           port=overrides.get("port", 1883),
+                           topic_prefix=overrides.get("topic_prefix", "simbench"),
+                           qos=overrides.get("qos", 1))
     if transport == "s7":
         return S7Channel(name=name,
                          host=overrides.get("host", S7_DEFAULTS["host"]),

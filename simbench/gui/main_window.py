@@ -152,7 +152,8 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
             lambda text: self.status.showMessage(text, _NOTICE_MS))
         self.bridge.channel_state.connect(self._on_state)
         self.bridge.logged.connect(self._on_log)
-        self.verify_panel.notice.connect(self._log)
+        self.verify_panel.notice.connect(self._on_verify_notice)
+        self.verify_panel.alerts_changed.connect(self._on_verify_alerts)
         self.bridge.point_changed.connect(lambda _event: self.point_model.refresh())
         self.point_table.restore_requested.connect(self._restore_waveform)
         self.point_table.props_requested.connect(self._show_point_props)
@@ -376,6 +377,8 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
                    if (runtime := self.session.channel(name)) is not None
                    and runtime.running]
         issues = self.session.load(project, source=path)
+        # 换工程：旧的核对结论/告警不再适用，监视也停掉。
+        self.verify_panel.reset()
         for name in stopped:
             self._log(f"[stopped] {name}：换工程时停掉了这一路正在运行的服务")
         names = self.session.channel_names()
@@ -440,6 +443,18 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         item = self.tree.item_for(channel)
         if item is not None:
             self.tree.setCurrentItem(item)
+
+    def _on_verify_notice(self, text: str) -> None:
+        """核对页的话：一律进日志；异常/恢复再顶到状态栏，现场不用翻日志也能看见。"""
+        self._log(text)
+        if text.startswith(("[alert]", "[info] 已恢复")):
+            self.status.showMessage(_one_line(text), _NOTICE_MS)
+
+    def _on_verify_alerts(self, count: int) -> None:
+        """异常总数挂到「核对」标签上：没切到那一页也看得见。"""
+        index = self.tabs.indexOf(self.verify_panel)
+        if index >= 0:
+            self.tabs.setTabText(index, "核对" if count <= 0 else f"核对 ●{count}")
 
     def _on_tab_changed(self, index: int) -> None:
         """网络页被选中时重新对一次账（只读）。别的时候一个系统调用都不发。"""
@@ -745,6 +760,7 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
             event.ignore()
             return
         self.timer.stop()
+        self.verify_panel.stop_monitor()
         self.rows_pump.stop()
         self.session.shutdown()
         self._remember_settings()

@@ -46,7 +46,7 @@ VERSION = str(HERE / "version_info.txt")
 snap7_datas, snap7_binaries, snap7_hidden = collect_all("snap7")
 datas = list(snap7_datas)
 binaries = list(snap7_binaries)
-hiddenimports = list(snap7_hidden) + ["pkg_resources"]
+hiddenimports = list(snap7_hidden) + ["pkg_resources", "paho.mqtt.client"]
 
 a = Analysis(
     [str(HERE / "entry.py")],

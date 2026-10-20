@@ -403,6 +403,21 @@ class SerialChannel:
 
 
 @dataclass
+class MqttChannel:
+    """一路 MQTT：**连到 broker**（不是监听端口），点位按 topic 发布/订阅。
+
+    `topic_prefix` 是通用模板的前缀（默认 `simbench`）；topic 与 payload 的规则只在
+    `project/mqtt_topic.py` 一处，CSV 里省写成 `name@mqtt:host:port`。
+    """
+    name: str
+    host: str = "127.0.0.1"
+    port: int = 1883
+    topic_prefix: str = "simbench"
+    qos: int = 1
+    devices: list[Device] = field(default_factory=list)
+
+
+@dataclass
 class S7Channel:
     """一路 S7（ISO-on-TCP / S7comm）通道。`type` 同样不设字段，写盘时由 `json_io` 补 `"s7"`。"""
     name: str
@@ -418,7 +433,7 @@ class S7Channel:
 # 三种通道的**联合类型**：spec 里一直把它叫 "Channel"（§5 的数据模型：Project/Channel/
 # Device/Point），代码里原先在 `Project.channels` 与 `find_channel` 各手写一遍。给它一个
 # 名字，注解才写得下（`__main__._serve` 那份 `list[tuple[Channel, ...]]` 是第三处）。
-Channel = TcpChannel | SerialChannel | S7Channel
+Channel = TcpChannel | SerialChannel | S7Channel | MqttChannel
 
 
 # ---------- 传输（2026-10-14 E7：从两种扩到五种）----------
@@ -437,7 +452,7 @@ MODBUS_TRANSPORTS = (*SOCKET_TRANSPORTS, *SERIAL_TRANSPORTS)
 SERIAL_FRAMINGS = ("rtu", "ascii")
 TRANSPORT_LABELS = {"tcp": "Modbus TCP", "udp": "Modbus UDP",
                     "rtutcp": "Modbus RTU over TCP", "rtu": "串口 RTU",
-                    "ascii": "串口 ASCII", "s7": "S7"}
+                    "ascii": "串口 ASCII", "s7": "S7", "mqtt": "MQTT"}
 
 
 def is_socket(transport: str) -> bool:
@@ -455,6 +470,17 @@ def is_s7(transport: str) -> bool:
     return transport == "s7"
 
 
+def is_mqtt(transport: str) -> bool:
+    """这一路是不是 MQTT：连 broker、按 topic 收发，不是监听端口。"""
+    return transport == "mqtt"
+
+
+def mqtt_summary(channel) -> str:
+    """MQTT 通道的一句话摘要：`broker:1883（topic 前缀 simbench，QoS 1）`。"""
+    return (f"{channel.host}:{channel.port}"
+            f"（topic 前缀 {channel.topic_prefix}，QoS {channel.qos}）")
+
+
 def channel_transport(channel: Channel) -> str:
     """这一路用哪种传输（`tcp` / `udp` / `rtutcp` / `rtu` / `ascii` / `s7`）。
 
@@ -469,6 +495,8 @@ def channel_transport(channel: Channel) -> str:
         return "ascii" if getattr(channel, "framing", "rtu") == "ascii" else "rtu"
     if isinstance(channel, S7Channel):
         return "s7"
+    if isinstance(channel, MqttChannel):
+        return "mqtt"
     return getattr(channel, "type", "tcp")
 
 

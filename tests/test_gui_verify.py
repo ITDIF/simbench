@@ -59,6 +59,8 @@ def rig(qapp, engine_runner, tmp_path):
     window.show()
     qapp.processEvents()
     yield window, table, backend
+    window.verify_panel.stop_monitor()
+    window.verify_panel.wait_monitor(3.0)
     window.timer.stop()
     window.rows_pump.stop()
     window.session.shutdown()
@@ -84,9 +86,10 @@ def test_the_verify_page_is_a_tab_with_three_fixed_width_buttons(rig, qapp):
     panel = window.verify_panel
     assert window.tabs.indexOf(panel) >= 0, "核对页没加到标签里"
     assert (panel.scan_button.width(), panel.verify_button.width(),
-            panel.export_button.width()) == (BUTTON_WIDTHS["扫描 unit"],
-                                             BUTTON_WIDTHS["逐点核对"],
-                                             BUTTON_WIDTHS["导出报告"])
+            panel.monitor_button.width(), panel.export_button.width()) == (
+        BUTTON_WIDTHS["扫描 unit"], BUTTON_WIDTHS["逐点核对"],
+        BUTTON_WIDTHS["开始监视"], BUTTON_WIDTHS["导出报告"])
+    assert panel.monitor_button.text() == "开始监视"
     assert panel.export_button.isEnabled() is False, "还没有结论就允许导出"
 
 
@@ -146,10 +149,80 @@ def test_the_buttons_are_greyed_while_a_job_runs(rig, qapp, monkeypatch):
     before = panel.geometry_snapshot()
     panel.set_busy(True)
     assert not panel.scan_button.isEnabled() and not panel.verify_button.isEnabled()
+    assert not panel.monitor_button.isEnabled()
     assert panel.scan_button.isVisible() and panel.verify_button.isVisible()
     assert panel.geometry_snapshot() == before
     panel.set_busy(False)
     assert panel.scan_button.isEnabled()
+
+
+def test_monitoring_repeats_the_check_and_can_be_stopped(rig, qapp):
+    """持续监视：后台反复读真实从站；点停止后按钮回到「开始监视」。"""
+    window, _table, _backend = rig
+    panel = window.verify_panel
+    panel.interval.setValue(1)
+    panel.start_monitor()
+    try:
+        assert wait_until(qapp, lambda: panel.is_monitoring()
+                          and panel.row_count() == 2), panel.status_text()
+        assert wait_until(qapp, lambda: "监视中" in panel.status_text()), panel.status_text()
+        assert panel.monitor_button.text() == "停止监视"
+    finally:
+        panel.stop_monitor()
+    assert wait_until(qapp, lambda: not panel.is_monitoring()), panel.status_text()
+    assert panel.monitor_button.text() == "开始监视"
+
+
+def test_anomalies_are_coloured_announced_and_counted(rig, qapp):
+    """异常要同时做到：标色、写日志、状态栏提示、标签页角标；同一项不重复刷屏。"""
+    from simbench.master.scan import VerifyRow
+    window, _table, _backend = rig
+    panel = window.verify_panel
+    rows = [
+        VerifyRow("tcp-1", "D1", 11, "温度", "hr", 0, "uint16", "25", "25", "ok"),
+        VerifyRow("tcp-1", "D2", 12, "别家", "hr", 0, "uint16", "7", "9",
+                  "mismatch", "期望 [7]，读到 [9]"),
+        VerifyRow("tcp-1", "D3", 13, "离线", "hr", 0, "uint16", "1", "-",
+                  "no_unit", "timeout"),
+    ]
+    counts: list[int] = []
+    panel.alerts_changed.connect(counts.append)
+    panel._show_rows(rows)
+    qapp.processEvents()
+
+    assert panel.alert_count() == 2 and counts[-1] == 2
+    index = window.tabs.indexOf(panel)
+    assert window.tabs.tabText(index) == "核对 ●2"
+    assert panel.model.item(0, 0).foreground().style() == QtCore.Qt.NoBrush
+    assert panel.model.item(1, 0).foreground().style() == QtCore.Qt.SolidPattern
+    assert panel.model.item(2, 0).foreground().style() == QtCore.Qt.SolidPattern
+    log = window.log_view.toPlainText()
+    assert "[alert]" in log and "别家" in log and "离线" in log
+
+    # 同一轮再刷一次：没有新增，日志里不再多一条告警
+    before = log.count("[alert]")
+    panel._show_rows(rows)
+    qapp.processEvents()
+    assert window.log_view.toPlainText().count("[alert]") == before
+
+    # 恢复：角标清掉，日志里说一句
+    panel._show_rows(rows[0:1])
+    qapp.processEvents()
+    assert panel.alert_count() == 0
+    assert window.tabs.tabText(index) == "核对"
+    assert "已恢复 2 项" in window.log_view.toPlainText()
+
+
+def test_the_target_combo_lists_only_modbus_channels(rig, qapp):
+    from simbench.project.model import Project, S7Channel, TcpChannel
+    window, _table, _backend = rig
+    panel = window.verify_panel
+    project = Project(channels=[TcpChannel(name="tcp-a", port=5020),
+                                S7Channel("s7-1"),
+                                TcpChannel(name="tcp-b", port=5021)])
+    panel.refresh_targets(project)
+    names = [panel.target_combo.itemText(i) for i in range(panel.target_combo.count())]
+    assert names == ["tcp-a", "tcp-b"]
 
 
 def test_the_page_refuses_when_there_is_no_modbus_channel(rig, qapp):

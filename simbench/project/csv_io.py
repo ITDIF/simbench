@@ -19,6 +19,7 @@ from .model import (
     SERIAL_FRAMINGS,
     SERIAL_MARK,
     Device,
+    MqttChannel,
     Point,
     Project,
     S7Channel,
@@ -241,6 +242,15 @@ def _csv_channel_name(channel) -> str:
         if (channel.rack, channel.slot) != (S7_DEFAULTS["rack"], S7_DEFAULTS["slot"]):
             spec = f"{spec} {channel.rack}/{channel.slot}"
         return f"{channel.name}{SERIAL_MARK}{spec}"
+    if channel_transport(channel) == "mqtt":
+        # `name@mqtt:broker:port`；非默认的 topic 前缀 / QoS 跟在后面（空格分段，与 S7 的
+        # rack/slot 同一个写法）。默认值不写，保证常见的表看起来干净。
+        spec = f"mqtt:{channel.host}:{channel.port}"
+        if channel.topic_prefix != "simbench" or channel.qos != 1:
+            spec += f" {channel.topic_prefix}"
+            if channel.qos != 1:
+                spec += f" {channel.qos}"
+        return f"{channel.name}{SERIAL_MARK}{spec}"
     if is_socket(channel_transport(channel)):
         # TCP 也把监听地址写进 `@` 段，但**带一个 `tcp:` 前缀**：`name@tcp:host:port`。
         # 不写成 `name@host:port` —— 那个形状是 S7 的（`s7-1@192.168.0.10:102`），两种传输
@@ -269,10 +279,10 @@ def _csv_channel_name(channel) -> str:
     return f"{channel.name}{SERIAL_MARK}{' '.join(fields)}"
 
 
-SOCKET_SCHEMES = ("tcp:", "udp:", "rtutcp:")
+SOCKET_SCHEMES = ("tcp:", "udp:", "rtutcp:", "mqtt:")
 
 
-def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel] | None:
+def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel | MqttChannel] | None:
     """`<通道名>@<tcp|udp|rtutcp>:<host>:<port>` -> `(名字, TcpChannel)`；不是这个写法回 None。
 
     **三种方案都走这一个函数**（2026-10-14 E7 加 udp / rtutcp）：它们除了 `type` 之外
@@ -299,10 +309,13 @@ def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel] | None:
         raise ValueError(f"line {index}: channel {brief(raw)} has no name before "
                          f"{SERIAL_MARK!r} (write it as "
                          f"name{SERIAL_MARK}<tcp|udp|rtutcp>:host:port)")
-    if len(fields) > 1:
+    if scheme != "mqtt:" and len(fields) > 1:
         raise ValueError(f"line {index}: channel {brief(raw)} must be written as "
                          f"name{SERIAL_MARK}<tcp|udp|rtutcp>:host:port "
                          f"(one part after {SERIAL_MARK!r})")
+    if scheme == "mqtt:" and len(fields) > 3:
+        raise ValueError(f"line {index}: channel {brief(raw)} must be written as "
+                         f"name{SERIAL_MARK}mqtt:host:port[ PREFIX[ QOS]]")
     body = fields[0][len(scheme):]
     host, sep, port_text = body.rpartition(":")
     if not sep or not host:
@@ -314,6 +327,15 @@ def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel] | None:
     except ValueError:
         raise ValueError(f"line {index}: channel {brief(raw)}: port "
                          f"{brief(port_text)} is not an integer") from None
+    if scheme == "mqtt:":
+        prefix = fields[1] if len(fields) > 1 else "simbench"
+        try:
+            qos = int(fields[2]) if len(fields) > 2 else 1
+        except ValueError:
+            raise ValueError(f"line {index}: channel {brief(raw)}: QoS "
+                             f"{brief(fields[2])} is not an integer") from None
+        return name, MqttChannel(name=name, host=host, port=port,
+                                 topic_prefix=prefix, qos=qos)
     return name, TcpChannel(name=name, type=scheme[:-1], host=host, port=port)
 
 
@@ -522,6 +544,8 @@ def _channel_params(channel) -> tuple:
     # tcp/udp/rtutcp 都走 TcpChannel：参数只有 host:port。只按 "tcp" 判的话，
     # udp/rtutcp 会落到 `_serial_params` 去读 baudrate（TcpChannel 没有这个字段），
     # 同一路通道写到第二行就崩。
+    if transport == "mqtt":
+        return (channel.host, channel.port, channel.topic_prefix, channel.qos)
     if is_socket(transport):
         return (channel.host, channel.port)
     return _serial_params(channel)

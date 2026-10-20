@@ -22,6 +22,7 @@ from .modbus_rtutcp import RtuOverTcpBackend
 from .modbus_tcp import ModbusTcpBackend
 from .modbus_tcp import check_port_is_free as check_port_is_free
 from .modbus_udp import ModbusUdpBackend
+from .mqtt_client import MqttBackend
 from .s7_server import S7Backend
 
 
@@ -53,6 +54,10 @@ def make_backend(channel, *, packet_sink=None, on_connection=None, tick_ms: int 
         return serial_class(channel, packet_sink=packet_sink,
                             on_connection=on_connection, tick_ms=tick_ms,
                             log_sink=log_sink)
+    if transport == "mqtt":
+        return MqttBackend(channel, packet_sink=packet_sink,
+                           on_connection=on_connection, tick_ms=tick_ms,
+                           log_sink=log_sink)
     if transport == "s7":
         # S7 也没有"额外监听"那一维：一个 `host:port` 而已。
         return S7Backend(channel, packet_sink=packet_sink,

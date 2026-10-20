@@ -348,6 +348,26 @@ def test_a_refused_edit_leaves_the_dirty_flag_alone(built):
 
 # ---------- 口径 3/4：几何与文案 ----------
 
+def test_an_mqtt_row_edits_broker_and_qos(built):
+    from simbench.project.model import MqttChannel
+    panel, session, qapp = built
+    session.project.channels.append(
+        MqttChannel("mqtt-1", host="broker", port=1883, qos=1))
+    panel.rebuild(session.project)
+    row = by_channel(panel)["mqtt-1"]
+    qapp.processEvents()
+    assert (row.host_edit.text(), row.port_edit.text(),
+            row.frame_edit.text()) == ("broker", "1883", "1")
+    assert row.frame_edit.isEnabled()
+    row.host_edit.setText("broker2")
+    row.port_edit.setText("1884")
+    row.frame_edit.setText("2")
+    assert panel.apply_edits("mqtt-1") == 1884
+    channel = session.project.find_channel("mqtt-1")
+    assert (channel.host, channel.port, channel.qos) == ("broker2", 1884, 2)
+    assert session.dirty is True
+
+
 def test_many_channels_scroll_instead_of_pushing_the_rest_down(qapp):
     """通道多时面板高度有上限、其余行滚动：不许把下面的树和点位表挤出屏幕。"""
     project = Project(channels=[

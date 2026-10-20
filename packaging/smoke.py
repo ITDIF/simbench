@@ -400,6 +400,21 @@ def smoke_onefile_s7(exe: pathlib.Path, tmp: pathlib.Path) -> None:
         close(proc)
 
 
+def smoke_mqtt(exe: pathlib.Path, tmp: pathlib.Path) -> None:
+    """MQTT 通用模板：点表能解析，冻结包里的 paho 也真能走到连接那一步。"""
+    table = ROOT / "examples" / "mqtt-template.csv"
+    proc = run(exe, str(table), "--check")
+    record("MQTT 示例：冻结包 --check 通过",
+           proc.returncode == 0 and "point table is valid" in proc.stdout,
+           (proc.stderr or proc.stdout)[-200:])
+    # 没有 broker 时应在 5s 内给一句人话；关键是**不许**是 paho 没进包的 ImportError。
+    proc = run(exe, str(table), "--scan", "--units", "1", timeout=30)
+    text = (proc.stdout or "") + (proc.stderr or "")
+    record("MQTT：paho 真进包（连接 broker 的路径走得通）",
+           "mqtt" in text.lower() and "ModuleNotFoundError" not in text
+           and "ImportError" not in text, text[-240:])
+
+
 def main() -> int:
     # 控制台默认码页（cp936）打不出一些字符时的替换不应该污染这份记录，能设就设成 utf-8
     with contextlib.suppress(Exception):
@@ -425,6 +440,7 @@ def main() -> int:
         smoke_s7(exe, tmp)
         smoke_virtual_device(exe, tmp)
         smoke_master(exe, tmp)
+        smoke_mqtt(exe, tmp)
         if not args.skip_gui:
             smoke_gui(exe_dir, tmp)
         smoke_onefile(pathlib.Path(args.onefile), tmp)
