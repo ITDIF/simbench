@@ -358,13 +358,17 @@ def test_an_mqtt_row_edits_broker_and_qos(built):
     qapp.processEvents()
     assert (row.host_edit.text(), row.port_edit.text(),
             row.frame_edit.text()) == ("broker", "1883", "1")
-    assert row.frame_edit.isEnabled()
+    assert row.frame_edit.isEnabled() and row.prefix_edit.isEnabled()
+    assert row.prefix_edit.text() == "simbench"
+    assert not by_channel(panel)["tcp-5020"].prefix_edit.isEnabled()
     row.host_edit.setText("broker2")
     row.port_edit.setText("1884")
     row.frame_edit.setText("2")
+    row.prefix_edit.setText("plant")
     assert panel.apply_edits("mqtt-1") == 1884
     channel = session.project.find_channel("mqtt-1")
-    assert (channel.host, channel.port, channel.qos) == ("broker2", 1884, 2)
+    assert (channel.host, channel.port, channel.qos, channel.topic_prefix) == \
+        ("broker2", 1884, 2, "plant")
     assert session.dirty is True
 
 

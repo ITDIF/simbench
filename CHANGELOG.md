@@ -21,6 +21,7 @@
   "broker 断了但还在运行"。
 - **真实 broker 自动化用例**：开发依赖加入 `amqtt`，`tests/test_mqtt_broker.py` 在进程内
   起 broker，跑真实 paho 连接/订阅/retain/`/set` 回发与主站核对；没装 amqtt 时跳过。
+- MQTT 通道行新增「前缀」编辑格（默认 `simbench`），不必再改 CSV/project.json 才能换 topic 前缀。
 
 **核对与监视（2026-10-20）**
 - 核对页新增**目标通道选择**与**持续监视**（间隔 1~3600 秒）：按间隔反复读真实设备、
