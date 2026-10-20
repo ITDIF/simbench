@@ -164,16 +164,17 @@ def test_the_channel_status_keeps_its_palette_colour(window, qapp):
 
 # ---------- 3. 设备树的两列 ----------
 
-def test_the_device_tree_keeps_two_fixed_columns(window, qapp):
-    """两列都是定宽槽，"最后一列自动铺满"必须关着——否则列宽跟着瞬时视口走。"""
+def test_the_device_tree_columns_do_not_move_with_state(window, qapp):
+    """名称列拉伸填满视口、状态列定宽；换状态时两列宽度都不许变。"""
     tree = window.tree
     name = tree.topLevelItem(0).text(0)
     assert not tree.header().stretchLastSection()
+    baseline = (tree.columnWidth(0), tree.columnWidth(1))
+    assert baseline[1] == device_tree_module._MARK_WIDTH
     for state in ("starting", "running", "error", "stopped"):
         tree.set_status(name, state)
         qapp.processEvents()
-        assert tree.columnWidth(0) == device_tree_module._NAME_WIDTH, state
-        assert tree.columnWidth(1) == device_tree_module._MARK_WIDTH, state
+        assert (tree.columnWidth(0), tree.columnWidth(1)) == baseline, state
 
 
 # ---------- 4. 深浅两套 ----------

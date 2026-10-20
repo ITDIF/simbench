@@ -295,10 +295,11 @@ class PointTableView(QtWidgets.QTableView):
         return [] if menu is None else menu.actions()
 
     def contextMenuEvent(self, event) -> None:
-        # `event.pos()` 是控件坐标而 `indexAt` 吃的是视口坐标，中间必须过 `mapFrom`；
-        # 两侧都按"没偏移"写的话，带边框的真实视图会整行错位。
+        # 与 `device_tree` 同一条：事件由 viewport 转发，`pos()` 已是视口坐标，再
+        # `mapFrom(self, ...)` 会多减一次表头高度、命中整体上移一行；用 `globalPos()`
+        # 反推视口坐标，不依赖事件来自哪一层。
         menu = self._menu_for(
-            self.indexAt(self.viewport().mapFrom(self, event.pos())).row())
+            self.indexAt(self.viewport().mapFromGlobal(event.globalPos())).row())
         if menu is None:
             event.ignore()               # 空白处/表头：没有哪一行可以被恢复
             return

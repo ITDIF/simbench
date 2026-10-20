@@ -258,12 +258,12 @@ class EditMixin:
             self.point_model.attach(pumped_source(self.rows_pump), current)
         else:
             self.point_model.detach()
-        self.channels.rebuild(project)
         self._states = states
         for name, state in states.items():
             # rebuild 之后控件是新的：状态要重新贴一遍，否则在跑的那一路会显示成"停止"
             self.tree.set_status(name, state)
-            self.channels.set_status(name, state)
+        if not names:
+            self.channels.rebuild(project, only=[])
         self._shown_error = ""
         self._refresh_title()
         self.status_label.setText(self._summary())

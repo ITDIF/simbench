@@ -479,16 +479,19 @@ def test_picking_a_device_row_narrows_the_table_to_that_device(window, qapp):
     assert window.point_model.rowCount() == 1
     assert window.point_model.index(0, NAME_COLUMN).data() == "回路状态"
     assert window.point_model.index(0, 0).data() == "照明回路-1 (unit 12)"
+    assert window.table_caption.text() == "当前通道：tcp-5020 · 只看 unit 12"
 
     window.tree.setCurrentItem(top.child(0))          # COVI-1（unit 11）
     qapp.processEvents()
     assert window.point_model.unit() == 11
     assert window.point_model.rowCount() == 8
+    assert window.table_caption.text() == "当前通道：tcp-5020 · 只看 unit 11"
 
     window.tree.setCurrentItem(top)                   # 通道行 = 全部设备
     qapp.processEvents()
     assert window.point_model.unit() is None
     assert window.point_model.rowCount() == 9
+    assert window.table_caption.text() == "当前通道：tcp-5020"
 
 
 def test_a_master_write_lands_in_the_table_on_the_next_tick(window, qapp):
@@ -793,13 +796,19 @@ def test_two_channels_start_and_stop_independently(make_window, qapp):
     qapp.processEvents()
     assert window.session.channel("tcp-5020").running
     assert window.session.channel("tcp-b").running
-    rows = {row.channel: row for row in window.channels.rows()}
-    rows["tcp-b"].stop_button.click()
+    # 通道编辑卡跟着树走：先站到 tcp-b，再点它自己的停止按钮。
+    window.tree.setCurrentItem(window.tree.item_for("tcp-b"))
+    qapp.processEvents()
+    row = window.channels.rows()[0]
+    row.stop_button.click()
     qapp.processEvents()
     assert not window.session.channel("tcp-b").running
     assert window.session.channel("tcp-5020").running
-    assert rows["tcp-b"].status.text() == "○ 停止"
-    assert rows["tcp-5020"].status.text() == "● 运行"
+    assert row.status.text() == "○ 停止"
+    # 切回第一路：编辑卡与状态都跟着回来。
+    window.tree.setCurrentItem(window.tree.item_for("tcp-5020"))
+    qapp.processEvents()
+    assert window.channels.rows()[0].status.text() == "● 运行"
     client = connect(first)                        # 另一个停了不碍这个通道服务
     try:
         assert client.read_holding_registers(4, count=1, device_id=11).registers == [11]

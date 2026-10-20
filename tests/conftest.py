@@ -29,6 +29,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # 可以显式把这个变量设成别的值再跑。
 os.environ.setdefault("SIMBENCH_NET_AUTO", "0")
 
+# 设置目录也隔离：启动时默认会重开"最近打开"的工程，不隔离的话用例会读到开发机上真实的
+# `settings.json` 并把那份工程装进来。想验设置本身的用例自己用 monkeypatch 指到 tmp_path。
+import tempfile as _tempfile
+
+os.environ.setdefault("SIMBENCH_SETTINGS_DIR",
+                      _tempfile.mkdtemp(prefix="simbench-settings-"))
+
 from simbench.backend.modbus_tcp import ModbusTcpBackend
 from simbench.engine.runner import EngineRunner
 

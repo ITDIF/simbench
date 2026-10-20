@@ -91,14 +91,19 @@ def build_app(argv: list[str] | None = None):
     else:
         window._log(f"[info] 本次会话的日志写在 {log_file.path}")
     args = list(argv if argv is not None else sys.argv[1:])
+    source: str | None = None
     if args:
         project, notes, issues = load_point_table(args[0])
         window.use_project(project, args[0], notes)
+        source = args[0]
         if error_lines(issues):
             window.status.showMessage(f"{len(error_lines(issues))} 个错误，启动已被阻止")
+    else:
+        # 没给路径：接着上次的工程（"最近打开"里第一条还在的）；一条都没有就空着启动。
+        source = window.open_last_project()
     # 先把窗口显示出来，再做网络准备：UAC/PowerShell 再慢，用户也看得见"程序已经开了"，
     # 而不是双击后几秒钟什么都没出现。
     window.show()
-    if args:
-        _prepare_network(window, args[0])
+    if source:
+        _prepare_network(window, source)
     return app, window, session

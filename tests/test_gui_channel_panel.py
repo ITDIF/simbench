@@ -25,7 +25,7 @@ from simbench.engine.runner import EngineRunner
 from simbench.engine.session import Session
 from simbench.events import ChannelState, LogLine, PacketEvent
 from simbench.gui.channel_panel import STATUS_LABELS, ChannelPanel
-from simbench.project.model import TcpChannel
+from simbench.project.model import Project, TcpChannel
 from tests.conftest import free_port
 
 CSV = "examples/covi-tunnel.csv"
@@ -347,6 +347,29 @@ def test_a_refused_edit_leaves_the_dirty_flag_alone(built):
 
 
 # ---------- 口径 3/4：几何与文案 ----------
+
+def test_many_channels_scroll_instead_of_pushing_the_rest_down(qapp):
+    """通道多时面板高度有上限、其余行滚动：不许把下面的树和点位表挤出屏幕。"""
+    project = Project(channels=[
+        TcpChannel(name=f"tcp-{5020 + i}", host="127.0.0.1", port=5020 + i, devices=[])
+        for i in range(9)])
+    panel = ChannelPanel(None)
+    panel.rebuild(project)
+    holder = QtWidgets.QWidget()
+    QtWidgets.QVBoxLayout(holder).addWidget(panel)
+    holder.resize(680, 400)
+    holder.show()
+    qapp.processEvents()
+    try:
+        scroll = panel.findChild(QtWidgets.QScrollArea)
+        assert scroll is not None, "通道行没有放进滚动区"
+        assert scroll.verticalScrollBar().maximum() > 0, "9 路通道应该出现滚动条"
+        assert panel.height() <= 120, f"面板被 9 路通道撑到了 {panel.height()}px"
+    finally:
+        panel.deleteLater()
+        holder.deleteLater()
+        qapp.processEvents()
+
 
 def test_geometry_is_stable_in_every_state(built):
     """状态文字换内容/换颜色不许推动行宽（用户口径：状态变化不挪布局）。"""

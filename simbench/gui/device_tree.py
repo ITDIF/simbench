@@ -19,7 +19,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from . import theme
 from .channel_state import STATUS_MARK
 
-# 通道名列定宽：设备名/通道名的长短不该让状态列跟着挪（口径 3）。
+# 通道名列的**初始/参考**宽度：实际宽度由视图拉伸决定（见 `__init__` 的
+# `Stretch` 模式），但列太窄时名字会截断，所以主窗仍按这个宽度给左侧列留位置。
 _NAME_WIDTH = 240
 _MARK_WIDTH = 40
 _ROLE_CHANNEL = QtCore.Qt.UserRole
@@ -49,6 +50,13 @@ class DeviceTree(QtWidgets.QTreeWidget):
         # 于是同一个界面在不同时刻量到两个列宽——"状态一变布局就跳"的另一种来源。
         # 状态列本来就是个定宽槽（`_MARK_WIDTH`），铺满它没有任何意义。
         self.header().setStretchLastSection(False)
+        # 名称列**拉伸**填满剩余宽度，状态列保持定宽：
+        # 两列都定宽时（240+40），左侧列稍窄一点就会出现横向滚动条——滚一下通道名
+        # 左边就被裁掉（现场截图）。拉伸之后内容宽度永远等于视口，横向滚动条不再出现。
+        self.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.header().setSectionResizeMode(1, QtWidgets.QHeaderView.Fixed)
+        self.setColumnWidth(1, _MARK_WIDTH)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self._items: dict[str, QtWidgets.QTreeWidgetItem] = {}
 
     # ---------- 结构 ----------
@@ -60,6 +68,7 @@ class DeviceTree(QtWidgets.QTreeWidget):
         for channel in project.channels:
             top = QtWidgets.QTreeWidgetItem([channel.name, STATUS_MARK["stopped"]])
             top.setData(0, _ROLE_CHANNEL, channel.name)
+            top.setToolTip(0, channel.name)          # 名称被截断时悬停能看全
             self.addTopLevelItem(top)
             # `setExpanded` 必须在**插进视图之后**调：在那之前这一项在视图里还不存在，
             # 调用是个空操作。原来它调在 `addTopLevelItem` 前面，于是每一条通道起来都是
@@ -73,9 +82,10 @@ class DeviceTree(QtWidgets.QTreeWidget):
                     [f"{device.name} (unit {device.unit_id})", ""])
                 child.setData(0, _ROLE_CHANNEL, channel.name)
                 child.setData(0, _ROLE_UNIT, device.unit_id)
+                child.setToolTip(0, child.text(0))
                 top.addChild(child)
-        # 宽度在内容进去之后再定：clear() 会把列宽复位成默认值，先设等于白设
-        self.setColumnWidth(0, _NAME_WIDTH)
+        # 状态列宽度在内容进去之后再定：clear() 会把列宽复位成默认值，先设等于白设。
+        # 名称列是 Stretch 模式，宽度由视口决定，不在这里设。
         self.setColumnWidth(1, _MARK_WIDTH)
 
     def item_for(self, channel: str) -> QtWidgets.QTreeWidgetItem | None:
@@ -91,12 +101,12 @@ class DeviceTree(QtWidgets.QTreeWidget):
     # ---------- 右键菜单 ----------
 
     def contextMenuEvent(self, event) -> None:
-        # `event.pos()` 是**控件**坐标，而 `itemAt` 吃的是**视口**坐标，中间必须过
-        # `mapFrom`：少了这一步，表头那 20 来像素的偏移会把命中位置整体下移——点通道行
-        # 的上半截什么都不会弹（实测：第 0 行的中心点落回去是 None）。`point_table` 里
-        # 同一句话早就写着，这一处是补上的。
+        # 事件由 viewport 转发进来（`QAbstractScrollArea::viewportEvent`），所以 `pos()`
+        # **已经**是视口坐标。再 `mapFrom(self, ...)` 会把表头/边框那一段多减一次，命中
+        # 整体上移一行——实测点通道行弹"添加通道"，点第一台设备弹的是通道菜单。
+        # 用 `globalPos()` 反推视口坐标：不依赖事件是从哪一层送上来的。
         menu = self._menu_for(
-            self.itemAt(self.viewport().mapFrom(self, event.pos())))
+            self.itemAt(self.viewport().mapFromGlobal(event.globalPos())))
         if menu is None:
             event.ignore()
             return
@@ -168,4 +178,5 @@ class DeviceTree(QtWidgets.QTreeWidget):
         item.setForeground(1, brush)
         # tooltip 只给"为什么失败"，不给成功：操作员需要在树上看的是状态，
         # 详情在日志窗里已经有一行，这里重复一遍会把提示框变成第二个日志。
-        item.setToolTip(0, "" if state != "error" else "启动失败，原因见日志页")
+        # 名称列留给完整名字的 tooltip；失败原因挂在状态列上，互不覆盖。
+        item.setToolTip(1, "" if state != "error" else "启动失败，原因见日志页")

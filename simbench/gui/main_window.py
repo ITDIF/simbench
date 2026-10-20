@@ -128,6 +128,9 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         self._next_collect = time.monotonic() + _GC_EVERY_S
 
         self.setCentralWidget(self._build_layout())
+        # 表的"当前通道"跟着模型走：attach/detach 都会 reset，一处接线管住所有入口。
+        self.point_model.modelReset.connect(self._refresh_table_caption)
+        self._refresh_table_caption()
         self._build_toolbar()
         self._build_menu()
         self._restore_settings()
@@ -240,11 +243,22 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         top = QtWidgets.QWidget()
         rows = QtWidgets.QVBoxLayout(top)
         rows.setContentsMargins(0, 0, 0, 0)
-        rows.addWidget(self.channels)             # 第一行：通道属性 + 独立启停
         cols = QtWidgets.QHBoxLayout()
         cols.setContentsMargins(0, 0, 0, 0)
+        # 左列只放树：通道配置挪到右侧点位表上方，紧挨着它影响的那些点。
         cols.addWidget(self.tree, _TREE_STRETCH)
-        cols.addWidget(self.point_table, _TABLE_STRETCH)
+        # 表上方一行"当前通道"：表本身没有通道列，多路通道里同名设备靠这行字认路。
+        right = QtWidgets.QWidget()
+        right_rows = QtWidgets.QVBoxLayout(right)
+        right_rows.setContentsMargins(0, 0, 0, 0)
+        right_rows.setSpacing(2)
+        self.table_caption = QtWidgets.QLabel("当前通道：—")
+        self.table_caption.setObjectName("tableCaption")
+        right_rows.addWidget(self.table_caption)
+        # 当前通道的配置条：只画选中的那一路，一行高，紧挨着点位表。
+        right_rows.addWidget(self.channels)
+        right_rows.addWidget(self.point_table, 1)
+        cols.addWidget(right, _TABLE_STRETCH)
         rows.addLayout(cols, 1)
 
         bottom = QtWidgets.QWidget()
@@ -366,13 +380,15 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
             self._log(f"[stopped] {name}：换工程时停掉了这一路正在运行的服务")
         names = self.session.channel_names()
         self.tree.rebuild(project)
+        # 状态表先立起来：下面选中第一条通道时，紧凑编辑卡要按真实状态显示。
+        self._states = dict.fromkeys(names, "stopped")
         if names:
             self.point_model.attach(pumped_source(self.rows_pump))
         else:
             # 一条通道都没有：表必须是**空的**，不许留着上一份的行（那是在演一份不存在的点表）
             self.point_model.detach()
+            self.channels.rebuild(project, only=[])
         # 空点表不能悄悄给一张"看着合法的空白表"：CLI 那句在这里说同一遍
-        self.channels.rebuild(project)
         self.store.clear()
         self._path = pathlib.Path(path) if path else None
         if path and self.settings is not None:
@@ -381,7 +397,6 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
             self.settings.add_recent(
                 path, offset=0 if recent_offset is None else recent_offset)
             self.settings.save()
-        self._states = dict.fromkeys(names, "stopped")
         self._dirty_shown = self.session.dirty
         self._shown_error = ""
         for note in notes:
@@ -393,6 +408,9 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         else:
             for line in format_issues(issues):
                 self._log(f"[issue] {line}")
+        if names:
+            # 默认站在第一条通道上：树、表、通道编辑卡三处指向同一路。
+            self._select_channel(names[0])
         if self.tabs.currentWidget() is self.net_panel:
             # 正好停在网络页时换工程：那一页的字是上一份声明的，得跟着换
             self.net_panel.refresh()
@@ -641,6 +659,19 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         """
         self._log(f"[{line.level}] {line.text}")
 
+    def _refresh_table_caption(self) -> None:
+        """表上方那行字：当前看的是哪条通道、是否收窄到一台设备（跟着模型 reset 走）。"""
+        channel = self.point_model.channel()
+        if not channel:
+            text = "当前通道：—"
+        else:
+            text = f"当前通道：{channel}"
+            unit = self.point_model.unit()
+            if unit is not None:
+                text += f" · 只看 unit {unit}"
+        self.table_caption.setText(text)
+        self.table_caption.setToolTip(text)
+
     def _on_tree_selection(self, current, _previous) -> None:
         """树上选了什么，表就显示什么：点通道 = 这一路全部；点设备 = 只看那一台。
 
@@ -651,7 +682,13 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         channel = self.tree.channel_of(current)
         unit = self.tree.unit_of(current)
         if not channel:
+            # 没有选中通道（空工程/树被清空）：编辑卡也清掉，不留上一路的字段。
+            self.channels.rebuild(self.session.project, only=[])
             return
+        if self.channels.shown_channel() != channel:
+            # 通道编辑卡跟着树走：选中哪一路就只显示哪一路。
+            self.channels.rebuild(self.session.project, only=channel)
+            self.channels.set_status(channel, self._states.get(channel, "stopped"))
         if channel == self.point_model.channel() and unit == self.point_model.unit():
             return
         self.point_model.attach(pumped_source(self.rows_pump), channel, unit)

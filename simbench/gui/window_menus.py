@@ -133,14 +133,14 @@ class MenuMixin:
         self.settings.save()
         self.status.showMessage("已清空最近打开记录", _NOTICE_MS)
 
-    def _open_recent(self, path: str) -> None:
-        """从"最近打开"里打开一份（与"打开工程"同一条路：先问未保存改动）。
+    def _open_recent(self, path: str) -> bool:
+        """从"最近打开"里打开一份（与"打开工程"同一条路：先问未保存改动）。回是否打开成功。
 
         点表按**导入时那个地址偏移**重读（settings.recent_offset）：否则一份 40001
         风格的表会按 0 偏移读回来，地址静默变掉。
         """
         if not self._confirm_discard():
-            return
+            return False
         offset = self.settings.recent_offset(path) if self.settings is not None else 0
         try:
             project, notes = read_point_table(path, offset)
@@ -150,9 +150,23 @@ class MenuMixin:
             # 打不开的多半已经不在/坏了：从最近列表里摘掉，免得菜单里一直挂着一个死条目
             self.settings.recent = [p for p in self.settings.recent if p != path]
             self._remember_settings()
-            return
+            return False
         # 把偏移原样传回去：use_project 会重写这条历史，不传就把偏移覆盖成 0 了
         self.use_project(project, path, notes=notes, recent_offset=offset)
+        return True
+
+    def open_last_project(self) -> str | None:
+        """没给命令行路径时：打开"最近打开"里第一条**还在的**文件，返回它的路径；没有就 None。
+
+        走 `_open_recent` 同一条路（按历史偏移读点表）。打不开的条目会被摘掉，然后试下一条。
+        启动时没有未保存改动，所以不会弹"是否保存"。
+        """
+        if self.settings is None:
+            return None
+        for path in self.settings.existing_recent():
+            if self._open_recent(path):
+                return path
+        return None
 
     def _toggle_theme(self, _checked: bool = False) -> None:
         """浅色/深色切换。只换颜色——几何一个像素都不动（见 `test_gui_theme.py`）。

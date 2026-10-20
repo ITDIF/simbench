@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..events import ChannelState
 from ..project.model import channel_transport, format_frame, is_serial, parse_frame
@@ -61,6 +61,11 @@ class ChannelRow:
     status: QtWidgets.QLabel
 
 
+# 卡片最多露出几行：通道再多也只占这么高，其余行滚动。4 路时还没感觉，
+# 十几路时整块面板会把下面的树和点位表挤出屏幕（截图反馈）。
+_VISIBLE_ROWS = 3
+
+
 class ChannelPanel(QtWidgets.QWidget):
     def __init__(self, session, parent: QtWidgets.QWidget | None = None,
                  *, before_start=None) -> None:
@@ -73,19 +78,43 @@ class ChannelPanel(QtWidgets.QWidget):
         # 白面卡片：底色与边框由主题给，这里只把 WA_StyledBackground 打开——裸 QWidget
         # 不开这个属性，QSS 的 background 一个字都不会画（见 theme.make_card）。
         theme.make_card(self)
-        self._grid = QtWidgets.QGridLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(1, 1, 1, 1)      # 留出卡片边框
+        # 行放在滚动区里：高度由 `_fit_scroll()` 卡在 `_VISIBLE_ROWS` 行，
+        # 通道多时出竖向滚动条，而不是把下面的界面往下推。
+        self._scroll = QtWidgets.QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        # 滚动区默认用 Base 色铺底，会盖掉卡片的白面；让父级的卡片底色透出来。
+        self._scroll.viewport().setAutoFillBackground(False)
+        self._host = QtWidgets.QWidget()
+        self._host.setAutoFillBackground(False)
+        self._grid = QtWidgets.QGridLayout(self._host)
         self._grid.setContentsMargins(4, 2, 4, 2)
         # 尾部留一个空的**拉伸列**（第 7 列，前面只用到第 6 列）。不给它的话，多出来的
         # 宽度会全部落进第一格"通道名"里，整行被摊成"名字贴最左、参数与按钮贴最右"两撮，
         # 中间一大片空白（截图照出来的）。有了它，行内容左对齐、余量在行尾。
         self._grid.setColumnStretch(7, 1)
+        self._scroll.setWidget(self._host)
+        outer.addWidget(self._scroll)
         self.last_error = ""
         self._operation_busy = False
 
     # ---------- 结构 ----------
 
-    def rebuild(self, project) -> None:
-        """按工程重画一行一个通道。先清干净上一批控件，不留悬空行。"""
+    def rebuild(self, project, only: str | list[str] | None = None) -> None:
+        """按工程重画一行一个通道。`only` 给名字（或名字列表）时只画那几路。
+
+        主窗的紧凑模式每次都只画当前选中的通道；`only=[]` 用来清空（空工程）。
+        """
+        if isinstance(only, str):
+            wanted: set[str] | None = {only}
+        elif only is None:
+            wanted = None
+        else:
+            wanted = set(only)
         for index in reversed(range(self._grid.count())):
             item = self._grid.takeAt(index)
             widget = item.widget()
@@ -93,12 +122,45 @@ class ChannelPanel(QtWidgets.QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self._rows.clear()
-        for index, ch in enumerate(project.channels):
+        channels = [ch for ch in project.channels
+                    if wanted is None or ch.name in wanted]
+        for index, ch in enumerate(channels):
             self._rows[ch.name] = self._make_row(index, ch)
             self._set_enabled(ch.name, running=False)
+        self._fit_scroll()
+        self._scroll.verticalScrollBar().setValue(0)
 
     def rows(self) -> list[ChannelRow]:
         return list(self._rows.values())
+
+    def shown_channel(self) -> str | None:
+        """当前显示的是哪一路（主窗只会画选中的那一路）；没有回 None。"""
+        return next(iter(self._rows), None)
+
+    def _fit_scroll(self) -> None:
+        """把滚动区高度卡在 `_VISIBLE_ROWS` 行；行数少时自然收矮。"""
+        if not self._rows:
+            self._scroll.setFixedHeight(0)
+            self.setFixedHeight(2)               # 只剩边框
+            return
+        first = next(iter(self._rows.values()))
+        # 行高取这一行**所有控件**的最大 sizeHint：只看标签/按钮会漏掉输入框
+        # （QLineEdit 通常更高），算出来的高度会装不下整行。
+        row_h = max(widget.sizeHint().height() for widget in (
+            first.name_label, first.host_edit, first.port_edit, first.frame_edit,
+            first.start_button, first.stop_button, first.status))
+        spacing = self._grid.verticalSpacing()
+        if spacing < 0:
+            spacing = self.style().pixelMetric(
+                QtWidgets.QStyle.PM_LayoutVerticalSpacing)
+        margins = self._grid.contentsMargins()
+        # 不用 `grid.sizeHint()`：刚 rebuild 完它可能还是旧值（实测重建后算成 4px，
+        # 面板会塌成一条缝）；按行数直接算，结果与布局时序无关。
+        visible = min(len(self._rows), _VISIBLE_ROWS)
+        height = (visible * row_h + max(0, visible - 1) * spacing
+                  + margins.top() + margins.bottom())
+        self._scroll.setFixedHeight(height)
+        self.setFixedHeight(height + 2)
 
     # ---------- 状态 ----------
 

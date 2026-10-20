@@ -14,7 +14,7 @@ import copy
 import pathlib
 
 import pytest
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore
@@ -199,7 +199,8 @@ def test_adding_a_channel_from_the_tree_updates_tree_panel_and_table(
     qapp.processEvents()
     assert [ch.name for ch in window.session.project.channels] == ["tcp-5020", "s7-1"]
     assert window.tree.topLevelItemCount() == 2
-    assert len(window.channels.rows()) == 2
+    # 通道编辑卡只显示当前选中的那一路（加完自动站到新通道上）。
+    assert [row.channel for row in window.channels.rows()] == ["s7-1"]
     assert window.point_model.channel() == "s7-1", "加完没有站到新通道上"
     assert window.session.dirty is True
 
@@ -589,23 +590,16 @@ def test_a_project_built_from_scratch_serves_a_real_master(
 
 # ---------- 13. 右键菜单的命中测试（坐标系那一条在这里钉住） ----------
 
-class _Click:
-    """`contextMenuEvent` 的替身事件：`pos()` 与 `globalPos()` 必须是**不同**坐标系的两点。
+def _right_click(tree, point):
+    """按 Qt 的真实路径投一次右键：事件发给 **viewport**，`pos()` 就是视口坐标。
 
-    两边给同一个值的话，"弹层坐标取错坐标系"这类缺陷测不出来（菜单会开到窗口左上角）。
+    直接调 `contextMenuEvent` 并塞控件坐标是假路径——实现和用例会一起按错误坐标系写，
+    正好把"少/多映射一次"这类缺陷测没。
     """
-
-    def __init__(self, pos, global_pos):
-        self._pos, self._global = pos, global_pos
-
-    def pos(self):
-        return self._pos
-
-    def globalPos(self):
-        return self._global
-
-    def ignore(self):
-        self.ignored = True
+    event = QtGui.QContextMenuEvent(QtGui.QContextMenuEvent.Mouse, point,
+                                    tree.viewport().mapToGlobal(point))
+    QtWidgets.QApplication.sendEvent(tree.viewport(), event)
+    return event
 
 
 def _tree(qapp):
@@ -632,23 +626,22 @@ def test_the_channels_come_up_expanded_so_the_device_rows_are_visible(qapp):
 
 
 def test_the_tree_menu_opens_for_the_row_under_the_cursor(qapp, monkeypatch):
-    """点哪一行的**中心**，弹的就是哪一行的菜单。
+    """点哪一行的**中心**，弹的就是哪一行的菜单（走真实投递：事件发给 viewport）。
 
-    这一条是补一个真缺陷：`itemAt` 吃的是视口坐标而 `contextMenuEvent` 给的是控件坐标，
-    少了 `viewport().mapFrom(...)` 那一步，表头那 20 来像素的偏移会把命中整体下移——实测
-    点通道行上半截（第 0 行的中心）**什么都不弹**。`point_table` 里同一句话早就写着。
+    这一条钉住一个真缺陷：`contextMenuEvent` 由 viewport 转发，`event.pos()` 已经是视口
+    坐标；再 `viewport().mapFrom(self, ...)` 会把表头高度多减一次，命中整体**上移一行**
+    ——实测点通道行弹"添加通道"，点第一台设备弹的是通道菜单。
     """
     tree = _tree(qapp)
     popped: list[list[str]] = []
     monkeypatch.setattr(DeviceTree, "_popup",
                         lambda self, menu, pos: popped.append(
                             [a.text() for a in menu.actions()]))
-    for row, expected in ((0, ["添加设备…", "删除通道 tcp-5020…"]),
-                          (1, ["添加点位…", "删除设备…"])):
-        item = tree.topLevelItem(0) if row == 0 else tree.topLevelItem(0).child(0)
-        center = tree.viewport().mapTo(tree, tree.visualItemRect(item).center())
-        tree.contextMenuEvent(_Click(center, center + QtCore.QPoint(300, 200)))
-        assert popped[-1] == expected, f"第 {row} 行弹错了菜单：{popped[-1]}"
+    top = tree.topLevelItem(0)
+    for item, expected in ((top, ["添加设备…", "删除通道 tcp-5020…"]),
+                           (top.child(0), ["添加点位…", "删除设备…"])):
+        _right_click(tree, tree.visualItemRect(item).center())
+        assert popped[-1] == expected, f"{item.text(0)} 弹错了菜单：{popped[-1]}"
     assert len(popped) == 2
 
 
@@ -658,8 +651,8 @@ def test_the_tree_menu_offers_add_channel_on_empty_space(qapp, monkeypatch):
     monkeypatch.setattr(DeviceTree, "_popup",
                         lambda self, menu, pos: popped.append(
                             [a.text() for a in menu.actions()]))
-    below = QtCore.QPoint(60, tree.height() - 4)
-    tree.contextMenuEvent(_Click(below, below + QtCore.QPoint(300, 200)))
+    below = QtCore.QPoint(60, tree.viewport().height() - 4)
+    _right_click(tree, below)
     assert popped == [["添加通道…"]]
 
 

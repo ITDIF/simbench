@@ -73,6 +73,21 @@ def test_a_channel_name_carries_its_transport_both_ways(channel_name, transport,
     assert channel_transport(again.channels[0]) == transport
 
 
+@pytest.mark.parametrize("channel_name", [
+    "udp-5021@udp:0.0.0.0:5021",
+    "gw-5024@rtutcp:0.0.0.0:5024",
+])
+def test_a_socket_channel_can_span_multiple_rows(channel_name):
+    """同一路 UDP / RTU-over-TCP 写成多行时，不能按串口去读 baudrate（回归）。"""
+    text = (f"{HEADER}\n"
+            f"{channel_name},D1,11,温度,hr,0,uint16,ABCD,25,const,,false\n"
+            f"{channel_name},D1,11,湿度,hr,1,uint16,ABCD,60,const,,false\n")
+    project, _notes = read_csv(text, with_notes=True)
+    (ch,) = project.channels
+    assert channel_transport(ch) in ("udp", "rtutcp")
+    assert len(ch.devices[0].points) == 2
+
+
 def test_an_ascii_channel_keeps_its_frame_type_through_json():
     project, _notes = read_csv(csv_with("com-485-1@COM3 19200 8E1 ascii"), with_notes=True)
     again = from_dict(to_dict(project))

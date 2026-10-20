@@ -519,7 +519,10 @@ def _channel_params(channel) -> tuple:
     transport = channel_transport(channel)
     if transport == "s7":
         return (channel.host, channel.port, channel.rack, channel.slot)
-    if transport == "tcp":
+    # tcp/udp/rtutcp 都走 TcpChannel：参数只有 host:port。只按 "tcp" 判的话，
+    # udp/rtutcp 会落到 `_serial_params` 去读 baudrate（TcpChannel 没有这个字段），
+    # 同一路通道写到第二行就崩。
+    if is_socket(transport):
         return (channel.host, channel.port)
     return _serial_params(channel)
 

@@ -21,7 +21,7 @@
 import dataclasses
 
 import pytest
-from PySide6 import QtCore
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.point_source import FakeEngine, session_source
@@ -602,40 +602,27 @@ def test_a_right_click_builds_the_menu_for_the_row_under_the_cursor(qapp, monkey
     view = _menu_view(qapp, [_row("曲线在跑", "1", waveform="sine"),
                              _row("人工改过", "2", source="manual")])
     popped: list[tuple[list[str], QtCore.QPoint]] = []
-    ignored: list[int] = []
     monkeypatch.setattr(PointTableView, "_popup",
                         lambda self, menu, pos: popped.append(
                             ([a.text() for a in menu.actions()], pos)))
 
-    class _Click:
-        # pos() 与 globalPos() 必须返回**不同**的点：替身事件两边给同一个坐标时，
-        # "弹层坐标取错坐标系"的缺陷测不出来，真界面表现为菜单开到窗口左上角。
-        def __init__(self, pos: QtCore.QPoint, global_pos: QtCore.QPoint) -> None:
-            self._pos, self._global = pos, global_pos
-
-        def pos(self) -> QtCore.QPoint:
-            return self._pos
-
-        def globalPos(self) -> QtCore.QPoint:
-            return self._global
-
-        def ignore(self) -> None:
-            ignored.append(1)
+    def click(point: QtCore.QPoint):
+        # 真实路径：事件发给 viewport，pos() 就是视口坐标（`visualRect` 也是视口坐标）。
+        event = QtGui.QContextMenuEvent(QtGui.QContextMenuEvent.Mouse, point,
+                                        view.viewport().mapToGlobal(point))
+        QtWidgets.QApplication.sendEvent(view.viewport(), event)
+        return event
 
     model = view.model()
-    # `visualRect` 是视口坐标，而 `contextMenuEvent` 拿到的是控件坐标：换算交给 Qt 自己，
-    # 用例不许和实现约定同一个错误口径（两侧都按"未映射"写就会一起错）。
-    row_point = view.viewport().mapTo(view, view.visualRect(model.index(1, NAME_COLUMN)).center())
-    # 全局点 = 控件点 + 窗口在屏幕上的任意偏移：用例只需要两个坐标系分得开。
-    global_point = row_point + QtCore.QPoint(520, 300)
-    view.contextMenuEvent(_Click(row_point, global_point))
+    row_point = view.visualRect(model.index(1, NAME_COLUMN)).center()
+    click(row_point)
     assert [texts for texts, _ in popped] == \
         [["恢复波形：人工改过", "属性…", "添加点位…", "删除点位：人工改过…"]]
-    assert popped[0][1] == global_point, "传给 _popup 的不是 globalPos，菜单不会开在光标下"
+    assert popped[0][1] == view.viewport().mapToGlobal(row_point), \
+        "传给 _popup 的不是 globalPos，菜单不会开在光标下"
     popped.clear()
-    view.contextMenuEvent(_Click(QtCore.QPoint(10, view.height() - 4),
-                                 QtCore.QPoint(530, view.height() + 296)))
-    assert popped == [] and ignored == [1], "空白处右键弹了菜单或没把事件交还出去"
+    blank = click(QtCore.QPoint(10, view.viewport().height() - 4))
+    assert popped == [] and not blank.isAccepted(), "空白处右键弹了菜单或没把事件交还出去"
 
 
 def test_triggering_the_row_action_hands_back_that_rows_point(qapp):

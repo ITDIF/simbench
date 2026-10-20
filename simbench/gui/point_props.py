@@ -145,6 +145,9 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self.bit_edit.setToolTip("S7 的 bool 位：`DBX6.3` 里的 3（0..7）")
         self.bit_hint = QtWidgets.QLabel("S7 的 bool 才有")
         self.convention_label = self._fixed(QtWidgets.QLabel(), 88)
+        # 所属通道是只读身份：多路通道里设备可能同名同 unit，光看点位名认不出是哪一路。
+        self.channel_label = QtWidgets.QLabel(self._key[0])
+        self.channel_label.setToolTip("这个点位所属的通道（点表里的身份列）")
         self.initial_edit = self._fixed(QtWidgets.QLineEdit(), 140)
         self.wave_param_edit = self._fixed(QtWidgets.QLineEdit(), 300)
         self.readonly_check = QtWidgets.QCheckBox()
@@ -175,7 +178,8 @@ class PointPropertiesDialog(QtWidgets.QDialog):
         self.waveform_buttons = self._radios(WAVEFORMS)
         self.address_edit.textChanged.connect(self._update_convention)
 
-        rows = [("名称", self.name_edit), ("区", self._box(self.area_buttons)),
+        rows = [("通道", self.channel_label),
+                ("名称", self.name_edit), ("区", self._box(self.area_buttons)),
                 ("地址", self._address_row()), ("位", self._bit_row()),
                 ("类型", self._box(self.datatype_buttons)),
                 ("字序", self._box(self.word_order_buttons)),
