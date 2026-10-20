@@ -6,6 +6,9 @@ pytest==9.1.1
 pys7==3.1.1
 # 打包成 exe（`packaging/build.ps1`）。只在 Windows 上需要；6.11 起支持 Python 3.13。
 pyinstaller==6.22.3
+# 真实 broker 端到端用例（tests/test_mqtt_broker.py）：进程内起一个 MQTT broker。
+# 没装也能跑其余用例（该文件用 pytest.importorskip 跳过）。
+amqtt==0.11.3
 # 静态检查（配置在 `pyproject.toml`）：CI 与本地跑的是同一对版本
 ruff==0.17.0
 mypy==2.4.0
