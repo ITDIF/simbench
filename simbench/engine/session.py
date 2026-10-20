@@ -287,10 +287,13 @@ class Session(ReadMixin, WriteMixin):
             # 的后端一样，是"这一路没起来"，得走同一条路——落 last_error、发 error 状态、
             # 再抛给调用方。放在 try 外面的话，界面那一格会停在"○ 停止"，而工具栏与日志
             # 已经在报失败，正是本项目最防的那类演出。
-            backend = make_backend(channel, packet_sink=self._packet_sink(name),
-                                   tick_ms=self._project.tick_ms,
-                                   log_sink=self.publish_log,
-                                   extra_endpoints=_listen_endpoints(channel, self._source))
+            backend = make_backend(
+                channel, packet_sink=self._packet_sink(name),
+                tick_ms=self._project.tick_ms,
+                log_sink=self.publish_log,
+                extra_endpoints=_listen_endpoints(channel, self._source),
+                state_sink=lambda state, detail, n=name: self._publish(
+                    ChannelState(n, state, detail)))
             self._runner.call(lambda: backend.start(), _START_TIMEOUT,
                               f"start channel {name}")
         except Exception as exc:

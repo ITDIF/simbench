@@ -140,6 +140,20 @@ def test_disconnect_and_reconnect_are_logged():
         asyncio.run(backend.stop())
 
 
+def test_connection_state_reaches_the_status_sink():
+    states: list[tuple[str, str]] = []
+    backend = MqttBackend(channel(), session_factory=FakeSession,
+                          state_sink=lambda state, detail: states.append((state, detail)))
+    asyncio.run(backend.start())
+    try:
+        backend._publish_state(False, "keepalive timeout")
+        backend._publish_state(True, "connected")
+        assert [state for state, _ in states] == ["error", "running"]
+        assert "重连" in states[0][1]
+    finally:
+        asyncio.run(backend.stop())
+
+
 def test_readback_feeds_the_point_table():
     ch = channel()
     ch.devices[0].points.append(Point("报警", "di", 0, "bool", initial="false"))

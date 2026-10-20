@@ -137,9 +137,12 @@ class MqttSession:
 class MqttBackend(BackendBase):
     """一路 MQTT 的模拟后端。`session_factory` 是可注入的会话工厂（测试用假 broker）。"""
 
-    def __init__(self, channel, *, session_factory=None, **kwargs) -> None:
+    def __init__(self, channel, *, session_factory=None, state_sink=None,
+                 **kwargs) -> None:
         super().__init__(channel, **kwargs)
         self._session_factory = session_factory or MqttSession
+        # `state_sink(state, detail)`：断线/重连反映到通道状态灯（GUI 注入）。
+        self._state_sink = state_sink
         self._session = None
         self._loop = None
         self._values: dict[tuple[int, str, int], object] = {}
@@ -262,6 +265,7 @@ class MqttBackend(BackendBase):
         return str(unit)
 
     def _on_connection_state(self, connected: bool, detail: str) -> None:
+        """paho 网络线程回调：日志可以直接写，通道状态必须投回引擎 loop 再发。"""
         now = time.monotonic()
         if connected:
             self._emit("info", "mqtt_connected", (),
@@ -271,6 +275,18 @@ class MqttBackend(BackendBase):
             self._emit("warning", "mqtt_disconnected", (),
                        f"{self.channel_name}: MQTT 连接断开（{detail}），"
                        f"正在自动重连 {self.channel.host}:{self.channel.port}", now)
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._publish_state, connected, detail)
+
+    def _publish_state(self, connected: bool, detail: str) -> None:
+        """引擎 loop 上发通道状态：断开=error（红灯），恢复=running（绿灯）。"""
+        if self._state_sink is None:
+            return
+        if connected:
+            self._state_sink("running", self.describe())
+        else:
+            self._state_sink("error", f"MQTT 连接断开（{detail}），正在自动重连")
 
     def _on_message(self, topic: str, payload) -> None:
         """paho 网络线程 -> 引擎 loop。状态只许在 loop 上改。"""

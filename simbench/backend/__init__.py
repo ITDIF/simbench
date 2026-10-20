@@ -35,7 +35,7 @@ class UnsupportedTransportError(RuntimeError):
 
 
 def make_backend(channel, *, packet_sink=None, on_connection=None, tick_ms: int = 0,
-                 log_sink=None, extra_endpoints=()):
+                 log_sink=None, extra_endpoints=(), state_sink=None):
     """按 `channel_transport()` 造后端。
 
     `extra_endpoints`（声明里额外要听的地址）只对 TCP 有意义：串口上没有"设备 IP:端口"
@@ -57,7 +57,7 @@ def make_backend(channel, *, packet_sink=None, on_connection=None, tick_ms: int 
     if transport == "mqtt":
         return MqttBackend(channel, packet_sink=packet_sink,
                            on_connection=on_connection, tick_ms=tick_ms,
-                           log_sink=log_sink)
+                           log_sink=log_sink, state_sink=state_sink)
     if transport == "s7":
         # S7 也没有"额外监听"那一维：一个 `host:port` 而已。
         return S7Backend(channel, packet_sink=packet_sink,
