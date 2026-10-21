@@ -13,6 +13,7 @@ import time
 
 import pytest
 from PySide6 import QtCore, QtWidgets
+from PySide6.QtTest import QTest
 
 from simbench.backend import make_backend
 from simbench.csv_io_entry import load_point_table
@@ -251,3 +252,18 @@ def test_the_result_table_is_centred(qapp):
         [want] * panel.model.columnCount()
     assert int(panel.table.horizontalHeader().defaultAlignment()) == want
     panel.deleteLater()
+
+
+def test_ctrl_enter_toggles_the_monitor_only_inside_the_verify_tab(rig, qapp, monkeypatch):
+    """Ctrl+Enter 只作用于核对页：挂成全局键会把日志页与输入框的回车抢走。"""
+    window, _table, _backend = rig
+    fired: list[str] = []
+    monkeypatch.setattr(window.verify_panel, "toggle_monitor",
+                        lambda: fired.append("toggle"))
+    window.tabs.setCurrentWidget(window.verify_panel)
+    window.activateWindow()
+    window.verify_panel.target_combo.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(window.verify_panel.target_combo, QtCore.Qt.Key_Return,
+                   QtCore.Qt.ControlModifier)
+    assert fired == ["toggle"]

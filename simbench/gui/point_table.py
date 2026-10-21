@@ -268,9 +268,9 @@ class PointTableModel(QtCore.QAbstractTableModel):
 
 
 class PointTableView(QtWidgets.QTableView):
-    """点位表的视图：右键一行 = 四条命令——交还波形、属性、**加点位**、**删这一个点位**。
+    """点位表的视图：右键一行 = 五条命令——**复制整行**、交还波形、属性、**加点位**、**删这一个点位**。
 
-    每一条行**都**给这四项菜单，恢复项按归属置灰而**不删**：删项会让弹框高度随行变，
+    每一条行**都**给这五项菜单，恢复项按归属置灰而**不删**：删项会让弹框高度随行变，
     操作员两次右键看见两种菜单（本项目把"状态变化动布局"记成缺陷）。恢复的文案带上点位名，
     因为一次只可能恢复右键的那一行，操作员不需要在弹层里再认一次地址。
 
@@ -283,6 +283,27 @@ class PointTableView(QtWidgets.QTableView):
     props_requested = QtCore.Signal(tuple)        # 同一份身份：属性面板按 key 找点位本体
     add_point_requested = QtCore.Signal(tuple)
     remove_point_requested = QtCore.Signal(tuple)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        # 复制是只读动作，绑在视图自己身上（焦点在表里才生效）：挂在主窗上会抢走
+        # 日志页与输入框的 Ctrl+C。
+        self.copy_shortcut = QtGui.QShortcut(
+            QtGui.QKeySequence.StandardKey.Copy, self,
+            activated=self.copy_current_cell)
+        self.copy_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+
+    def copy_current_cell(self) -> None:
+        """复制当前格。点位表是默认单选（SingleSelection），没有多行可拼。"""
+        index = self.currentIndex()
+        if index.isValid():
+            QtWidgets.QApplication.clipboard().setText(
+                str(index.data(QtCore.Qt.DisplayRole) or ""))
+
+    def copy_row(self, row: Row) -> None:
+        """整行按列序输出 TSV：粘进 Excel 是行、列都对得上的那种。"""
+        QtWidgets.QApplication.clipboard().setText(
+            "\t".join(_display(row, column.header) for column in COLUMNS))
 
     def row_key(self, row: int) -> tuple | None:
         """行号 -> 点位身份 `(channel, unit_id, area, address)`；越界回 `None`。"""
@@ -335,6 +356,10 @@ class PointTableView(QtWidgets.QTableView):
         add = menu.addAction("添加点位…")
         # 指哪加哪：加的永远是右键那一行所属的设备（空的设备在表上没有行，那条路走设备树）
         add.triggered.connect(lambda _checked=False: self.add_point_requested.emit(key))
+        # 复制是只读项，排在删除之前：破坏性动作始终留在菜单最后一位。
+        copy = menu.addAction("复制整行")
+        copy.setToolTip("按列顺序复制这一行（TSV，可直接粘到 Excel）")
+        copy.triggered.connect(lambda _checked=False: self.copy_row(found))
         drop = menu.addAction(f"删除点位：{found.name}…")
         drop.triggered.connect(lambda _checked=False: self.remove_point_requested.emit(key))
         return menu

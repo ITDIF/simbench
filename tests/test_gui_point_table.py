@@ -22,6 +22,7 @@ import dataclasses
 
 import pytest
 from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtTest import QTest
 
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.point_source import FakeEngine, session_source
@@ -570,6 +571,29 @@ def _menu_view(qapp, rows: list[Row]) -> PointTableView:
     return view
 
 
+def test_ctrl_c_copies_the_current_cell(qapp):
+    """单选表：Ctrl+C 复制的是当前那一格，不是整行。"""
+    view = _menu_view(qapp, [_row("CO浓度", "12")])
+    view.setCurrentIndex(view.model().index(0, VALUE_COLUMN))
+    view.activateWindow()
+    view.setFocus()
+    qapp.processEvents()
+    QtWidgets.QApplication.clipboard().setText("")
+    QTest.keyClick(view, QtCore.Qt.Key_C, QtCore.Qt.ControlModifier)
+    assert QtWidgets.QApplication.clipboard().text() == "12"
+
+
+def test_the_menu_copies_the_whole_row_as_tsv(qapp):
+    """右键作用于那一行：复制的是整行，列序与表格一致，粘到 Excel 能对齐。"""
+    view = _menu_view(qapp, [_row("CO浓度", "12")])
+    actions = {action.text(): action for action in view.row_menu_actions(0)}
+    QtWidgets.QApplication.clipboard().setText("")
+    actions["复制整行"].trigger()
+    fields = QtWidgets.QApplication.clipboard().text().split("\t")
+    assert len(fields) == len(COLUMNS), fields
+    assert "CO浓度" in fields and "12" in fields
+
+
 def test_the_row_menu_carries_the_point_name_and_greys_out_the_wrong_rows(qapp):
     """菜单每一项的判据来自**那一行**的归属：名字进文案，`source` 进 enabled。
 
@@ -581,15 +605,18 @@ def test_the_row_menu_carries_the_point_name_and_greys_out_the_wrong_rows(qapp):
                              _row("人工改过", "2", source="manual")])
     assert view.row_key(0) == ("tcp-5020", 11, "hr", 0, None)
     assert view.row_key(9) is None
-    # 四项：交还波形、属性、加点位、删这一个点位（后两项是"从零搭工程"那一步加的）
+    # 五项：交还波形、属性、加点位、复制整行、删这一个点位（复制排在删除之前，
+    # 破坏性动作留最后；后两项是"从零搭工程"那一步加的）
     assert [a.text() for a in view.row_menu_actions(0)] == \
-        ["恢复波形：曲线在跑", "属性…", "添加点位…", "删除点位：曲线在跑…"]
+        ["恢复波形：曲线在跑", "属性…", "添加点位…", "复制整行", "删除点位：曲线在跑…"]
     assert [a.text() for a in view.row_menu_actions(1)] == \
-        ["恢复波形：人工改过", "属性…", "添加点位…", "删除点位：人工改过…"]
-    # 置灰的只有"恢复"那一条（没有归属就谈不上交还）；另外三项对每一行都开着——
+        ["恢复波形：人工改过", "属性…", "添加点位…", "复制整行", "删除点位：人工改过…"]
+    # 置灰的只有"恢复"那一条（没有归属就谈不上交还）；另外四项对每一行都开着——
     # 能不能加/删是 `project.edit` 里带理由的拒绝，菜单先置灰就成了"没试就拒"。
-    assert [a.isEnabled() for a in view.row_menu_actions(0)] == [False, True, True, True]
-    assert [a.isEnabled() for a in view.row_menu_actions(1)] == [True, True, True, True]
+    assert [a.isEnabled() for a in view.row_menu_actions(0)] == \
+        [False, True, True, True, True]
+    assert [a.isEnabled() for a in view.row_menu_actions(1)] == \
+        [True, True, True, True, True]
     assert view.row_menu_actions(9) == []
 
 
@@ -617,7 +644,7 @@ def test_a_right_click_builds_the_menu_for_the_row_under_the_cursor(qapp, monkey
     row_point = view.visualRect(model.index(1, NAME_COLUMN)).center()
     click(row_point)
     assert [texts for texts, _ in popped] == \
-        [["恢复波形：人工改过", "属性…", "添加点位…", "删除点位：人工改过…"]]
+        [["恢复波形：人工改过", "属性…", "添加点位…", "复制整行", "删除点位：人工改过…"]]
     assert popped[0][1] == view.viewport().mapToGlobal(row_point), \
         "传给 _popup 的不是 globalPos，菜单不会开在光标下"
     popped.clear()
@@ -695,6 +722,6 @@ def test_the_remove_point_item_names_the_row_it_would_delete(qapp):
     view = _menu_view(qapp, rows)
     got: list[tuple] = []
     view.remove_point_requested.connect(got.append)
-    assert view.row_menu_actions(1)[3].text() == "删除点位：乙…"
-    view.row_menu_actions(0)[3].trigger()
+    assert view.row_menu_actions(1)[4].text() == "删除点位：乙…"
+    view.row_menu_actions(0)[4].trigger()
     assert got == [("tcp-5020", 11, "hr", 0, None)]

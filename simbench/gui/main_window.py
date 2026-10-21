@@ -133,6 +133,7 @@ class MainWindow(MenuMixin, EditMixin, IoMixin, QtWidgets.QMainWindow):
         self._refresh_table_caption()
         self._build_toolbar()
         self._build_menu()
+        self._build_shortcuts()
         self._restore_settings()
         self._build_status_bar()
 

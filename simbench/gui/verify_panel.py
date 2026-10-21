@@ -85,6 +85,11 @@ class VerifyPanel(QtWidgets.QWidget):
         self.verify_button.setToolTip("按点表逐点读回来，与点表初值比——只读，不写任何寄存器")
         self.monitor_button = self._button("开始监视", self.toggle_monitor)
         self.monitor_button.setToolTip("按间隔反复核对；异常写日志并在标签页上挂角标")
+        # Ctrl+Enter 只在核对页有焦点时生效：挂成全局键会把日志页/输入框里的回车抢走。
+        self.monitor_shortcut = QtGui.QShortcut(
+            QtGui.QKeySequence("Ctrl+Return"), self,
+            activated=lambda: self.toggle_monitor())
+        self.monitor_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
         self.interval = QtWidgets.QSpinBox()
         self.interval.setRange(1, 3600)
         self.interval.setValue(_MONITOR_SECONDS)

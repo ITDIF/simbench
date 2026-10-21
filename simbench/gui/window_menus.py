@@ -81,6 +81,23 @@ class MenuMixin:
         # "最近打开"插在"打开工程"后面（上面那一段加完之后插，否则它会被插到最前面）
         menu.insertAction(self.act_import, self.act_recent.menuAction())
 
+    def _build_shortcuts(self) -> None:
+        """只给低风险动作配键位。**「全部停止」刻意不绑**：误触一次就是掉一路正在服务的
+        从站，与「全部启动」的代价不对称；要停就点按钮。
+
+        `activated` 一律走 lambda：直接绑 `self._start_all` 会把方法对象固定下来，
+        用例 monkeypatch 实例方法就测不到。
+        """
+        self._shortcuts: list[QtGui.QShortcut] = []
+        self._shortcuts.append(
+            QtGui.QShortcut(QtGui.QKeySequence("F5"), self,
+                            activated=lambda: self._start_all()))
+        # 标签页顺序与 `addTab` 一致：报文监视 / 日志 / 核对 / 网络
+        for index in range(4):
+            self._shortcuts.append(QtGui.QShortcut(
+                QtGui.QKeySequence(f"Ctrl+{index + 1}"), self,
+                activated=lambda i=index: self.tabs.setCurrentIndex(i)))
+
     def _rebuild_recent_menu(self) -> None:
         """现建"最近打开"：按 **工程 / 点表** 两组列出，只保留**还在**的文件。
 

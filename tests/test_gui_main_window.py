@@ -25,6 +25,7 @@ import threading
 import pytest
 from pymodbus.client import ModbusTcpClient
 from PySide6 import QtCore, QtWidgets
+from PySide6.QtTest import QTest
 
 from simbench.backend.modbus_tcp import check_port_is_free
 from simbench.csv_io_entry import load_point_table
@@ -583,15 +584,16 @@ def test_the_row_menu_offers_restore_only_for_taken_over_rows(make_window, qapp)
                                                         VALUE_COLUMN), "42")
     qapp.processEvents()
     actions = window.point_table.row_menu_actions(row_of(window, "风机状态"))
-    # 四项：交还波形、属性、加点位、删这一个点位（后两项属于"从零搭工程"那一步）
+    # 五项：交还波形、属性、加点位、复制整行、删这一个点位（复制排在删除之前）
     assert [a.text() for a in actions] == ["恢复波形：风机状态", "属性…",
-                                           "添加点位…", "删除点位：风机状态…"]
-    assert [a.isEnabled() for a in actions] == [True, True, True, True]
+                                           "添加点位…", "复制整行", "删除点位：风机状态…"]
+    assert [a.isEnabled() for a in actions] == [True, True, True, True, True]
     other = window.point_table.row_menu_actions(row_of(window, "CO浓度"))
     assert other[0].isEnabled() is False         # 没被接管的行：看得见，点不动
     assert other[1].isEnabled() is True          # 但属性照样能打开
-    assert other[2].isEnabled() is True          # 加点位/删点位对每一行都开着
+    assert other[2].isEnabled() is True          # 加点位/复制对每一行都开着
     assert other[3].isEnabled() is True
+    assert other[4].isEnabled() is True
 
 
 def test_triggering_the_restore_command_puts_the_rows_back_under_the_waveform(
@@ -1077,3 +1079,24 @@ def test_start_all_result_is_not_overwritten_by_the_network_line(make_window, mo
     monkeypatch.setattr(window.session, "start_all", lambda: [])
     window._start_all()
     assert window.status.currentMessage() == "全部启动完成", window.status.currentMessage()
+
+
+def test_f5_starts_every_channel_and_stop_keeps_no_shortcut(window, qapp, monkeypatch):
+    """F5 = 全部启动；「全部停止」刻意没有键位——误触就是掉一路正在服务的从站。"""
+    fired: list[str] = []
+    monkeypatch.setattr(window, "_start_all", lambda: fired.append("start"))
+    window.activateWindow()
+    qapp.processEvents()
+    QTest.keyClick(window, QtCore.Qt.Key_F5)
+    assert fired == ["start"], "F5 没有触发全部启动"
+    assert window.act_stop.shortcut().isEmpty(), "「全部停止」不许有快捷键"
+
+
+def test_ctrl_1_to_4_switches_the_tabs(window, qapp):
+    """键位顺序与 addTab 一致：报文监视 / 日志 / 核对 / 网络。"""
+    window.activateWindow()
+    qapp.processEvents()
+    for index in range(4):
+        QTest.keyClick(window, getattr(QtCore.Qt, f"Key_{index + 1}"),
+                       QtCore.Qt.ControlModifier)
+        assert window.tabs.currentIndex() == index
