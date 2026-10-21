@@ -226,7 +226,14 @@ def test_master_reads_subscribed_values_and_probes():
     link = MqttMasterLink(channel(), session_factory=FakeSession)
     link.open()
     try:
-        assert link._session.subscribed == [("simbench/mqtt-1/D1/hr/0", 1)]
+        assert link._session.subscribed == [
+            ("simbench/mqtt-1/status", 1), ("simbench/mqtt-1/D1/hr/0", 1)]
+        # 设备明确离线：点位直接报离线，不再逐点等到超时
+        link._on_message("simbench/mqtt-1/status", b'{"online":false}')
+        offline = link.read(1, "hr", 0, 1)
+        assert not offline.ok and "离线" in offline.detail, offline
+        assert link.online is False
+        link._on_message("simbench/mqtt-1/status", b'{"online":true}')
         link._on_message("simbench/mqtt-1/D1/hr/0", b'{"value":25}')
         result = link.read(1, "hr", 0, 1)
         assert result.ok and result.values == [25], result

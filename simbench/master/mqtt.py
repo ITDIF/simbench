@@ -17,7 +17,7 @@ import time
 from ..backend.mqtt_client import MqttSession
 from ..codec.point_codec import encode
 from ..project.model import area_is_bit
-from ..project.mqtt_topic import decode_payload, value_topic
+from ..project.mqtt_topic import decode_payload, status_topic, value_topic
 
 
 class MqttMasterLink:
@@ -35,6 +35,9 @@ class MqttMasterLink:
         self._cache: dict[str, object] = {}
         self._lock = threading.Lock()
         self._arrived = threading.Event()
+        self._status_topic = status_topic(channel.topic_prefix, channel.name)
+        # None = 设备没发布状态；True/False = status topic 明确说了在线/离线。
+        self._online: bool | None = None
         self._points: dict[tuple[int, str, int], tuple[str, object]] = {}
         self._index()
 
@@ -54,6 +57,7 @@ class MqttMasterLink:
         self._session = self._session_factory(self.host, self.port, self._on_message)
         try:
             self._session.connect(timeout=max(1.0, self.timeout))
+            self._session.subscribe(self._status_topic, qos=int(self.channel.qos))
             for topic, _pt in self._points.values():
                 self._session.subscribe(topic, qos=int(self.channel.qos))
         except Exception:
@@ -71,14 +75,31 @@ class MqttMasterLink:
             value = decode_payload(payload)
         except Exception:                     # noqa: BLE001
             return
+        if topic == self._status_topic:
+            if isinstance(value, dict):
+                online = bool(value.get("online"))
+            elif isinstance(value, str):
+                online = value.strip().lower() in ("online", "true", "1", "yes", "on")
+            else:
+                online = bool(value)
+            with self._lock:
+                self._online = online
+            self._arrived.set()
+            return
         with self._lock:
             self._cache[topic] = value
         self._arrived.set()
+
+    @property
+    def online(self) -> bool | None:
+        return self._online
 
     def read(self, unit_id: int, area: str, address: int,
              count: int = 1):
         from .modbus import ReadResult
 
+        if self._online is False:
+            return ReadResult(None, "设备在线状态为离线（status topic）")
         found = self._points.get((unit_id, area, address))
         if found is None:
             return ReadResult(None, f"点表里没有 unit {unit_id} 的 {area} {address}")
