@@ -381,6 +381,20 @@ def test_an_mqtt_row_edits_broker_and_qos(built):
     assert session.dirty is True
 
 
+def test_the_slots_a_transport_does_not_use_still_say_something(built):
+    """空槽不许看起来像坏掉的输入框：给一句短提示，但**不写进 `.text()`**。
+
+    帧格式槽（TCP 行）与前缀槽（非 MQTT 行）用 placeholder：apply_edits 的校验读的是
+    text()，把提示写进去会被当成非法参数当场拒掉；隐藏或加宽则破坏几何合同。
+    """
+    panel, _session, _qapp = built
+    row = by_channel(panel)["tcp-5020"]
+    assert row.frame_edit.placeholderText() == "—"
+    assert row.prefix_edit.placeholderText() == "—"
+    assert row.frame_edit.text() == "" and row.prefix_edit.text() == ""
+    assert not row.frame_edit.isEnabled() and not row.prefix_edit.isEnabled()
+
+
 def test_many_channels_scroll_instead_of_pushing_the_rest_down(qapp):
     """通道多时面板高度有上限、其余行滚动：不许把下面的树和点位表挤出屏幕。"""
     project = Project(channels=[

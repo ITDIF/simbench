@@ -20,7 +20,7 @@ import pathlib
 import re
 
 import pytest
-from PySide6 import QtCore, QtGui
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from simbench.csv_io_entry import load_point_table
 from simbench.engine.packets import PacketStore
@@ -294,3 +294,95 @@ def test_the_toolbar_keeps_a_word_beside_every_icon(window):
     for action in buttons:
         assert action.text(), action
         assert not action.icon().isNull(), action.text()
+
+
+# ---------- 6. 深色主题的控件覆盖（2026-10-21 视觉修复） ----------
+
+# 阈值是**渲染判据**，不是配色口径：深色输入底实测 luma≈0.13、浅色 1.0，取 0.35 留足余量；
+# 禁用态对比度实测约为可用态的 47%，取 0.7 倍为上限。改配色不该让这两条失效。
+_DARK_FILL_LUMA_MAX = 0.35
+_DISABLED_CONTRAST_RATIO = 0.7
+
+
+def _fill_luma(colour: QtGui.QColor) -> float:
+    """0–1 的亮度（人眼权重），只用于"深底 / 浅底"判定。
+
+    与上面 `_luma(value: str)` 的分工：那个吃色值字符串、返回 0–255，是比两种配色谁更亮；
+    这个吃 QColor、返回 0–1，是用来卡"深色下不该出现浅底"的渲染阈值。
+    """
+    return 0.2126 * colour.redF() + 0.7152 * colour.greenF() + 0.0722 * colour.blueF()
+
+
+def _dominant_fill(widget) -> QtGui.QColor:
+    """控件里出现最多的颜色 = 它的"面"（输入框底、按钮底）。"""
+    image = widget.grab().toImage()
+    counts: dict[str, int] = {}
+    for y in range(0, image.height(), 2):
+        for x in range(0, image.width(), 2):
+            name = image.pixelColor(x, y).name()
+            counts[name] = counts.get(name, 0) + 1
+    assert counts, "控件没有渲染出任何像素"
+    return QtGui.QColor(max(counts, key=counts.get))
+
+
+def _text_contrast(widget) -> tuple[float, int]:
+    """文字与背景的平均亮度差，以及有效像素数（用于防"没画出来也变绿"）。"""
+    image = widget.grab().toImage()
+    background = _fill_luma(image.pixelColor(image.width() - 2, 2))
+    text = [abs(_fill_luma(image.pixelColor(x, y)) - background)
+            for y in range(image.height()) for x in range(image.width())
+            if abs(_fill_luma(image.pixelColor(x, y)) - background) > 0.1]
+    return (sum(text) / len(text) if text else 0.0), len(text)
+
+
+def test_the_dark_theme_styles_every_field_control_the_gui_uses(qapp):
+    """核对页的 QComboBox / QSpinBox 曾整块漏白：它们不在旧 QSS 的选择器里。
+
+    判据取"面"的亮度而非某个像素：深色下输入底必须是暗的，浅色残留会立刻把它拉到 1.0。
+    同时钉住选择器存在——防止有人把规则删了而颜色恰好还是对的。
+    """
+    theme.set_mode("dark", qapp)
+    try:
+        for widget in (QtWidgets.QLineEdit("tcp-5020"), QtWidgets.QComboBox(),
+                       QtWidgets.QSpinBox()):
+            widget.resize(160, 28)
+            widget.show()
+            qapp.processEvents()
+            fill = _dominant_fill(widget)
+            assert _fill_luma(fill) < _DARK_FILL_LUMA_MAX, \
+                f"{type(widget).__name__} 在深色下仍是浅底 {fill.name()}"
+            widget.deleteLater()
+            qapp.processEvents()
+        sheet = theme.qss("dark")
+        for selector in ("QComboBox {", "QSpinBox, QDoubleSpinBox {"):
+            assert selector in sheet, f"深色 QSS 少了 {selector}"
+    finally:
+        theme.set_mode("light", qapp)
+
+
+def test_disabled_controls_are_visibly_dimmer_than_enabled_ones(qapp):
+    """TCP 行上的 MQTT 专用勾选框必须"看得出不可点"。
+
+    用**与背景的对比度**而不是绝对亮度：浅色下禁用文字更浅、深色下更暗，两个方向都该是
+    "离背景更近"。有效像素不足直接失败——控件没画出来时这条断言会变成空跑。
+    """
+    for mode in ("light", "dark"):
+        theme.set_mode(mode, qapp)
+        try:
+            def contrast(enabled: bool, mode: str = mode) -> float:
+                box = QtWidgets.QCheckBox("保留")
+                box.setEnabled(enabled)
+                box.resize(90, 28)
+                box.show()
+                qapp.processEvents()
+                value, count = _text_contrast(box)
+                assert count >= 50, f"{mode}/{enabled}: 只渲染出 {count} 个文字像素"
+                box.deleteLater()
+                qapp.processEvents()
+                return value
+
+            enabled, disabled = contrast(True), contrast(False)
+            assert disabled < enabled * _DISABLED_CONTRAST_RATIO, \
+                (mode, "可用/禁用的对比度没有拉开", enabled, disabled)
+        finally:
+            theme.set_mode("light", qapp)

@@ -271,6 +271,58 @@ QLineEdit:disabled {{
     border-color: {disabled_border};
 }}
 
+/* 下拉与数字框：**不覆盖 ::drop-down / ::up-button**，保留原生箭头——QSS 一旦接管
+   子控件，箭头会变成空白或错位（这是 2026-10-21 那轮视觉修复里实测到的形状）。 */
+QComboBox {{
+    background: {field_bg};
+    color: {ink};
+    border: 1px solid {field_border};
+    border-radius: 5px;
+    padding: 3px 5px;
+    selection-background-color: {accent};
+    selection-color: {accent_text};
+}}
+QComboBox:hover {{ border-color: {field_border_hover}; }}
+QComboBox:focus {{ border-color: {accent}; }}
+QComboBox:disabled {{
+    background: {disabled_bg};
+    color: {ink_disabled};
+    border-color: {disabled_border};
+}}
+/* 弹层是独立的 top-level 视图，不继承上面那条——漏了它就是"框是深的、列表是白的"。 */
+QComboBox QAbstractItemView {{
+    background: {surface};
+    color: {ink};
+    border: 1px solid {line};
+    selection-background-color: {accent};
+    selection-color: {accent_text};
+    outline: none;
+}}
+QSpinBox, QDoubleSpinBox {{
+    background: {field_bg};
+    color: {ink};
+    border: 1px solid {field_border};
+    border-radius: 5px;
+    padding: 3px 5px;
+    selection-background-color: {accent};
+    selection-color: {accent_text};
+}}
+QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {field_border_hover}; }}
+QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {accent}; }}
+QSpinBox:disabled, QDoubleSpinBox:disabled {{
+    background: {disabled_bg};
+    color: {ink_disabled};
+    border-color: {disabled_border};
+}}
+QProgressBar {{
+    background: {band};
+    border: 1px solid {line};
+    border-radius: 5px;
+    text-align: center;
+    color: {ink};
+}}
+QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
+
 QPlainTextEdit, QTextEdit {{
     background: {text_edit_bg};
     color: {ink};
@@ -282,6 +334,10 @@ QPlainTextEdit, QTextEdit {{
 }}
 
 QRadioButton, QCheckBox {{ color: {ink}; spacing: 6px; }}
+/* 禁用态：上面的 `color: {ink}` 是无条件的，会盖掉 QPalette 的 Disabled 组，
+   所以这里必须显式再写一条——否则"不可用"看起来和"可用"一样（TCP 行上的
+   MQTT 专用勾选框就是靠这条才看得出不可点）。 */
+QRadioButton:disabled, QCheckBox:disabled {{ color: {ink_disabled}; }}
 
 QMenu {{
     background: {surface};
@@ -358,6 +414,14 @@ def palette(mode: str) -> QtGui.QPalette:
                       (QtGui.QPalette.HighlightedText, "accent_text"),
                       (QtGui.QPalette.Link, "accent")):
         p.setColor(role, QtGui.QColor(colours[key]))
+    # 禁用组：QSS 管不到的原生弹层（菜单项、文件对话框）按这里画。只补文字与输入底，
+    # 其余角色留给 Qt 的默认推导——补多了反而会把原生控件的层次压平。
+    disabled_text = QtGui.QColor(colours["ink_disabled"])
+    for role in (QtGui.QPalette.WindowText, QtGui.QPalette.Text,
+                 QtGui.QPalette.ButtonText, QtGui.QPalette.PlaceholderText):
+        p.setColor(QtGui.QPalette.Disabled, role, disabled_text)
+    p.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.Base,
+               QtGui.QColor(colours["surface"]))
     return p
 
 

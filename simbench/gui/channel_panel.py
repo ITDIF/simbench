@@ -403,10 +403,16 @@ class ChannelPanel(QtWidgets.QWidget):
         frame.setFixedWidth(_FRAME_WIDTH)
         frame.setToolTip(third_tip)
         frame.setEnabled(serial or s7 or mqtt)
+        if not (serial or s7 or mqtt):
+            # 用 placeholder 而不是 setText：`.text()` 仍是空串，apply_edits 的校验与
+            # 回写路径不受影响；隐藏或加宽都会破坏"状态一变几何不动"的合同。
+            frame.setPlaceholderText("—")
         prefix = QtWidgets.QLineEdit(ch.topic_prefix if mqtt else "")
         prefix.setFixedWidth(_PREFIX_WIDTH)
         prefix.setToolTip("MQTT topic 前缀（例：simbench；只用这一列对 MQTT 有意义）")
         prefix.setEnabled(mqtt)
+        if not mqtt:
+            prefix.setPlaceholderText("—")
         retain = QtWidgets.QCheckBox("保留")
         retain.setFixedWidth(_RETAIN_WIDTH)
         retain.setToolTip("MQTT：发布时保留最后一份值（retain）")
