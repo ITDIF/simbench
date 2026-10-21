@@ -16,7 +16,7 @@ import time
 
 from ..backend.mqtt_client import MqttSession
 from ..codec.point_codec import encode
-from ..project.model import area_is_bit
+from ..project.model import Point, area_is_bit
 from ..project.mqtt_topic import decode_payload, status_topic, value_topic
 
 
@@ -31,14 +31,14 @@ class MqttMasterLink:
         self.port = int(port or channel.port)
         self.timeout = timeout
         self._session_factory = session_factory or MqttSession
-        self._session = None
+        self._session: MqttSession | None = None
         self._cache: dict[str, object] = {}
         self._lock = threading.Lock()
         self._arrived = threading.Event()
         self._status_topic = status_topic(channel.topic_prefix, channel.name)
         # None = 设备没发布状态；True/False = status topic 明确说了在线/离线。
         self._online: bool | None = None
-        self._points: dict[tuple[int, str, int], tuple[str, object]] = {}
+        self._points: dict[tuple[int, str, int], tuple[str, Point]] = {}
         self._index()
 
     @classmethod
@@ -54,12 +54,15 @@ class MqttMasterLink:
                 self._points[(device.unit_id, pt.area, pt.address)] = (topic, pt)
 
     def open(self) -> None:
-        self._session = self._session_factory(self.host, self.port, self._on_message)
+        # 会话工厂返回的是 `MqttSession` 形状（测试会换成假 broker 客户端），
+        # 用局部变量收一次，省得静态检查在 `self._session` 的 Optional 上反复收窄。
+        session = self._session_factory(self.host, self.port, self._on_message)
+        self._session = session
         try:
-            self._session.connect(timeout=max(1.0, self.timeout))
-            self._session.subscribe(self._status_topic, qos=int(self.channel.qos))
+            session.connect(timeout=max(1.0, self.timeout))
+            session.subscribe(self._status_topic, qos=int(self.channel.qos))
             for topic, _pt in self._points.values():
-                self._session.subscribe(topic, qos=int(self.channel.qos))
+                session.subscribe(topic, qos=int(self.channel.qos))
         except Exception:
             self.close()
             raise

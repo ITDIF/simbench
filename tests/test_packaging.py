@@ -11,6 +11,8 @@ import importlib.util
 import pathlib
 import struct
 
+from simbench.__about__ import __version__
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PACKAGING = ROOT / "packaging"
 
@@ -56,11 +58,16 @@ def test_the_generated_icon_is_a_real_icon_qt_can_load(qapp):
 
 
 def test_the_version_resource_is_what_pyinstaller_reads():
-    """版本资源是 PyInstaller 的 VSVersionInfo DSL：名字、版本、语言代码页都写上。"""
+    """版本资源是 PyInstaller 的 VSVersionInfo DSL：名字、版本、语言代码页都写上。
+
+    `filevers` 那一项**必须从 `__about__.__version__` 推出来**：写死字面量等于在这个
+    用例里又开了一个版本源，每次升版都要来改测试，而它想守的恰恰是"没有第二个源"。
+    """
+    major, minor, patch = __version__.split(".")
     text = (PACKAGING / "version_info.txt").read_text(encoding="utf-8")
     for needle in ("VSVersionInfo(", "FixedFileInfo(", "StringFileInfo(",
                    "VarFileInfo(", "'080404b0'", "ProductName", "simbench",
-                   "filevers=(1, 0, 0, 0)"):
+                   f"filevers=({major}, {minor}, {patch}, 0)"):
         assert needle in text, needle
 
 

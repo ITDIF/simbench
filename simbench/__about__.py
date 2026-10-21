@@ -11,4 +11,4 @@ GUI 标题、崩溃日志的头，全部从这一处取值或与它比对（`tes
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

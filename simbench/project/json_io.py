@@ -207,7 +207,10 @@ def _channel_from_dict(raw: dict, index: int):
     if raw.get("type") == "s7":
         return _s7_channel_from_dict(raw, index)
     if raw.get("type") == "mqtt":
-        name = raw.get("name")
+        # MQTT 支路原先直接 `raw.get("name")`，缺键时把 None 带进 MqttChannel，
+        # 到下游才炸成看不懂的 TypeError；按本模块口径先过必填键闸。
+        _require_keys(raw, MqttChannel, f"channel #{index}")
+        name = raw["name"]
         return MqttChannel(
             name=name,
             host=raw.get("host", "127.0.0.1"),

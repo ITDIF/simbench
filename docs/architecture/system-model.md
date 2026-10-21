@@ -224,7 +224,17 @@ __main__ →  backend(门面), project, csv_io_entry, __about__（均为模块�
 | test | `pytest 9.1.1` → `python -m pytest`（串行） | `1654 passed in 209.34s`，0 failed / 0 skipped，rc=0 |
 | 架构守卫 | `pytest tests/test_architecture.py` | `24 passed in 3.11s`，rc=0 |
 
-**mypy 的 28 条全部落在 MQTT 那一批新代码里**：`backend/mqtt_client.py` 20 条、`master/mqtt.py` 6 条、`project/json_io.py` 2 条、`project/csv_io.py` 1 条。形状只有三类——Optional 没收窄（`"None" has no attribute "publish"` / `"connect"`）、点对象被标成 `object` 后按属性用、联合类型漏了 `MqttChannel`。这**不是环境问题**（版本与钉子一致），所以 CI 的 lint 作业在 6bf4ff3 上是红的；tag 的打包作业没有 `needs:` 关联 lint，仍会产出 exe，但"三道门禁全绿"这句话在当前 HEAD 上不成立。
+**mypy 的 28 条全部落在 MQTT 那一批新代码里**：`backend/mqtt_client.py` 20 条、`master/mqtt.py` 6 条、`project/json_io.py` 2 条、`project/csv_io.py` 1 条。形状只有三类——Optional 没收窄（`"None" has no attribute "publish"` / `"connect"`）、点对象被标成 `object` 后按属性用、联合类型漏了 `MqttChannel`。这**不是环境问题**（版本与钉子一致），所以 CI 的 lint 作业在 6bf4ff3 上是红的。
+
+**这 28 条已在 1.1.0 发布前修完**（提交内容：`mqtt_client.py` 给会话/loop/点位字典补类型并加 `_ready_session()`、`master/mqtt.py` 用局部变量收会话、`json_io.py` 的 MQTT 支路补 `_require_keys`、`csv_io.py` 的联合类型补 `MqttChannel`；未改运行时逻辑）。修后复测：
+
+| 门禁 | 结果 |
+|---|---|
+| `ruff check` | `All checks passed!`，rc=0 |
+| `python -m mypy` | `Success: no issues found in 50 source files`，rc=0 |
+| `python -m pytest`（串行） | `1654 passed in 198.94s`，0 failed / 0 skipped，rc=0 |
+
+顺带修掉一处**测试自己的版本号硬编码**：`tests/test_packaging.py` 原先断言 `filevers=(1, 0, 0, 0)`，升版必红；现改为从 `__about__.__version__` 推导——它要守的是"版本只有一个源"，不能在测试里再开一个。
 
 ## 七、证据强度与未决项
 
@@ -761,7 +771,7 @@ backend 11→12 / 2362→2829；master 4→5 / 382→514；net 12 / 2180→2680�
 ### 13.3 本轮发现的问题（未改动代码）
 
 1. **mypy 红 28 条**（详见 §六）：全部在 MQTT 新代码，三类形状（Optional 未收窄、`object` 取属性、
-   联合类型漏 `MqttChannel`），不是环境漂移。CI 的 lint 作业在当前 HEAD 上是红的。
+   联合类型漏 `MqttChannel`），不是环境漂移。**已在 1.1.0 发布前修复，复测全绿**。
 2. **包文档串仍停在 M1**：`simbench/__init__.py:1` 写"（M1：点表内核与 TCP 从站）"，
    而实际已是 Modbus 五种帧 + S7 + MQTT。
 3. **`master → backend` 这条新边没有守卫**：G1 只管协议库住哪，G4/G5 只管 engine/gui 不许碰

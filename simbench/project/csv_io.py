@@ -513,7 +513,7 @@ def _channel_for(channels: dict, raw_name: str, ports: dict[str, int],
               else parse_serial_name(raw_name, index))
     # `wanted` 三种通道对象都可能是（TCP / S7 / 串口）：标注成联合类型，别让静态检查
     # 按第一个分支把它钉成 `TcpChannel`（后两个分支就会被判成类型错）。
-    wanted: TcpChannel | S7Channel | SerialChannel | None
+    wanted: TcpChannel | MqttChannel | S7Channel | SerialChannel | None
     if wanted_tcp is not None:
         name, wanted = wanted_tcp
     elif wanted_s7 is not None:

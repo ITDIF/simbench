@@ -25,7 +25,7 @@ import uuid
 from typing import Any
 
 from ..codec.point_codec import decode, encode
-from ..project.model import area_is_bit
+from ..project.model import Point, area_is_bit
 from ..project.mqtt_topic import (
     decode_payload,
     encode_payload,
@@ -154,12 +154,12 @@ class MqttBackend(BackendBase):
         self._session_factory = session_factory or MqttSession
         # `state_sink(state, detail)`：断线/重连反映到通道状态灯（GUI 注入）。
         self._state_sink = state_sink
-        self._session = None
-        self._loop = None
-        self._values: dict[tuple[int, str, int], object] = {}
-        self._by_topic: dict[str, tuple[int, object]] = {}
-        self._set_topics: dict[str, tuple[int, object]] = {}
-        self._points: dict[tuple[int, str, int], object] = {}
+        self._session: MqttSession | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._values: dict[tuple[int, str, int], Any] = {}
+        self._by_topic: dict[str, tuple[int, Point]] = {}
+        self._set_topics: dict[str, tuple[int, Point]] = {}
+        self._points: dict[tuple[int, str, int], Point] = {}
         self._published: dict[str, str] = {}
 
     # ---------- BackendBase 钩子 ----------
@@ -206,20 +206,26 @@ class MqttBackend(BackendBase):
         server.close()
         self._session = None
 
-    def _require_ready(self) -> None:
-        if self._session is None:
+    def _ready_session(self) -> MqttSession:
+        session = self._session
+        if session is None:
             raise RuntimeError(f"channel {self.channel_name} is not started")
+        return session
 
-    def _write_point(self, key, pt, value) -> bool:
-        self._require_ready()
+    def _require_ready(self) -> None:
+        # 基类约定是"守卫、返回 None"；取到会话的那份留给需要调 publish 的地方用。
+        self._ready_session()
+
+    def _write_point(self, key, pt: Point, value) -> bool:
+        session = self._ready_session()
         topic = value_topic(self.channel.topic_prefix, self.channel_name,
                             self._device_name(key), pt.area, pt.address)
         payload = _encode_value(value, self.channel.payload)
         self._values[(key, pt.area, pt.address)] = value
         if self._published.get(topic) == payload:
             return True                   # 值没变：不重复发，避免每 100ms 刷一条
-        self._session.publish(topic, payload, qos=int(self.channel.qos),
-                              retain=bool(self.channel.retain))
+        session.publish(topic, payload, qos=int(self.channel.qos),
+                        retain=bool(self.channel.retain))
         self._published[topic] = payload
         self._trace("tx", payload.encode("utf-8"), key, f"PUB {topic}")
         return True
@@ -271,12 +277,12 @@ class MqttBackend(BackendBase):
 
     def _publish_initial(self) -> None:
         for (unit, area, address), value in list(self._values.items()):
-            pt = self._by_topic.get(
+            entry = self._by_topic.get(
                 value_topic(self.channel.topic_prefix, self.channel_name,
-                            self._device_name(unit), area, address), (None, None))[1]
-            if pt is None:
+                            self._device_name(unit), area, address))
+            if entry is None:
                 continue
-            self._write_point(unit, pt, value)
+            self._write_point(unit, entry[1], value)
 
     def _device_name(self, unit: int) -> str:
         for device in self.channel.devices:
@@ -320,7 +326,7 @@ class MqttBackend(BackendBase):
     def _publish_status(self, online: bool) -> None:
         topic = status_topic(self.channel.topic_prefix, self.channel_name)
         payload = status_payload(online, self.channel.payload)
-        self._session.publish(topic, payload, qos=int(self.channel.qos), retain=True)
+        self._ready_session().publish(topic, payload, qos=int(self.channel.qos), retain=True)
         self._trace("tx", payload.encode("utf-8"), 0, f"STATUS {topic}")
 
     def _on_message(self, topic: str, payload) -> None:
@@ -354,7 +360,7 @@ class MqttBackend(BackendBase):
                        f"{self.channel_name}: 收到 {topic} 但回发失败：{exc}",
                        time.monotonic())
             return
-        self._trace("rx", (payload if isinstance(payload, (bytes, bytearray))
+        self._trace("rx", (bytes(payload) if isinstance(payload, (bytes, bytearray))
                           else str(payload).encode("utf-8")), unit, f"SET {topic}")
 
     def _trace(self, direction: str, payload: bytes, unit: int, summary: str) -> None:

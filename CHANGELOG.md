@@ -7,7 +7,7 @@
 版本号只有一处来源：`simbench/__about__.py`（exe 属性页那份 `packaging/version_info.txt`
 由 `tests/test_version.py` 钉着与它一致）。
 
-## 未发布
+## 1.1.0（2026-10-21）
 
 **MQTT（2026-10-20）**
 - 新增 **MQTT 通道**：`name@mqtt:host:port`（host:port 是 broker，可选 topic 前缀/QoS）。
