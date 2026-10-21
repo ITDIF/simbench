@@ -85,6 +85,49 @@ def _call(loop, coro, timeout=10):
     return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout)
 
 
+def test_will_is_published_when_the_client_drops(broker, loop_thread):
+    prefix = f"simbench-will-{uuid.uuid4().hex[:8]}"
+    channel = MqttChannel(
+        "mqtt-1", host="127.0.0.1", port=broker, topic_prefix=prefix, qos=1,
+        will=True,
+        devices=[Device("D1", 1, [Point("温度", "hr", 0, "uint16", initial="25")])])
+    backend = MqttBackend(channel)
+    _call(loop_thread, backend.start())
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                         client_id=f"will-{uuid.uuid4().hex[:8]}")
+    connected = threading.Event()
+    seen: list[tuple[str, str]] = []
+    client.on_connect = lambda *a: connected.set()
+    client.on_message = lambda _c, _u, m: seen.append((m.topic, m.payload.decode()))
+    try:
+        client.connect("127.0.0.1", broker, 30)
+        client.loop_start()
+        assert connected.wait(8)
+        client.subscribe(f"{prefix}/mqtt-1/status", qos=1)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any("online\":true" in p
+                                                      for _t, p in seen):
+            time.sleep(0.05)
+        assert any("online\":true" in p for _t, p in seen), seen
+        # 模拟异常掉线：直接关掉 paho 的底层 socket，不发 DISCONNECT
+        backend._server._client.socket().close()
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not any("online\":false" in p
+                                                      for _t, p in seen):
+            time.sleep(0.05)
+        assert any("online\":false" in p for _t, p in seen), seen
+    finally:
+        client.disconnect()
+        client.loop_stop()
+        _call(loop_thread, backend.stop())
+        cleanup = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        cleanup.connect("127.0.0.1", broker, 30)
+        cleanup.loop_start()
+        cleanup.publish(f"{prefix}/mqtt-1/status", b"", qos=1, retain=True)
+        cleanup.disconnect()
+        cleanup.loop_stop()
+
+
 def test_a_real_broker_round_trip(broker, loop_thread):
     prefix = f"simbench-e2e-{uuid.uuid4().hex[:8]}"
     channel = MqttChannel(

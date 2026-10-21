@@ -190,8 +190,11 @@ mqtt-1@mqtt:127.0.0.1:1883,温湿度-1,1,hr00-温度-℃,hr,0,float32,ABCD,23.5,
 例如 `mqtt-1@mqtt:10.0.0.5:1883 plant 2`。界面里通道行的「前缀」「帧」「保留」
 「原始」四格对应 topic 前缀、QoS、retain、payload 形式，可以直接改：
 默认 JSON（`{"value": ...}`）且 retain=True；勾「原始」后发布裸标量，取消「保留」
-则发布时不带 retain。CSV 里对应可选的 `PREFIX QOS RETAIN PAYLOAD` 四段，
-例如 `mqtt-1@mqtt:10.0.0.5:1883 simbench 1 0 raw`。
+则发布时不带 retain。勾「遗嘱」后由 broker 在 `{prefix}/{channel}/status` 维护在线状态：
+连上发布 `{"online":true}`（或 `online`），异常断开时 broker 发布遗嘱 `{"online":false}`
+（或 `offline`），正常停止也会先发离线。CSV 里对应可选的
+`PREFIX QOS RETAIN PAYLOAD WILL` 五段，例如
+`mqtt-1@mqtt:10.0.0.5:1883 simbench 1 0 raw 1`。
 
 **通用 topic/payload 约定**：
 

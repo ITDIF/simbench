@@ -280,7 +280,8 @@ def default_channel(project, transport: str, name: str | None = None, probe=None
                            topic_prefix=overrides.get("topic_prefix", "simbench"),
                            qos=overrides.get("qos", 1),
                            retain=overrides.get("retain", True),
-                           payload=overrides.get("payload", "json"))
+                           payload=overrides.get("payload", "json"),
+                           will=overrides.get("will", False))
     if transport == "s7":
         return S7Channel(name=name,
                          host=overrides.get("host", S7_DEFAULTS["host"]),

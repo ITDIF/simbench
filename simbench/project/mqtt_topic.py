@@ -45,6 +45,19 @@ def set_topic(prefix: str, channel: str, device: str, area: str,
     return value_topic(prefix, channel, device, area, address) + "/set"
 
 
+def status_topic(prefix: str, channel: str) -> str:
+    """设备在线状态 topic：`{prefix}/{channel}/status`。"""
+    return f"{segment(prefix)}/{segment(channel)}/status"
+
+
+def status_payload(online: bool, mode: str = "json") -> str:
+    """在线/离线状态 payload；raw 模式是 `online` / `offline`。"""
+    if mode == "raw":
+        return "online" if online else "offline"
+    return json.dumps({"online": bool(online)}, ensure_ascii=False,
+                      separators=(",", ":"))
+
+
 def encode_payload(value) -> str:
     """人写的值 -> 线上 payload。紧凑 JSON，中文不转义。"""
     return json.dumps({"value": value}, ensure_ascii=False, separators=(",", ":"))

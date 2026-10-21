@@ -362,18 +362,22 @@ def test_an_mqtt_row_edits_broker_and_qos(built):
     assert row.prefix_edit.text() == "simbench"
     assert row.retain_check.isEnabled() and row.payload_check.isEnabled()
     assert row.retain_check.isChecked() and not row.payload_check.isChecked()
+    assert row.will_check.isEnabled() and not row.will_check.isChecked()
     other = by_channel(panel)["tcp-5020"]
     assert not other.prefix_edit.isEnabled() and not other.retain_check.isEnabled()
+    assert not other.will_check.isEnabled()
     row.host_edit.setText("broker2")
     row.port_edit.setText("1884")
     row.frame_edit.setText("2")
     row.prefix_edit.setText("plant")
     row.retain_check.setChecked(False)
     row.payload_check.setChecked(True)
+    row.will_check.setChecked(True)
     assert panel.apply_edits("mqtt-1") == 1884
     channel = session.project.find_channel("mqtt-1")
     assert (channel.host, channel.port, channel.qos, channel.topic_prefix,
-            channel.retain, channel.payload) ==         ("broker2", 1884, 2, "plant", False, "raw")
+            channel.retain, channel.payload, channel.will) == \
+        ("broker2", 1884, 2, "plant", False, "raw", True)
     assert session.dirty is True
 
 

@@ -26,7 +26,14 @@ from typing import Any
 
 from ..codec.point_codec import decode, encode
 from ..project.model import area_is_bit
-from ..project.mqtt_topic import decode_payload, encode_payload, set_topic, value_topic
+from ..project.mqtt_topic import (
+    decode_payload,
+    encode_payload,
+    set_topic,
+    status_payload,
+    status_topic,
+    value_topic,
+)
 from .base import BackendBase, BackendStartError
 
 
@@ -35,12 +42,13 @@ class MqttSession:
 
     def __init__(self, host: str, port: int, on_message, *,
                  client_id: str = "", keepalive: int = 30,
-                 on_state=None) -> None:
+                 on_state=None, will=None) -> None:
         self.host = host
         self.port = int(port)
         self._on_message = on_message
         # `on_state(connected, detail)`：断线/重连给后端留一条日志；默认不关心。
         self._on_state = on_state
+        self._will = will
         self._topics: list[tuple[str, int]] = []
         self._closing = False
         self._connected = threading.Event()
@@ -60,6 +68,9 @@ class MqttSession:
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_mqtt_message
         self._client.on_subscribe = self._on_subscribe
+        if self._will is not None:
+            topic, payload, qos, retain = self._will
+            self._client.will_set(topic, payload, qos=qos, retain=retain)
         # 断线后自动重连（1s 起、30s 封顶）；`loop_start` 跑的就是带重连的 loop_forever。
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
         self._client.connect_async(self.host, self.port, keepalive=self._keepalive)
@@ -163,7 +174,8 @@ class MqttBackend(BackendBase):
         self._index_points()
         return self._session_factory(self.channel.host, int(self.channel.port),
                                      self._on_message,
-                                     on_state=self._on_connection_state)
+                                     on_state=self._on_connection_state,
+                                     will=self._will_config())
 
     def _start_server(self, server):
         # 连接/订阅是阻塞调用：放进线程里跑，别把引擎 loop 冻住（同 `_probe` 那条口径）。
@@ -179,11 +191,18 @@ class MqttBackend(BackendBase):
         self._loop = asyncio.get_running_loop()
         self._session = server
         self._publish_initial()
+        if self.channel.will:
+            self._publish_status(True)
 
     def _make_writer(self, _server):
         return None                       # MQTT 没有 RawRegisterWriter
 
     async def _shutdown_server(self, server) -> None:
+        if self.channel.will:
+            try:
+                self._publish_status(False)
+            except ConnectionError:
+                pass                     # 已经断了：broker 会按遗嘱发离线
         server.close()
         self._session = None
 
@@ -286,8 +305,23 @@ class MqttBackend(BackendBase):
             return
         if connected:
             self._state_sink("running", self.describe())
+            if self.channel.will:
+                self._publish_status(True)
         else:
             self._state_sink("error", f"MQTT 连接断开（{detail}），正在自动重连")
+
+    def _will_config(self):
+        if not self.channel.will:
+            return None
+        return (status_topic(self.channel.topic_prefix, self.channel_name),
+                status_payload(False, self.channel.payload),
+                int(self.channel.qos), True)
+
+    def _publish_status(self, online: bool) -> None:
+        topic = status_topic(self.channel.topic_prefix, self.channel_name)
+        payload = status_payload(online, self.channel.payload)
+        self._session.publish(topic, payload, qos=int(self.channel.qos), retain=True)
+        self._trace("tx", payload.encode("utf-8"), 0, f"STATUS {topic}")
 
     def _on_message(self, topic: str, payload) -> None:
         """paho 网络线程 -> 引擎 loop。状态只许在 loop 上改。"""

@@ -222,6 +222,9 @@ def _mqtt(ch, issues: list[Issue], where: str) -> tuple[bool, bool]:
     if ch.payload not in ("json", "raw"):
         issues.append(Issue("error", "mqtt_payload", where,
                             f"payload {brief(ch.payload)} must be 'json' or 'raw'"))
+    if not isinstance(ch.will, bool):
+        issues.append(Issue("error", "mqtt_will", where,
+                            f"will {brief(ch.will)} must be true or false"))
     if (not isinstance(ch.topic_prefix, str) or not ch.topic_prefix.strip()
             or any(char in ch.topic_prefix for char in "+#")):
         issues.append(Issue("error", "mqtt_topic_prefix", where,

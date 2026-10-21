@@ -47,6 +47,7 @@ _FRAME_WIDTH = 56
 _PREFIX_WIDTH = 110
 _RETAIN_WIDTH = 52
 _RAW_WIDTH = 52
+_WILL_WIDTH = 52
 _BUTTON_WIDTH = 56
 _STATUS_WIDTH = 88
 
@@ -64,6 +65,7 @@ class ChannelRow:
     prefix_edit: QtWidgets.QLineEdit
     retain_check: QtWidgets.QCheckBox
     payload_check: QtWidgets.QCheckBox
+    will_check: QtWidgets.QCheckBox
     start_button: QtWidgets.QPushButton
     stop_button: QtWidgets.QPushButton
     status: QtWidgets.QLabel
@@ -104,7 +106,7 @@ class ChannelPanel(QtWidgets.QWidget):
         # 尾部留一个空的**拉伸列**（第 7 列，前面只用到第 6 列）。不给它的话，多出来的
         # 宽度会全部落进第一格"通道名"里，整行被摊成"名字贴最左、参数与按钮贴最右"两撮，
         # 中间一大片空白（截图照出来的）。有了它，行内容左对齐、余量在行尾。
-        self._grid.setColumnStretch(10, 1)
+        self._grid.setColumnStretch(11, 1)
         self._scroll.setWidget(self._host)
         outer.addWidget(self._scroll)
         self.last_error = ""
@@ -273,6 +275,7 @@ class ChannelPanel(QtWidgets.QWidget):
         prefix = row.prefix_edit.text().strip()
         retain = row.retain_check.isChecked()
         payload = "raw" if row.payload_check.isChecked() else "json"
+        will = row.will_check.isChecked()
         try:
             port = int(text)
             qos = int(text_qos)
@@ -286,11 +289,12 @@ class ChannelPanel(QtWidgets.QWidget):
             row.prefix_edit.setText(old["topic_prefix"])
             row.retain_check.setChecked(bool(old["retain"]))
             row.payload_check.setChecked(old["payload"] == "raw")
+            row.will_check.setChecked(bool(old["will"]))
 
         return self._commit(channel, target,
                             {"host": host, "port": port, "qos": qos,
                              "topic_prefix": prefix, "retain": retain,
-                             "payload": payload},
+                             "payload": payload, "will": will},
                             restore, result=port)
 
     def _apply_s7_edits(self, row: ChannelRow, target, channel: str) -> int | None:
@@ -351,6 +355,7 @@ class ChannelPanel(QtWidgets.QWidget):
                        row.prefix_edit.geometry().getRect(),
                        row.retain_check.geometry().getRect(),
                        row.payload_check.geometry().getRect(),
+                       row.will_check.geometry().getRect(),
                        row.start_button.geometry().getRect(),
                        row.stop_button.geometry().getRect(),
                        row.status.geometry().getRect()) for row in self._rows.values())
@@ -412,6 +417,11 @@ class ChannelPanel(QtWidgets.QWidget):
         raw.setToolTip('MQTT：payload 用裸标量（不包 {"value": ...}）')
         raw.setChecked(mqtt and ch.payload == "raw")
         raw.setEnabled(mqtt)
+        will = QtWidgets.QCheckBox("遗嘱")
+        will.setFixedWidth(_WILL_WIDTH)
+        will.setToolTip("MQTT：异常断开时由 broker 在 /status 发布离线状态")
+        will.setChecked(bool(ch.will) if mqtt else False)
+        will.setEnabled(mqtt)
         # 端口框刻意**不装** QIntValidator：范围判定只有 validate 那一份，输入框里
         # 悄悄吞掉键击是"没反馈的拒绝"，用户只会觉得点不动。改完就验、验不过就退回去
         # 并说一句人话，比默默拦键好读。
@@ -427,10 +437,10 @@ class ChannelPanel(QtWidgets.QWidget):
         host.editingFinished.connect(lambda n=ch.name: self.apply_edits(n))
         frame.editingFinished.connect(lambda n=ch.name: self.apply_edits(n))
         for column, widget in enumerate((name, host, port, frame, prefix, retain, raw,
-                                         start, stop, status)):
+                                         will, start, stop, status)):
             self._grid.addWidget(widget, index, column)
         return ChannelRow(ch.name, serial, s7, mqtt, name, host, port, frame, prefix,
-                          retain, raw, start, stop, status)
+                          retain, raw, will, start, stop, status)
 
     def _start(self, channel: str) -> None:
         if self._operation_busy:
@@ -509,6 +519,7 @@ class ChannelPanel(QtWidgets.QWidget):
         row.prefix_edit.setEnabled(row.mqtt and not running)
         row.retain_check.setEnabled(row.mqtt and not running)
         row.payload_check.setEnabled(row.mqtt and not running)
+        row.will_check.setEnabled(row.mqtt and not running)
 
     def _errors(self) -> list[str]:
         """当前拦住启动的那几条。判定住在 `validate_project`，面板一份都不抄。"""

@@ -30,9 +30,10 @@ def channel(prefix="simbench", qos=1) -> MqttChannel:
 class FakeSession:
     """假 broker 会话：记录订阅/发布，`deliver` 把消息交给后端回调。"""
 
-    def __init__(self, host, port, on_message, on_state=None):
+    def __init__(self, host, port, on_message, on_state=None, will=None):
         self.host, self.port, self.on_message = host, port, on_message
         self.on_state = on_state
+        self.will = will
         self.connected = False
         self.subscribed: list[tuple[str, int]] = []
         self.published: list[tuple[str, str, int, bool]] = []
@@ -91,6 +92,11 @@ def test_csv_round_trip_and_json_round_trip():
     assert "mqtt-1@mqtt:broker:1883 simbench 1 0 raw" in text
     back = read_csv(text).channels[0]
     assert (back.retain, back.payload) == (False, "raw")
+    custom = channel()
+    custom.will = True
+    text = write_csv(Project(channels=[custom]))
+    assert "mqtt-1@mqtt:broker:1883 simbench 1 1 json 1" in text
+    assert read_csv(text).channels[0].will is True
 
 
 def test_validation_checks_qos_prefix_and_duplicate_topics():
@@ -164,6 +170,20 @@ def test_connection_state_reaches_the_status_sink():
         assert "重连" in states[0][1]
     finally:
         asyncio.run(backend.stop())
+
+
+def test_will_is_configured_and_status_is_published():
+    ch = channel()
+    ch.will = True
+    backend = MqttBackend(ch, session_factory=FakeSession)
+    asyncio.run(backend.start())
+    session = backend._server
+    try:
+        assert session.will == ("simbench/mqtt-1/status", '{"online":false}', 1, True)
+        assert ("simbench/mqtt-1/status", '{"online":true}', 1, True) in session.published
+    finally:
+        asyncio.run(backend.stop())
+    assert ("simbench/mqtt-1/status", '{"online":false}', 1, True) in session.published
 
 
 def test_raw_payload_and_retain_false_are_published():

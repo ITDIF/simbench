@@ -247,15 +247,19 @@ def _csv_channel_name(channel) -> str:
         # rack/slot 同一个写法）。默认值不写，保证常见的表看起来干净。
         spec = f"mqtt:{channel.host}:{channel.port}"
         nondefault = (channel.topic_prefix != "simbench" or channel.qos != 1
-                      or not channel.retain or channel.payload != "json")
+                      or not channel.retain or channel.payload != "json"
+                      or channel.will)
         if nondefault:
             spec += f" {channel.topic_prefix}"
-            if channel.qos != 1 or not channel.retain or channel.payload != "json":
+            if (channel.qos != 1 or not channel.retain
+                    or channel.payload != "json" or channel.will):
                 spec += f" {channel.qos}"
-            if not channel.retain or channel.payload != "json":
+            if not channel.retain or channel.payload != "json" or channel.will:
                 spec += f" {1 if channel.retain else 0}"
-            if channel.payload != "json":
+            if channel.payload != "json" or channel.will:
                 spec += f" {channel.payload}"
+            if channel.will:
+                spec += " 1"
         return f"{channel.name}{SERIAL_MARK}{spec}"
     if is_socket(channel_transport(channel)):
         # TCP 也把监听地址写进 `@` 段，但**带一个 `tcp:` 前缀**：`name@tcp:host:port`。
@@ -319,9 +323,10 @@ def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel | MqttChannel]
         raise ValueError(f"line {index}: channel {brief(raw)} must be written as "
                          f"name{SERIAL_MARK}<tcp|udp|rtutcp>:host:port "
                          f"(one part after {SERIAL_MARK!r})")
-    if scheme == "mqtt:" and len(fields) > 5:
+    if scheme == "mqtt:" and len(fields) > 6:
         raise ValueError(f"line {index}: channel {brief(raw)} must be written as "
-                         f"name{SERIAL_MARK}mqtt:host:port[ PREFIX[ QOS[ RETAIN[ PAYLOAD]]]]")
+                         f"name{SERIAL_MARK}mqtt:host:port"
+                         f"[ PREFIX[ QOS[ RETAIN[ PAYLOAD[ WILL]]]]]")
     body = fields[0][len(scheme):]
     host, sep, port_text = body.rpartition(":")
     if not sep or not host:
@@ -345,10 +350,15 @@ def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel | MqttChannel]
             raise ValueError(f"line {index}: channel {brief(raw)}: retain "
                              f"{brief(fields[3])} must be 0/1 or true/false")
         payload = fields[4].lower() if len(fields) > 4 else "json"
+        will_text = fields[5].lower() if len(fields) > 5 else "0"
+        if will_text not in ("0", "1", "true", "false", "yes", "no", "on", "off"):
+            raise ValueError(f"line {index}: channel {brief(raw)}: will "
+                             f"{brief(fields[5])} must be 0/1 or true/false")
         return name, MqttChannel(name=name, host=host, port=port,
                                  topic_prefix=prefix, qos=qos,
                                  retain=retain_text in ("1", "true", "yes", "on"),
-                                 payload=payload)
+                                 payload=payload,
+                                 will=will_text in ("1", "true", "yes", "on"))
     return name, TcpChannel(name=name, type=scheme[:-1], host=host, port=port)
 
 
@@ -559,7 +569,7 @@ def _channel_params(channel) -> tuple:
     # 同一路通道写到第二行就崩。
     if transport == "mqtt":
         return (channel.host, channel.port, channel.topic_prefix, channel.qos,
-                channel.retain, channel.payload)
+                channel.retain, channel.payload, channel.will)
     if is_socket(transport):
         return (channel.host, channel.port)
     return _serial_params(channel)
