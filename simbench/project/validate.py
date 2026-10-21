@@ -216,6 +216,12 @@ def _mqtt(ch, issues: list[Issue], where: str) -> tuple[bool, bool]:
     if ch.qos not in (0, 1, 2):
         issues.append(Issue("error", "mqtt_qos", where,
                             f"QoS {brief(ch.qos)} must be 0, 1 or 2"))
+    if not isinstance(ch.retain, bool):
+        issues.append(Issue("error", "mqtt_retain", where,
+                            f"retain {brief(ch.retain)} must be true or false"))
+    if ch.payload not in ("json", "raw"):
+        issues.append(Issue("error", "mqtt_payload", where,
+                            f"payload {brief(ch.payload)} must be 'json' or 'raw'"))
     if (not isinstance(ch.topic_prefix, str) or not ch.topic_prefix.strip()
             or any(char in ch.topic_prefix for char in "+#")):
         issues.append(Issue("error", "mqtt_topic_prefix", where,

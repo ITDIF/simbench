@@ -187,8 +187,11 @@ mqtt-1@mqtt:127.0.0.1:1883,温湿度-1,1,hr00-温度-℃,hr,0,float32,ABCD,23.5,
 ```
 
 `host:port` 是 broker；可选在后面再写 topic 前缀和 QoS（默认 `simbench` / `1`），
-例如 `mqtt-1@mqtt:10.0.0.5:1883 plant 2`。界面里通道行的「前缀」和「帧」两格对应
-topic 前缀与 QoS，可以直接改。
+例如 `mqtt-1@mqtt:10.0.0.5:1883 plant 2`。界面里通道行的「前缀」「帧」「保留」
+「原始」四格对应 topic 前缀、QoS、retain、payload 形式，可以直接改：
+默认 JSON（`{"value": ...}`）且 retain=True；勾「原始」后发布裸标量，取消「保留」
+则发布时不带 retain。CSV 里对应可选的 `PREFIX QOS RETAIN PAYLOAD` 四段，
+例如 `mqtt-1@mqtt:10.0.0.5:1883 simbench 1 0 raw`。
 
 **通用 topic/payload 约定**：
 

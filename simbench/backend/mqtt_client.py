@@ -195,11 +195,12 @@ class MqttBackend(BackendBase):
         self._require_ready()
         topic = value_topic(self.channel.topic_prefix, self.channel_name,
                             self._device_name(key), pt.area, pt.address)
-        payload = encode_payload(value)
+        payload = _encode_value(value, self.channel.payload)
         self._values[(key, pt.area, pt.address)] = value
         if self._published.get(topic) == payload:
             return True                   # 值没变：不重复发，避免每 100ms 刷一条
-        self._session.publish(topic, payload, qos=int(self.channel.qos), retain=True)
+        self._session.publish(topic, payload, qos=int(self.channel.qos),
+                              retain=bool(self.channel.retain))
         self._published[topic] = payload
         self._trace("tx", payload.encode("utf-8"), key, f"PUB {topic}")
         return True
@@ -326,6 +327,11 @@ class MqttBackend(BackendBase):
         if self._packet_sink is not None:
             self._packet_sink(direction, payload, unit, None, summary,
                               time.monotonic() - self.started_at)
+
+
+def _encode_value(value, mode: str) -> str:
+    """按通道的 payload 形式编码：`json` = `{"value": ...}`，`raw` = 裸标量文本。"""
+    return _typed_text(value) if mode == "raw" else encode_payload(value)
 
 
 def _typed_text(value) -> str:

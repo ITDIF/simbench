@@ -184,7 +184,8 @@ def _channel_to_dict(channel) -> dict:
     if transport == "mqtt":
         return {"name": channel.name, "type": "mqtt", "host": channel.host,
                 "port": channel.port, "topic_prefix": channel.topic_prefix,
-                "qos": channel.qos, "devices": devices}
+                "qos": channel.qos, "retain": channel.retain,
+                "payload": channel.payload, "devices": devices}
     if is_serial(transport):
         # `type` 就是传输名（`rtu` / `ascii`），**不另写 `framing` 键**：一个事实一个位置。
         # 好处是老工程与 spec §5 的示例逐字节不变（它们没有这个键）。
@@ -212,6 +213,8 @@ def _channel_from_dict(raw: dict, index: int):
             port=_require_int(raw.get("port", 1883), "port", f"channel {brief(name)}"),
             topic_prefix=str(raw.get("topic_prefix", "simbench")),
             qos=_require_int(raw.get("qos", 1), "qos", f"channel {brief(name)}"),
+            retain=bool(raw.get("retain", True)),
+            payload=str(raw.get("payload", "json")),
             devices=_devices_from_dict(raw, name))
     _require_keys(raw, TcpChannel, f"channel #{index}")
     name = raw["name"]

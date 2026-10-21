@@ -414,6 +414,9 @@ class MqttChannel:
     port: int = 1883
     topic_prefix: str = "simbench"
     qos: int = 1
+    # 发布时是否保留最后一份值（retain）；`payload` 是 `json`（{"value": ...}）或 `raw`。
+    retain: bool = True
+    payload: str = "json"
     devices: list[Device] = field(default_factory=list)
 
 
@@ -478,7 +481,9 @@ def is_mqtt(transport: str) -> bool:
 def mqtt_summary(channel) -> str:
     """MQTT 通道的一句话摘要：`broker:1883（topic 前缀 simbench，QoS 1）`。"""
     return (f"{channel.host}:{channel.port}"
-            f"（topic 前缀 {channel.topic_prefix}，QoS {channel.qos}）")
+            f"（topic 前缀 {channel.topic_prefix}，QoS {channel.qos}，"
+            f"{'raw' if channel.payload == 'raw' else 'json'}，"
+            f"{'retain' if channel.retain else '不保留'}）")
 
 
 def channel_transport(channel: Channel) -> str:

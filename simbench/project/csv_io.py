@@ -246,10 +246,16 @@ def _csv_channel_name(channel) -> str:
         # `name@mqtt:broker:port`；非默认的 topic 前缀 / QoS 跟在后面（空格分段，与 S7 的
         # rack/slot 同一个写法）。默认值不写，保证常见的表看起来干净。
         spec = f"mqtt:{channel.host}:{channel.port}"
-        if channel.topic_prefix != "simbench" or channel.qos != 1:
+        nondefault = (channel.topic_prefix != "simbench" or channel.qos != 1
+                      or not channel.retain or channel.payload != "json")
+        if nondefault:
             spec += f" {channel.topic_prefix}"
-            if channel.qos != 1:
+            if channel.qos != 1 or not channel.retain or channel.payload != "json":
                 spec += f" {channel.qos}"
+            if not channel.retain or channel.payload != "json":
+                spec += f" {1 if channel.retain else 0}"
+            if channel.payload != "json":
+                spec += f" {channel.payload}"
         return f"{channel.name}{SERIAL_MARK}{spec}"
     if is_socket(channel_transport(channel)):
         # TCP 也把监听地址写进 `@` 段，但**带一个 `tcp:` 前缀**：`name@tcp:host:port`。
@@ -313,9 +319,9 @@ def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel | MqttChannel]
         raise ValueError(f"line {index}: channel {brief(raw)} must be written as "
                          f"name{SERIAL_MARK}<tcp|udp|rtutcp>:host:port "
                          f"(one part after {SERIAL_MARK!r})")
-    if scheme == "mqtt:" and len(fields) > 3:
+    if scheme == "mqtt:" and len(fields) > 5:
         raise ValueError(f"line {index}: channel {brief(raw)} must be written as "
-                         f"name{SERIAL_MARK}mqtt:host:port[ PREFIX[ QOS]]")
+                         f"name{SERIAL_MARK}mqtt:host:port[ PREFIX[ QOS[ RETAIN[ PAYLOAD]]]]")
     body = fields[0][len(scheme):]
     host, sep, port_text = body.rpartition(":")
     if not sep or not host:
@@ -334,8 +340,15 @@ def parse_tcp_name(raw: str, index: int) -> tuple[str, TcpChannel | MqttChannel]
         except ValueError:
             raise ValueError(f"line {index}: channel {brief(raw)}: QoS "
                              f"{brief(fields[2])} is not an integer") from None
+        retain_text = fields[3].lower() if len(fields) > 3 else "1"
+        if retain_text not in ("0", "1", "true", "false", "yes", "no", "on", "off"):
+            raise ValueError(f"line {index}: channel {brief(raw)}: retain "
+                             f"{brief(fields[3])} must be 0/1 or true/false")
+        payload = fields[4].lower() if len(fields) > 4 else "json"
         return name, MqttChannel(name=name, host=host, port=port,
-                                 topic_prefix=prefix, qos=qos)
+                                 topic_prefix=prefix, qos=qos,
+                                 retain=retain_text in ("1", "true", "yes", "on"),
+                                 payload=payload)
     return name, TcpChannel(name=name, type=scheme[:-1], host=host, port=port)
 
 
@@ -545,7 +558,8 @@ def _channel_params(channel) -> tuple:
     # udp/rtutcp 会落到 `_serial_params` 去读 baudrate（TcpChannel 没有这个字段），
     # 同一路通道写到第二行就崩。
     if transport == "mqtt":
-        return (channel.host, channel.port, channel.topic_prefix, channel.qos)
+        return (channel.host, channel.port, channel.topic_prefix, channel.qos,
+                channel.retain, channel.payload)
     if is_socket(transport):
         return (channel.host, channel.port)
     return _serial_params(channel)

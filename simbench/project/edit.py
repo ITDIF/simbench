@@ -278,7 +278,9 @@ def default_channel(project, transport: str, name: str | None = None, probe=None
                            host=overrides.get("host", "127.0.0.1"),
                            port=overrides.get("port", 1883),
                            topic_prefix=overrides.get("topic_prefix", "simbench"),
-                           qos=overrides.get("qos", 1))
+                           qos=overrides.get("qos", 1),
+                           retain=overrides.get("retain", True),
+                           payload=overrides.get("payload", "json"))
     if transport == "s7":
         return S7Channel(name=name,
                          host=overrides.get("host", S7_DEFAULTS["host"]),

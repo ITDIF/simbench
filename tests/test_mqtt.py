@@ -83,6 +83,14 @@ def test_csv_round_trip_and_json_round_trip():
     custom = channel(prefix="plant", qos=2)
     assert "mqtt-1@mqtt:broker:1883 plant 2" in write_csv(
         Project(channels=[custom]))
+    # retain=False / raw payload 也能往返
+    custom = channel()
+    custom.retain = False
+    custom.payload = "raw"
+    text = write_csv(Project(channels=[custom]))
+    assert "mqtt-1@mqtt:broker:1883 simbench 1 0 raw" in text
+    back = read_csv(text).channels[0]
+    assert (back.retain, back.payload) == (False, "raw")
 
 
 def test_validation_checks_qos_prefix_and_duplicate_topics():
@@ -90,6 +98,10 @@ def test_validation_checks_qos_prefix_and_duplicate_topics():
     bad = channel(qos=5)
     codes = [issue.code for issue in validate_project(Project(channels=[bad]))]
     assert "mqtt_qos" in codes
+    bad = channel()
+    bad.payload = "xml"
+    codes = [issue.code for issue in validate_project(Project(channels=[bad]))]
+    assert "mqtt_payload" in codes
 
     duplicate = channel()
     duplicate.devices[0].points.append(
@@ -150,6 +162,23 @@ def test_connection_state_reaches_the_status_sink():
         backend._publish_state(True, "connected")
         assert [state for state, _ in states] == ["error", "running"]
         assert "重连" in states[0][1]
+    finally:
+        asyncio.run(backend.stop())
+
+
+def test_raw_payload_and_retain_false_are_published():
+    ch = channel()
+    ch.retain = False
+    ch.payload = "raw"
+    backend = MqttBackend(ch, session_factory=FakeSession)
+    asyncio.run(backend.start())
+    try:
+        assert backend._server.published[0] == ("simbench/mqtt-1/D1/hr/0",
+                                                "25", 1, False)
+        backend._apply_set("simbench/mqtt-1/D1/hr/0/set", b"31")
+        assert backend._values[(1, "hr", 0)] == 31
+        assert backend._server.published[-1] == ("simbench/mqtt-1/D1/hr/0",
+                                                 "31", 1, False)
     finally:
         asyncio.run(backend.stop())
 
