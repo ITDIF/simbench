@@ -1,0 +1,13 @@
+# 行尾口径：一律以 LF 存库，检出时按平台转换（Windows 上 core.autocrlf=true 仍会给 CRLF 工作副本）。
+# 目的：两台机器 + 不同 autocrlf 设置下，不出现"整个文件都变了"的假 diff。
+* text=auto
+
+# 二进制：不参与行尾转换与文本 diff。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.pyc binary
+*.xlsx binary

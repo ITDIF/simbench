@@ -1,6 +1,6 @@
 // simbench 现状架构模型（C4 / Structurizr DSL）
 //
-// 生成日期：2026-10-16　｜　取证基线：git HEAD cbd2322（== origin/main，已 fetch 核对）
+// 生成日期：2026-10-21　｜　取证基线：git HEAD 6bf4ff3（== origin/main，已 fetch 核对）
 // 产出流程：architecture-visualization 的 system-modeler + c4model
 //
 // 口径：本文件只描述**现状**（current state），不含目标态、不含整改建议。
@@ -10,7 +10,7 @@
 // 用 Qoder 的 Structurizr DSL 查看器打开本文件即可看图；四张视图分别是
 // L0-Landscape / L1-Context / L2-Container / L3-Component。
 
-workspace "simbench" "设备通讯模拟仿真工具的现状架构模型（HEAD cbd2322，2026-10-16）" {
+workspace "simbench" "设备通讯模拟仿真工具的现状架构模型（HEAD 6bf4ff3，2026-10-21）" {
 
     model {
 
@@ -41,26 +41,26 @@ workspace "simbench" "设备通讯模拟仿真工具的现状架构模型（HEAD
             tags "External"
         }
 
-        nativeLibraries = softwareSystem "协议与界面原生库" "pymodbus、pyserial、PySide6 是硬依赖；snap7.dll（随 python-snap7 1.3 来）与 openpyxl 是**用到才加载**的可选依赖。[证据: 硬 simbench/backend/simdev.py:5, raw_writer.py:9-10；可选 simbench/backend/s7_server.py:47-59, simbench/project/xlsx_io.py:43-52]" {
+        nativeLibraries = softwareSystem "协议与界面原生库" "pymodbus、pyserial、PySide6 是硬依赖；snap7.dll（随 python-snap7 1.3 来）、openpyxl 与 paho-mqtt（`mqtt_client.py` 里延迟 import）是**用到才加载**的可选依赖。[证据: 硬 simbench/backend/simdev.py:5, raw_writer.py:9-10；可选 simbench/backend/s7_server.py:47-59, simbench/project/xlsx_io.py:43-52, simbench/backend/mqtt_client.py:63]" {
             tags "External"
         }
 
         // ================= simbench 本体 =================
-        simbench = softwareSystem "simbench" "点表驱动的多协议设备模拟器：平时**当**从站被上游主站读，必要时反过来**当**主站去核对真设备。六种传输（Modbus TCP / UDP / RTU-over-TCP / 串口 RTU / 串口 ASCII / S7）可在一张点表里混装。[证据: README:1-4, 86-99]" {
+        simbench = softwareSystem "simbench" "点表驱动的多协议设备模拟器：平时**当**从站被上游主站读，必要时反过来**当**主站去核对真设备。六种传输（Modbus TCP / UDP / RTU-over-TCP / 串口 RTU / 串口 ASCII / S7）可在一张点表里混装；另有 **MQTT 通道**（模拟侧连 broker 发布、订阅 /set）。[证据: README:1-4, 86-99, simbench/backend/mqtt_client.py:1-14]" {
 
             // ---------- L2 容器 ----------
             app = container "simbench 主程序" "同一份 Python 包树，三种打包形态：simbench.exe（控制台）、simbench-gui.exe（无控制台）、simbench-onefile.exe（单文件，README 明说**不是**发布形态）。哪个 exe 走界面还是命令行由 packaging/entry.py 判：stdout 为 None 或文件名以 -gui 结尾就走界面。[证据: packaging/simbench.spec:51-107, packaging/entry.py:17-39]" "PyInstaller 冻结的 Python 3.13 进程" {
 
                 // ---------- L3 组件（八个包 + 根下横切） ----------
-                gui = component "gui/" "PySide6 桌面界面：通道面板 + 设备树 + 点位表 + 报文窗 + 日志页 + 核对页 + 网络页。25 个文件 4971 行。主窗体用三个 mixin 拆开（window_menus / window_edit / window_io），拆分动机是打断 mixin→main_window 的循环依赖。[证据: simbench/gui/main_window.py:65, simbench/gui/window_consts.py:1-4]" "PySide6 · 4971 行" {
+                gui = component "gui/" "PySide6 桌面界面：通道面板 + 设备树 + 点位表 + 报文窗 + 日志页 + 核对页（Modbus / MQTT）+ 网络页。27 个文件 5926 行。主窗体用三个 mixin 拆开（window_menus / window_edit / window_io），拆分动机是打断 mixin→main_window 的循环依赖。[证据: simbench/gui/main_window.py:65, simbench/gui/window_consts.py:1-4]" "PySide6 · 5926 行" {
                     tags "LayerUI"
                 }
 
-                engine = component "engine/" "Session 是**唯一**对 GUI 暴露的门面（启停 / 改值 / 拉行 / 订阅事件）；EngineRunner 持有那条 asyncio 线程。12 个文件 1775 行。[证据: simbench/engine/session.py:27-43, simbench/engine/runner.py:39-87]" "asyncio · 1775 行" {
+                engine = component "engine/" "Session 是**唯一**对 GUI 暴露的门面（启停 / 改值 / 拉行 / 订阅事件）；EngineRunner 持有那条 asyncio 线程。12 个文件 1784 行。[证据: simbench/engine/session.py:27-43, simbench/engine/runner.py:39-87]" "asyncio · 1784 行" {
                     tags "LayerEngine"
                 }
 
-                backend = component "backend/" "六种传输的后端 + 与传输无关的那一半（波形 tick、值归属、报文钩子、启停顺序）都在 BackendBase 里；__init__.py 是门面，按 channel_transport() 选后端。11 个文件 2362 行。[证据: simbench/backend/__init__.py:36-62, simbench/backend/base.py:100-617]" "pymodbus · pyserial · snap7 · 2362 行" {
+                backend = component "backend/" "Modbus 五种帧 + S7 + **MQTT 客户端**的后端；与传输无关的那一半（波形 tick、值归属、报文钩子、启停顺序）都在 BackendBase 里；__init__.py 是门面，按 channel_transport() 选后端。12 个文件 2829 行。[证据: simbench/backend/__init__.py:36-62, simbench/backend/base.py:100-617, simbench/backend/mqtt_client.py:1-14]" "pymodbus · pyserial · snap7 · paho · 2829 行" {
                     tags "LayerBackend"
                 }
 
@@ -68,19 +68,19 @@ workspace "simbench" "设备通讯模拟仿真工具的现状架构模型（HEAD
                     tags "LayerCore"
                 }
 
-                project = component "project/" "领域模型 Project→Channel→Device→Point，加上三种文件格式（csv / xlsx / json）的读写、校验、与带碰撞回避的编辑。**实测不 import 任何其它 simbench 包**，是最底层的纯核。9 个文件 2760 行。[证据: simbench/project/model.py:247-490, 依赖图见 module-deps.dot]" "纯数据 · 2760 行" {
+                project = component "project/" "领域模型 Project→Channel→Device→Point，加上三种文件格式（csv / xlsx / json）的读写、校验、与带碰撞回避的编辑，以及 **MQTT topic 模板**（转义与 payload 规则只此一处）。**实测不 import 任何其它 simbench 包**，是最底层的纯核。10 个文件 3033 行。[证据: simbench/project/model.py:247-490, 依赖图见 module-deps.dot]" "纯数据 · 3033 行" {
                     tags "LayerCore"
                 }
 
-                master = component "master/" "主站（核对）模式：拿点表当「要读什么」的清单去读别人的设备，只读不写；产出四类结论（对得上 / 对不上 / 没应答 / 读出错）与一份报告。4 个文件 382 行。[证据: simbench/master/scan.py:1-48, simbench/master/modbus.py:108-113]" "pymodbus 客户端 · 382 行" {
+                master = component "master/" "主站（核对）模式：拿点表当「要读什么」的清单去读别人的设备，只读不写；Modbus 扫描 + **MQTT 核对**（订阅 status topic 判在线/离线），产出四类结论与一份报告。5 个文件 514 行。[证据: simbench/master/scan.py:1-48, simbench/master/modbus.py:108-113, simbench/master/mqtt.py]" "pymodbus / paho 客户端 · 514 行" {
                     tags "LayerBackend"
                 }
 
-                net = component "net/" "系统网络层，也是全仓**唯一**会改变现场机器状态的地方：读网卡现状（PowerShell 只读，不提权）、算差异（纯函数）、按需增删 IP 与新建/移除虚拟环回网卡（提权）。记账本只回收自己加过的东西。12 个文件 2180 行。[证据: simbench/net/__init__.py:1-25, simbench/net/ledger.py:30-38, simbench/net/plan.py:1-26]" "PowerShell · SetupAPI ctypes · pnputil · 2180 行" {
+                net = component "net/" "系统网络层，也是全仓**唯一**会改变现场机器状态的地方：读网卡现状（PowerShell 只读，不提权）、算差异（纯函数）、按需增删 IP 与新建/移除虚拟环回网卡（提权）。记账本只回收自己加过的东西。12 个文件 2680 行。[证据: simbench/net/__init__.py:1-25, simbench/net/ledger.py:30-38, simbench/net/plan.py:1-26]" "PowerShell · SetupAPI ctypes · pnputil · 2680 行" {
                     tags "LayerSystem"
                 }
 
-                crosscut = component "根下横切模块" "events.py（engine 与 GUI 之间的事件契约，2026-10-16 从 backend/ 挪到根上以封掉 gui→backend 的口子）、swallow.py（吞异常的唯一出口）、settings.py、diagnostics.py（崩溃也落盘）、csv_io_entry.py、__main__.py、__about__.py（版本号唯一来源）。8 个文件 963 行。[证据: simbench/events.py:1-11, simbench/diagnostics.py:1-45]" "8 文件 · 963 行" {
+                crosscut = component "根下横切模块" "events.py（engine 与 GUI 之间的事件契约，2026-10-16 从 backend/ 挪到根上以封掉 gui→backend 的口子）、swallow.py（吞异常的唯一出口）、settings.py、diagnostics.py（崩溃也落盘）、csv_io_entry.py、__main__.py、__about__.py（版本号唯一来源）。8 个文件 1005 行。[证据: simbench/events.py:1-11, simbench/diagnostics.py:1-45]" "8 文件 · 1005 行" {
                     tags "LayerCore"
                 }
 
@@ -100,6 +100,7 @@ workspace "simbench" "设备通讯模拟仿真工具的现状架构模型（HEAD
                 backend -> crosscut "产出 PacketEvent / ChannelState / LogLine" "in-process"
                 master -> project "拿点表当读取清单" "in-process"
                 master -> codec "把读回来的寄存器解码成值再与初值比对（延迟 import）" "in-process (lazy)"
+                master -> backend "MQTT 核对复用后端的 MqttSession 连 broker（模块级静态 import；目前第一条 master→backend 实现级依赖，没有守卫）" "in-process"
                 net -> project "从点表推出需要哪些设备 IP" "in-process"
                 codec -> project "只依赖 Point 的形状" "in-process"
                 crosscut -> project "csv_io_entry 复用 formats / model / validate" "in-process"

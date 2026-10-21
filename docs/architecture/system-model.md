@@ -1,7 +1,11 @@
 # simbench 现状架构模型
 
-生成日期：**2026-10-16**　｜　取证基线：git HEAD `cbd2322`（已 `git fetch`，与 `origin/main` 一致）
+生成日期：**2026-10-21**　｜　取证基线：git HEAD `6bf4ff3`（已 `git fetch`，与 `origin/main` 一致）
 产出流程：`architecture-visualization` 的 `system-modeler`（场景）+ `c4model` / `graphviz`（图源码格式）
+
+更新口径：基线从 `cbd2322`（10-16）换到 `6bf4ff3`（10-21，MQTT 通道落地）。
+**§十–§十二 是绑定历史提交的取证记录（含 S7 竞态实测与修复），保持原文不改**；本轮增量写进 §十三，
+同时刷新 §三 的依赖边与体量、§六 的门禁结果。
 
 配套文件（都在本目录）：
 
@@ -27,9 +31,11 @@ simbench 平时**当**从站被上游主站读，必要时反过来**当**主站
 
 | 方向 | 对端 | 同步性 | 会不会改对方状态 | 证据 | 置信度 |
 |---|---|---|---|---|---|
-| **连进来** | 上游主站（Modbus Poll / QModMaster / 组态软件 / 隧道机电平台）经六种传输读我们模拟的设备 | 异步，主站发起 | 会——主站的写帧会触发"人工接管"判定 | `README.md:72-84`、`simbench/__main__.py:161-164`、`packaging/smoke.py` | 高 |
-| **连出去** | 真实现场设备（PLC / Modbus 从设备），主站核对模式 | 同步，我们发起 | **不会**，只读 | `simbench/master/modbus.py:108-113`；`master/` 全树无任何 `write_*` 调用（已 grep 核对） | 高 |
+| **连进来** | 上游主站或 broker（Modbus Poll / QModMaster / 组态软件 / 隧道机电平台 / 任意 MQTT broker）经 Modbus 五种帧、S7 或 MQTT 读我们模拟的设备 | 异步，主站发起 | 会——主站的写帧（或 MQTT `/set`）会触发"人工接管"判定 | `README.md:72-84`、`simbench/__main__.py:161-164`、`packaging/smoke.py` | 高 |
+| **连出去** | 真实现场设备（PLC / Modbus 从设备 / MQTT 设备），主站核对模式 | 同步，我们发起 | **不会**，只读 | `simbench/master/modbus.py:108-113`、`simbench/master/mqtt.py`；`master/` 全树无任何 `write_*` 调用（已 grep 核对） | 高 |
 | **改本机** | Windows 网络栈：网卡、IP、虚拟环回网卡 | 同步 | **会**，且要提权 | 读 `simbench/net/state.py:142-163`；写 `simbench/net/cli.py:277-300`、`simbench/net/win32.py:154-233` | 高 |
+
+**MQTT 是例外形状**：模拟侧是**连出去**到 broker（发布点值、订阅 `/set`），核对侧再订阅 status topic；同一个协议在两个方向都出现。上表按"谁发起"归类，不按协议归类。
 
 第三个方向是全仓唯一会改变现场机器状态的地方，被结构性地圈在 `net/` 一个包里（守卫 G3：`subprocess` 只许出现在 `net/`）。`net/` 自己的安全口径是"现场不许留痕"：只读不提权、增删一律走显式提权路径、删除只针对账本里记过的地址（`simbench/net/__init__.py:16-25`）。
 
@@ -64,30 +70,32 @@ simbench 平时**当**从站被上游主站读，必要时反过来**当**主站
 包级依赖边由 AST 实测得出（重跑方法见文末）。实测结果：
 
 ```
-project  →  （不 import 任何内部包）        ← 最底层的纯核，2760 行
+project  →  （不 import 任何内部包）        ← 最底层的纯核，3033 行
 codec    →  project
 backend  →  codec, project, events
-master   →  project, codec(延迟)
+master   →  project, codec(延迟), backend(MqttSession，静态)
 net      →  project, csv_io_entry(延迟)
 engine   →  backend(仅门面), codec, project, events, swallow, net.endpoints(延迟)
 gui      →  engine, project, master, net, events, settings, csv_io_entry, __about__
-__main__ →  gui / master / net / project / crosscut（全部延迟 import）
+__main__ →  backend(门面), project, csv_io_entry, __about__（均为模块级静态）；gui / master / net（延迟）
 ```
 
-无环。`project/` 实测不 import 任何内部包，也不碰 Qt 与 pymodbus —— 这是"点表层可脱离界面与协议库单测"这句话在结构上成立的原因，而不是一句口号。
+无环。`project/` 实测不 import 任何内部包，也不碰 Qt 与协议库 —— 这是"点表层可脱离界面与协议库单测"这句话在结构上成立的原因，而不是一句口号。
+
+**本轮更正一处旧判定**：上一版写"`__main__` 对项目内模块全部延迟 import"。实测 `__main__.py:16-20` 是模块级静态 import `__about__` / `backend` 门面 / `csv_io_entry` / `project.model` / `project.validate`；只有 `gui` / `master` / `net` 是函数体内延迟。CLI 冷启动不被 Qt 拖慢这条结论仍然成立，但"全部延迟"说过了头。
 
 各包职责与体量：
 
 | 包 | 文件 / 行数 | 职责 | 关键证据 |
 |---|---|---|---|
-| `gui/` | 25 / 4971 | PySide6 界面：通道面板 + 设备树 + 点位表 + 报文窗 + 日志页 + 核对页 + 网络页。主窗体拆成三个 mixin（`window_menus` / `window_edit` / `window_io`），拆分动机是打断 mixin→main_window 的循环依赖 | `gui/main_window.py:65`、`gui/window_consts.py:1-4` |
-| `engine/` | 12 / 1775 | `Session` 是**唯一**对 GUI 暴露的门面（启停 / 改值 / 拉行 / 订阅事件）；`EngineRunner` 持有那条 asyncio 线程 | `engine/session.py:27-43`、`engine/runner.py:39-87` |
-| `backend/` | 11 / 2362 | 六种传输的后端；与传输无关的那一半（波形 tick、值归属、报文钩子、启停顺序）在 `BackendBase`。`__init__.py` 是门面，按 `channel_transport()` 分派 | `backend/__init__.py:36-62`、`backend/base.py:100-617` |
-| `project/` | 9 / 2760 | 领域模型 + 三种文件格式读写 + 校验 + 带碰撞回避的编辑 | `project/model.py:247-490` |
-| `net/` | 12 / 2180 | 读网卡现状、算差异、按需增删 IP 与虚拟网卡 | `net/__init__.py:1-25` |
+| `gui/` | 27 / 5926 | PySide6 界面：通道面板 + 设备树 + 点位表 + 报文窗 + 日志页 + 核对页（Modbus / MQTT）+ 网络页。主窗体拆成三个 mixin（`window_menus` / `window_edit` / `window_io`），拆分动机是打断 mixin→main_window 的循环依赖 | `gui/main_window.py:65`、`gui/window_consts.py:1-4` |
+| `engine/` | 12 / 1784 | `Session` 是**唯一**对 GUI 暴露的门面（启停 / 改值 / 拉行 / 订阅事件）；`EngineRunner` 持有那条 asyncio 线程 | `engine/session.py:27-43`、`engine/runner.py:39-87` |
+| `backend/` | 12 / 2829 | 与传输无关的那一半（波形 tick、值归属、报文钩子、启停顺序）在 `BackendBase`；下面挂 Modbus TCP/UDP/RTU-over-TCP/RTU/ASCII、S7，以及 **MQTT 客户端**（`mqtt_client.py`，连 broker 发布点值 + 订阅 `/set`）。`__init__.py` 是门面，按 `channel_transport()` 分派 | `backend/__init__.py:36-62`、`backend/base.py:100-617`、`backend/mqtt_client.py` |
+| `project/` | 10 / 3033 | 领域模型 + 三种文件格式读写 + 校验 + 带碰撞回避的编辑 + **MQTT topic 模板**（`mqtt_topic.py`；转义与 payload 规则只此一处） | `project/model.py:247-490`、`project/mqtt_topic.py` |
+| `net/` | 12 / 2680 | 读网卡现状、算差异、按需增删 IP 与虚拟网卡 | `net/__init__.py:1-25` |
 | `codec/` | 4 / 623 | 纯换算：值↔寄存器（数据类型 × 字序）、S7 值↔字节、波形发生器 | `codec/point_codec.py:34-60`、`codec/waveform.py:1-6` |
-| `master/` | 4 / 382 | 主站核对模式，只读；产出四类结论（对得上 / 对不上 / 没应答 / 读出错）与一份报告 | `master/scan.py:1-48` |
-| 根下横切 | 8 / 963 | `events`（事件契约）、`swallow`（吞异常唯一出口）、`settings`、`diagnostics`、`csv_io_entry`、`__main__`、`__about__` | `events.py:1-11` |
+| `master/` | 5 / 514 | 主站核对模式，只读；Modbus 扫描 + **MQTT 核对**（订阅 status topic 判在线/离线），产出四类结论与一份报告 | `master/scan.py:1-48`、`master/mqtt.py` |
+| 根下横切 | 8 / 1005 | `events`（事件契约）、`swallow`（吞异常唯一出口）、`settings`、`diagnostics`、`csv_io_entry`、`__main__`、`__about__` | `events.py:1-11` |
 
 ### 领域模型与身份键
 
@@ -150,7 +158,7 @@ __main__ →  gui / master / net / project / crosscut（全部延迟 import）
 | 1 | §4:129 依赖链是 `gui → engine → backend → project/codec`，`net` 是旁路 | 实测吻合，另有三条 spec 未画进这条链的边：`gui → master`（核对页自己的后台线程直调）、`gui → net`（网络页同步跑在 GUI 线程上）、`engine → net.endpoints`（延迟 import） | 前两条是**结构事实**，spec §4 的链没覆盖；第三条 spec §4:184-185 其实描述过，属意图之内 |
 | 2 | §4:107-127 的架构块列了 gui/engine/backend/codec/project/net/根下 | **`master/` 完全不在 §4 的分层清单里**，尽管守卫 G1 为它单开了一条豁免（`tests/test_architecture.py:24-26`，注明"主站模式 2026-10-14 E1"） | spec §4 相对代码**已滞后**：master/ 是 2026-10-14 加的，架构块没跟着补 |
 | 3 | §4:124 与 `net/__init__.py:3` 都说 net 是"唯一允许跑 PowerShell 与 **netsh** 的地方" | 全仓 grep `netsh`：**只出现在注释与文档串里，从未被调用**。真实的系统调用面是 PowerShell cmdlet（`Get-NetAdapter` / `Get-NetIPAddress` / `Get-PnpDevice` / `New-NetIPAddress` / `Remove-NetIPAddress` / `Rename-NetAdapter`）、`pnputil /remove-device`、以及 SetupAPI/newdev 的 ctypes 调用 | 文档**说过头了**：netsh 是历史口径，实现没走它 |
-| 4 | `simbench/__init__.py:1` 包文档串："（M1：点表内核与 TCP 从站）" | 实际已有六种传输（Modbus TCP/UDP/RTU-over-TCP/串口 RTU/串口 ASCII/S7） | 包文档串**停在 M1**，未随里程碑更新 |
+| 4 | `simbench/__init__.py:1` 包文档串："（M1：点表内核与 TCP 从站）" | 实际已有 Modbus 五种帧 + S7 + MQTT 通道 | 包文档串**停在 M1**，未随里程碑更新（2026-10-21 复核仍未改） |
 | 5 | `gui/bridge.py:6`："这个文件是 Qt 与非 Qt 的唯一接缝" | 该句原文限定在**引擎回调→Qt** 这一个方向（"Session/Runner 的回调只准调 `forward()`"），这个方向实测确实只有 bridge 一条路。GUI→引擎是 `EngineRunner.call` 直接同步调用，spec §4:144-147 另有明文描述 | **不矛盾**。此前一版取证把它当成"文档越界声明"，直接读原文后推翻：两处说的是两个方向 |
 | 6 | spec 里三处标注日期为 `2026-10-17`（第 409、416、539 行） | 含这些行的提交 `cbd2322` 的时间是 `2026-10-16 17:59:42 +0800` | 文档日期**比承载它的提交晚一天**，所以文档里的日期不能当严格时序证据用 |
 
@@ -185,7 +193,7 @@ __main__ →  gui / master / net / project / crosscut（全部延迟 import）
 
 | 守卫 | 规则 | 判据 |
 |---|---|---|
-| G1 | `pymodbus` / `serial` / `snap7` 只许出现在 `backend/` 与 `master/` | AST 扫 import 顶层包名 |
+| G1 | `pymodbus` / `serial` / `snap7` / `paho` 只许出现在 `backend/` 与 `master/` | AST 扫 import 顶层包名 |
 | G2 | `PySide6` / `PyQt5` 只许出现在 `gui/` | 同上 |
 | G3 | `subprocess` 只许出现在 `net/` | 同上 |
 | G4 | `engine/` 只许经 `backend/__init__.py` 门面取后端，不许 import `base`/`modbus_tcp` 等实现文件 | 解析 `backend.` 之后那一段，只有空串（门面）放行 |
@@ -197,15 +205,26 @@ __main__ →  gui / master / net / project / crosscut（全部延迟 import）
 1. **每条守卫都配一条"防空跑"用例**。只断言"违规者为 0"的话，把豁免口径写错（比如按目录深度判而不是按顶层包名判）会让扫描清单变成空表、断言变成 `[] == []` 恒真。所以每条都另配一个"在仓库外造一棵同形假树、植入违规、必须被抓出来"的用例（`:193-268`、`:323-335`、`:414-429`、`:517-541`）。`test_architecture.py:8-10` 记录了原先按 `len(file.parts)` 判层级时**确实**恒过的那次事故。
 2. **G5 那条"0"是最近才成立的**。事件的纯数据类原先住在 `backend/events.py`，产出方是 backend、消费方是 engine 与 gui，于是"界面不许碰后端"必须为它开一个口子；2026-10-16 把它挪到根上的 `simbench/events.py` 之后口子才封掉（`events.py:1-11` 写了完整的搬迁理由，包括"为什么不能挪进 `engine/`"——那会变成 backend→engine，把依赖方向弄反）。
 
-类型检查的覆盖范围（`pyproject.toml:50-79`）：mypy 覆盖 `project` / `codec` / `engine` / `backend` / `master` 五棵子树 + 根下七个模块。**仍在闸门外的是 `gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）** —— 也就是说，恰好是体量最大的一层（gui 4971 行）与碰系统状态最重的一层（net 2180 行）没有类型闸门。
+类型检查的覆盖范围（`pyproject.toml:50-79`）：mypy 覆盖 `project` / `codec` / `engine` / `backend` / `master` 五棵子树 + 根下七个模块。**仍在闸门外的是 `gui/`（Qt 的动态用法）与 `net/`（ctypes + Windows 结构体）** —— 也就是说，恰好是体量最大的一层（gui 5926 行）与碰系统状态最重的一层（net 2680 行）没有类型闸门。
 
-**三条门禁在 HEAD `cbd2322` 上的实测结果**（本机 `.venv`，版本与 `requirements.lock.txt` 逐个一致；过程见第九节）：
+**三条门禁在 HEAD `cbd2322` 上的实测结果（历史记录）**（本机 `.venv`，版本与 `requirements.lock.txt` 逐个一致；过程见第九节）：
 
 | 门禁 | 命令 | 结果 |
 |---|---|---|
 | lint | `ruff 0.17.0` → `ruff check` | `All checks passed!`，rc=0 |
 | type | `mypy 2.4.0` → `python -m mypy` | `Success: no issues found in 47 source files`，rc=0 |
 | test | `pytest 9.1.1` → `python -m pytest`（串行） | `1573 passed in 260.83s`，0 failed / 0 skipped，rc=0 |
+
+**2026-10-21 在 HEAD `6bf4ff3` 上的复测**（同一台机、同一 `.venv`，ruff/mypy 版本与 `requirements-dev.txt` 的钉子一致）：
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| lint | `ruff 0.17.0` → `ruff check` | `All checks passed!`，rc=0 |
+| type | `mypy 2.4.0` → `python -m mypy` | **`Found 28 errors in 4 files`（checked 50 source files）**，rc≠0 |
+| test | `pytest 9.1.1` → `python -m pytest`（串行） | `1654 passed in 209.34s`，0 failed / 0 skipped，rc=0 |
+| 架构守卫 | `pytest tests/test_architecture.py` | `24 passed in 3.11s`，rc=0 |
+
+**mypy 的 28 条全部落在 MQTT 那一批新代码里**：`backend/mqtt_client.py` 20 条、`master/mqtt.py` 6 条、`project/json_io.py` 2 条、`project/csv_io.py` 1 条。形状只有三类——Optional 没收窄（`"None" has no attribute "publish"` / `"connect"`）、点对象被标成 `object` 后按属性用、联合类型漏了 `MqttChannel`。这**不是环境问题**（版本与钉子一致），所以 CI 的 lint 作业在 6bf4ff3 上是红的；tag 的打包作业没有 `needs:` 关联 lint，仍会产出 exe，但"三道门禁全绿"这句话在当前 HEAD 上不成立。
 
 ## 七、证据强度与未决项
 
@@ -710,4 +729,42 @@ net/cli.py:335  Argument 1 to "companion_path" has incompatible type "Any | None
 结构体）——注解要补到能过检查是另一档工作量"，**把代价差着两个数量级的两件事混成了一件事**。实测是：
 `net/` 是 4 处、当天就能纳入；`gui/` 是 243 处、但大头有现成解法。这是**结论**，不是建议——要不要纳入、
 分几步纳入，由作者定，本轮没有动 `pyproject.toml`。
+
+---
+
+## 十三、2026-10-21 增量：MQTT 通道与当前门禁（基线 6bf4ff3）
+
+§一–§六 已按本日实测刷新；本节只记相对 10-16 模型**新增或改变**的东西，以及本轮发现的问题。
+
+### 13.1 新增组件与依赖边
+
+| 变化 | 证据 | 影响 |
+|---|---|---|
+| `backend/mqtt_client.py`（380 行） | `backend/mqtt_client.py:1-14,63` | MQTT 从站侧：连 broker、发布点值、订阅 `/set`、retain/will、1–30 秒退避重连 |
+| `project/mqtt_topic.py` | `project/model.py:406-422` 的 `MqttChannel` | topic 模板、段转义与 payload 规则只此一处 |
+| `master/mqtt.py`（132 行） | `master/mqtt.py` | 核对页订阅 status topic，识别设备离线 |
+| 新依赖 `paho-mqtt==2.1.0` | `requirements.txt` | **延迟 import**（`mqtt_client.py:63`），不装也能跑其它协议 |
+| 新边 `master → backend`（静态） | `master/mqtt.py:17` | 主站核对复用后端的 `MqttSession`；这是**第一条 master→backend 的实现级依赖** |
+| 新边 `__main__ → backend/project/csv_io_entry/__about__`（静态） | `__main__.py:16-20` | 更正旧模型"全部延迟 import"的说法（见 §三） |
+
+包体量变化（AST 实测）：gui 25→27 文件 / 4971→5926 行；project 9→10 / 2760→3033；
+backend 11→12 / 2362→2829；master 4→5 / 382→514；net 12 / 2180→2680；engine 12 / 1775→1784；
+全包 18,394 行。
+
+### 13.2 测试与守卫
+
+- 全量 **1654 passed**（相对 1573 增 81）；MQTT 两个用例文件合计 456 行，其中
+  `tests/test_mqtt_broker.py` 在进程内起真 broker（依赖 `amqtt`，未装时 `importorskip` 跳过）。
+- 架构守卫仍 **24 条全绿**；`LIBRARY_ONLY` 已扩到 `paho`（`tests/test_architecture.py:21`），
+  豁免口径没变。
+
+### 13.3 本轮发现的问题（未改动代码）
+
+1. **mypy 红 28 条**（详见 §六）：全部在 MQTT 新代码，三类形状（Optional 未收窄、`object` 取属性、
+   联合类型漏 `MqttChannel`），不是环境漂移。CI 的 lint 作业在当前 HEAD 上是红的。
+2. **包文档串仍停在 M1**：`simbench/__init__.py:1` 写"（M1：点表内核与 TCP 从站）"，
+   而实际已是 Modbus 五种帧 + S7 + MQTT。
+3. **`master → backend` 这条新边没有守卫**：G1 只管协议库住哪，G4/G5 只管 engine/gui 不许碰
+   backend 实现；master 直接 import `backend.mqtt_client.MqttSession` 目前合法且无人守。
+   保留（复用会话逻辑、避免复制）还是改成经门面暴露，需要一次明确裁决；模型先按现状记。
 

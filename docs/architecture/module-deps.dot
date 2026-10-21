@@ -1,6 +1,6 @@
 // simbench 包级依赖图 —— 由 AST 实测生成，不是按目录结构猜的
 //
-// 生成日期：2026-10-16　｜　取证基线：git HEAD cbd2322
+// 生成日期：2026-10-21　｜　取证基线：git HEAD 6bf4ff3（== origin/main）
 // 产出流程：architecture-visualization 的 system-modeler + graphviz
 //
 // 怎么重画（重跑同一段 AST 提取即可，脚本要点见同目录 system-model.md 的「怎么重新生成」）：
@@ -8,18 +8,19 @@
 //   2. 相对 import（本项目几乎全用 from ..x）必须按 level 解析回绝对模块名，
 //      只扫 level==0 会得到一张空图 —— 这是本图第一次生成时踩到的坑；
 //   3. 按「第一层目录名」聚合成包级边；落在函数体内的 import 单独标成 lazy。
+//   4. 根下的 __main__.py 与横切模块分开算：__main__ 现在有模块级静态 import。
 //
 // 读图口径：
 //   实线 = 模块级 import（加载即成立）；虚线 = 函数体内延迟 import（调用时才成立）。
-//   颜色 = 分层：橙=界面，蓝=引擎，浅蓝=协议，绿=纯核，红=碰系统状态。
-//   G1..G6 = tests/test_architecture.py 里那条守卫（2026-10-16 实测 24 条全绿）。
+//   颜色 = 分层：橙=界面，蓝=引擎，浅蓝=协议/主站，绿=纯核，红=碰系统状态。
+//   G1..G6 = tests/test_architecture.py 里那条守卫（2026-10-21 实测 24 条全绿）。
 
 digraph simbench_package_deps {
     rankdir=TB;
     fontname="Microsoft YaHei";
     fontsize=11;
     labelloc="t";
-    label="simbench 包级依赖（AST 实测，HEAD cbd2322）\n实线=模块级 import　虚线=函数体内延迟 import　箭头方向=依赖方向（A→B 读作 A 依赖 B）";
+    label="simbench 包级依赖（AST 实测，HEAD 6bf4ff3）\n实线=模块级 import　虚线=函数体内延迟 import　箭头方向=依赖方向（A→B 读作 A 依赖 B）";
     compound=true;
     nodesep=0.35;
     ranksep=0.6;
@@ -29,35 +30,35 @@ digraph simbench_package_deps {
     edge [fontname="Microsoft YaHei", fontsize=9, color="#555555"];
 
     // ============ 入口层 ============
-    main [label="__main__.py\nCLI 入口 · 485 行\n（对 gui/master/net/project\n全部延迟 import）",
+    main [label="__main__.py\nCLI 入口 · 492 行\n─────────\n模块级静态取 backend 门面、\ncsv_io_entry、project.model/validate；\ngui / master / net 延迟 import",
           fillcolor="#E8EAF6", color="#3949AB"];
 
     // ============ 界面层 ============
-    gui [label="gui/\n25 文件 · 4971 行\nPySide6\n─────────\n对 backend 的引用数 = 0（G5）",
+    gui [label="gui/\n27 文件 · 5926 行\nPySide6 · 界面 + 核对页 + 网络页\n─────────\n对 backend 的引用数 = 0（G5）",
          fillcolor="#FFE0B2", color="#E07B00", penwidth=2.0];
 
     // ============ 引擎层 ============
-    engine [label="engine/\n12 文件 · 1775 行\nSession 门面 + EngineRunner\n─────────\n只经门面取 backend（G4）\n不碰 Qt（G2）",
+    engine [label="engine/\n12 文件 · 1784 行\nSession 门面 + EngineRunner\n─────────\n只经门面取 backend（G4）\n不碰 Qt（G2）",
             fillcolor="#BBDEFB", color="#2E6DA4", penwidth=2.0];
 
     // ============ 协议层 ============
-    backend [label="backend/\n11 文件 · 2362 行\nBackendBase + 六种传输\n─────────\npymodbus/pyserial/snap7\n只许住在这里（G1）",
+    backend [label="backend/\n12 文件 · 2829 行\nBackendBase + Modbus 五帧\n+ S7 + MQTT 客户端\n─────────\npymodbus/pyserial/snap7/paho\n只许住在这里与 master/（G1）",
              fillcolor="#CFD8DC", color="#5B7FA6", penwidth=2.0];
-    master [label="master/\n4 文件 · 382 行\n主站核对模式 · 只读\n─────────\nG1 为它单开了一个豁免\n（要用 pymodbus 的客户端）",
+    master [label="master/\n5 文件 · 514 行\n主站核对模式 · 只读\n（Modbus 扫描 / MQTT / 报告）\n─────────\n静态复用 backend 的 MqttSession",
             fillcolor="#CFD8DC", color="#5B7FA6"];
 
     // ============ 纯核层 ============
     codec [label="codec/\n4 文件 · 623 行\n纯换算：值↔寄存器 / 波形",
            fillcolor="#C8E6C9", color="#4F7942"];
-    project [label="project/\n9 文件 · 2760 行\n领域模型 + 三种文件格式 + 校验\n─────────\n实测不 import 任何内部包\n也不碰 Qt / pymodbus",
+    project [label="project/\n10 文件 · 3033 行\n领域模型 + 三种文件格式 + 校验\n+ MQTT topic 模板\n─────────\n实测不 import 任何内部包\n也不碰 Qt / 协议库",
              fillcolor="#A5D6A7", color="#2E7D32", penwidth=2.5];
 
     // ============ 碰系统状态的那一层 ============
-    net [label="net/\n12 文件 · 2180 行\n读网卡 · 算差异 · 增删 IP 与虚拟网卡\n─────────\nsubprocess 只许住在这里（G3）\n五个纯模块不许拖进系统层（G6）\n不碰 Qt、不碰 pymodbus",
+    net [label="net/\n12 文件 · 2680 行\n读网卡 · 算差异 · 增删 IP 与虚拟网卡\n─────────\nsubprocess 只许住在这里（G3）\n五个纯模块不许拖进系统层（G6）\n不碰 Qt、不碰协议库",
          fillcolor="#FFCDD2", color="#B3261E", penwidth=2.5];
 
     // ============ 根下横切 ============
-    crosscut [label="根下横切 · 8 文件 · 963 行\nevents（engine↔GUI 的事件契约）\nswallow（吞异常唯一出口）\nsettings · diagnostics\ncsv_io_entry · __about__",
+    crosscut [label="根下横切 · 8 文件 · 1005 行\nevents（engine↔GUI 的事件契约）\nswallow（吞异常唯一出口）\nsettings · diagnostics · csv_io_entry\n__about__（版本号单源）· __init__",
               fillcolor="#E8EAF6", color="#3949AB"];
 
     // ================= 实测的边 =================
@@ -66,26 +67,28 @@ digraph simbench_package_deps {
     gui -> project  [label="模型 · 校验 · 导入导出"];
     gui -> master   [label="核对页直接调\n（自己的后台线程）", color="#C62828"];
     gui -> net      [label="网络页直接调 startup\n同步跑在 GUI 线程上", color="#C62828"];
-    gui -> crosscut [label="订阅 events\n读 settings · 挂 diagnostics"];
+    gui -> crosscut [label="订阅 events · 读 settings\n挂 diagnostics · 取 __about__"];
 
     // engine -> 五处
     engine -> backend  [label="只经门面 __init__\n(G4)", penwidth=1.8];
     engine -> codec    [label="写值编码 / 渲染解码"];
     engine -> project  [label="装载 · 校验"];
-    engine -> crosscut [label="swallow"];
+    engine -> crosscut [label="swallow · events"];
     engine -> net      [label="endpoints.for_channel\n延迟 import", style=dashed, color="#C62828"];
 
     // backend -> 三处
     backend -> codec    [label="tick 里算波形 · 钳位 · 编码"];
-    backend -> project  [label="模型 + channel_transport()"];
+    backend -> project  [label="模型 + channel_transport()\nMQTT topic 模板"];
     backend -> crosscut [label="产出 PacketEvent\nChannelState · LogLine"];
 
-    // master -> 两处
+    // master -> 三处
     master -> project [label="点表当读取清单"];
     master -> codec   [label="解码后与初值比对\n延迟 import", style=dashed];
+    master -> backend [label="复用 MqttSession\n（模块级静态 import）", color="#C62828"];
 
-    // net -> 一处
-    net -> project [label="从点表推设备 IP"];
+    // net -> 两处
+    net -> project  [label="从点表推设备 IP"];
+    net -> crosscut [label="csv_io_entry\n延迟 import", style=dashed];
 
     // codec -> 一处
     codec -> project [label="只依赖 Point 的形状"];
@@ -93,22 +96,23 @@ digraph simbench_package_deps {
     // 根下横切 -> 一处
     crosscut -> project [label="csv_io_entry 复用\nformats / model / validate"];
 
-    // __main__ 全部延迟 import（CLI 冷启动不被 Qt 与协议库拖慢）
+    // __main__：协议/点表/横切是静态，界面与系统层延迟（冷启动不被 Qt 拖慢）
+    main -> backend  [label="make_backend / BackendBase", color="#C62828"];
+    main -> project  [label="channel_transport / validate"];
+    main -> crosscut [label="load_point_table\n__about__.__version__"];
     main -> gui      [style=dashed, label="只有 --gui 时才加载"];
     main -> master   [style=dashed, label="--scan / --verify"];
     main -> net      [style=dashed, label="net 子命令"];
-    main -> project  [style=dashed];
-    main -> crosscut [style=dashed];
 
     // ================= 图例 =================
     subgraph cluster_legend {
-        label="分层守卫（tests/test_architecture.py，2026-10-16 实测 24 条全绿）";
+        label="分层守卫（tests/test_architecture.py，2026-10-21 实测 24 条全绿）";
         fontname="Microsoft YaHei"; fontsize=10;
         style="dashed"; color="#888888";
         node [shape=plaintext, fillcolor="#FFFFFF", style="", fontname="Consolas", fontsize=9];
         legend [label=<
           <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2" ALIGN="LEFT">
-            <TR><TD ALIGN="LEFT"><B>G1</B> pymodbus / serial / snap7 只许出现在 backend/ 与 master/</TD></TR>
+            <TR><TD ALIGN="LEFT"><B>G1</B> pymodbus / serial / snap7 / paho 只许出现在 backend/ 与 master/</TD></TR>
             <TR><TD ALIGN="LEFT"><B>G2</B> PySide6 / PyQt5 只许出现在 gui/</TD></TR>
             <TR><TD ALIGN="LEFT"><B>G3</B> subprocess 只许出现在 net/</TD></TR>
             <TR><TD ALIGN="LEFT"><B>G4</B> engine/ 只许经 backend/__init__.py 门面取后端，不许摸实现文件</TD></TR>
