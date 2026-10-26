@@ -214,6 +214,30 @@ def test_anomalies_are_coloured_announced_and_counted(rig, qapp):
     assert "已恢复 2 项" in window.log_view.toPlainText()
 
 
+def test_offline_points_collapse_into_one_alert(rig, qapp):
+    """设备离线时按通道合并成一条告警；表格里每个点仍标「设备离线」。"""
+    from simbench.master.scan import VerifyRow
+    window, _table, _backend = rig
+    panel = window.verify_panel
+    offline = "设备在线状态为离线（status topic）"
+    rows = [
+        VerifyRow("tcp-1", "D1", 11, "温度", "hr", 0, "uint16", "25", "-",
+                  "error", offline),
+        VerifyRow("tcp-1", "D1", 11, "湿度", "hr", 1, "uint16", "60", "-",
+                  "error", offline),
+        VerifyRow("tcp-1", "D2", 12, "别家", "hr", 0, "uint16", "7", "9",
+                  "mismatch", "期望 [7]，读到 [9]"),
+    ]
+    panel._show_rows(rows)
+    qapp.processEvents()
+    log = window.log_view.toPlainText()
+    assert log.count("[alert]") == 2, log
+    assert "MQTT 设备离线（2 个点暂时无法核对）" in log
+    assert panel.model.item(0, 5).text() == "设备离线"
+    assert panel.model.item(1, 5).text() == "设备离线"
+    assert panel.model.item(2, 5).text() == "对不上"
+
+
 def test_the_target_combo_lists_only_modbus_channels(rig, qapp):
     from simbench.project.model import Project, S7Channel, TcpChannel
     window, _table, _backend = rig

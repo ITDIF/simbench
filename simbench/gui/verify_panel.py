@@ -40,6 +40,8 @@ BUTTON_WIDTHS = {"扫描 unit": 96, "逐点核对": 96, "开始监视": 96, "停
                  "导出报告": 88}
 _STATUS_WIDTH = 320
 _MONITOR_SECONDS = 5
+# 设备明确离线时 `MqttMasterLink.read` 的 detail；告警按通道合并，不按点刷屏。
+_OFFLINE_MARK = "设备在线状态为离线"
 
 
 def master_channel(project, name: str | None = None):
@@ -174,6 +176,13 @@ class VerifyPanel(QtWidgets.QWidget):
         """跑着的时候按钮置灰（**不隐藏**）：几何一个像素都不动。"""
         self._busy = busy
         self._sync_buttons()
+
+    def rebind(self, session) -> None:
+        """切标签：停监视、换会话、清结果与通道列表。监视不能跨工程继续——
+        它的结论会写进另一份工程的界面，比"停下来"更糟。"""
+        self.stop_monitor()
+        self.session = session
+        self.reset()
 
     def refresh_targets(self, project=None) -> None:
         """把下拉框刷成当前工程里的 Modbus 通道；S7 主站还没做，不列。"""
@@ -416,9 +425,12 @@ class VerifyPanel(QtWidgets.QWidget):
         self.model.removeRows(0, self.model.rowCount())
         colors = theme.status_colors()
         for row in rows:
+            offline = _OFFLINE_MARK in row.detail
+            label = ("设备离线" if offline
+                     else report.STATUS_LABELS.get(row.status, row.status))
             items = [QtGui.QStandardItem(text) for text in (
                 row.name, row.area, str(row.address), row.expected, row.actual,
-                report.STATUS_LABELS.get(row.status, row.status), row.detail)]
+                label, row.detail)]
             colour = (colors.get("starting") if row.status == "mismatch"
                       else colors.get("error") if row.status in ("no_unit", "error")
                       else None)
@@ -450,15 +462,24 @@ class VerifyPanel(QtWidgets.QWidget):
         return (row.channel, row.unit_id, row.area, row.address, row.name)
 
     def _announce(self, new, recovered) -> None:
-        """只报新增/恢复：持续监视下同一项一直坏不重复刷屏。"""
-        for row in new[:5]:
+        """只报新增/恢复；设备离线按通道合并成一条，不按点刷屏。"""
+        offline = [row for row in new if _OFFLINE_MARK in row.detail]
+        rest = [row for row in new if _OFFLINE_MARK not in row.detail]
+        by_channel: dict[str, list] = {}
+        for row in offline:
+            by_channel.setdefault(row.channel, []).append(row)
+        for channel, rows in sorted(by_channel.items()):
+            self.notice.emit(
+                f"[alert] {channel}: MQTT 设备离线"
+                f"（{len(rows)} 个点暂时无法核对）")
+        for row in rest[:5]:
             detail = f"；{row.detail}" if row.detail else ""
             self.notice.emit(
                 f"[alert] {row.channel}/{row.device}/{row.name}："
                 f"{report.STATUS_LABELS.get(row.status, row.status)}"
                 f"（期望 {row.expected}，读到 {row.actual}）{detail}")
-        if len(new) > 5:
-            self.notice.emit(f"[alert] 另有 {len(new) - 5} 项新增异常")
+        if len(rest) > 5:
+            self.notice.emit(f"[alert] 另有 {len(rest) - 5} 项新增异常")
         if recovered:
             self.notice.emit(f"[info] 已恢复 {len(recovered)} 项异常")
 
